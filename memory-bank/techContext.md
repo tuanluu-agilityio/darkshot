@@ -66,3 +66,5 @@ Dùng bản mới nhất tại thời điểm thêm. Phiên bản thực tế n�
 - M0 (2026-11-21): `cargo test -p darkshot-core` đạt 328/328, `fmt` và `clippy -D warnings` sạch. Một test (`history::tests::entry_paths`) từng giả định dấu `\` là dấu phân tách đường dẫn; đã sửa bằng `Path::join`.
 - `cargo build --workspace` HỎNG trên macOS vì crate `windows` không biên dịch; trên Mac dùng `-p <crate>` cho đến khi M2 xong.
 - Nạp cargo vào shell: `. "$HOME/.cargo/env"`.
+- Kiểm nhanh lớp Windows từ Mac: `./scripts/check-windows-cross.sh` (clippy `-D warnings` gồm test cho đích `x86_64-pc-windows-msvc`, dùng trình biên dịch C giả trong thư mục tạm). Chỉ biên dịch và clippy, KHÔNG liên kết, KHÔNG chạy test; không thay cổng thật là job `windows` của CI (quyết định 130). Chạy trước khi đẩy nhánh task chạm `crates/darkshot-windows` (~1 phút).
+

@@ -6,7 +6,7 @@ Cập nhật: 2026-11-21
 
 - Nhánh tích hợp **`feat/macos-port`** (từ `main`). Thiết kế `docs/superpowers/specs/2026-11-21-macos-port-design.md`, kế hoạch `docs/superpowers/plans/2026-11-21-macos-port.md`, quyết định 127–129. Task từ số 100.
 - M0, M1 xong; chủ dự án đã duyệt thiết kế (2026-11-21). Chủ dự án KHÔNG có máy Windows: cổng Windows là CI `windows-latest` (`.github/workflows/check.yml`), cần đẩy nhánh lên `origin` mới chạy.
-- Task 100 (M2a) và Task 101 (M2b: chuyển logic thuần sang core) xong, CI Windows và macOS xanh, đã gộp `feat/macos-port`. Kế tiếp: Task 102 (M2c) chia 102a–102e (quyết định 132, 133), làm tuần tự: 102a overlay → 102b settings → 102c hotkey → 102d tray/app → 102e windows_main.
+- Task 100 (M2a) và Task 101 (M2b: chuyển logic thuần sang core) xong, CI Windows và macOS xanh, đã gộp `feat/macos-port`. Task 102 (M2c) chia 102a–102e (quyết định 132, 133), làm tuần tự. **102a (overlay) xong, đã gộp**; kế tiếp 102b settings → 102c hotkey → 102d tray/app → 102e windows_main. Trước khi đẩy nhánh task nhớ chạy `scripts/check-windows-cross.sh`.
 - Đầu vào cho Task 102 (hàm thuần còn ở lớp Windows, builder Task 101 ghi nhận, chưa chuyển): `hotkeys_taken_notice`, `step_error_notice`, `pin_origin`, `pin_failure_notice`, `hotkey_defers`, `timer_should_wait`, `without_frame`, `custom_colors_need_save`, `config_ok_at_start`, `picked_image`, `remaining` (trong `windows_main.rs`), cộng bố cục thuần của `overlay.rs`, `history_layout.rs`, `steps_*`. Cần soát từng hàm xem Mac có dùng không trước khi chuyển.
 - Bài học: lỗi chỉ lộ ở CI Windows (`unused_imports` do import chỉ còn dùng trong test); tự soát `use` sau mỗi lần chuyển, vì `cargo clippy` trên Mac không biên dịch lớp Windows.
 - Đợt 13 Chụp cuộn bên dưới vẫn nguyên, chưa làm.
