@@ -1,7 +1,7 @@
 //! Cửa sổ Tùy chọn bốn tab (Win32 thuần, Common Controls v6 qua manifest).
 //!
 //! Phần logic biểu mẫu (`apply_form`, `key_route`, `tab_of`, `initial_tab`) nằm ở `darkshot_core::settings_form`;
-//! `capture_hotkey` là hàm thuần có kiểm thử; phần cửa sổ mỏng.
+//! Bắt phím (`capture_hotkey`, `CaptureState`) nằm ở `darkshot_core::hotkey_keys`; phần cửa sổ mỏng.
 //! `show` chạy vòng lặp thông điệp riêng (hộp thoại kiểu modal) và bảo đảm khi trả về:
 //! OK thì phím tắt mới (nếu đổi) đã được đăng ký cho `parent`; Hủy thì phím tắt cũ đã đăng ký lại.
 //! Việc ghi `Config` ra đĩa và bật/tắt khởi động cùng Windows do bên gọi (Task 11) làm.
@@ -11,9 +11,10 @@ use crate::lang;
 use crate::theme::{self, ButtonKind};
 use crate::winutil::scale;
 use darkshot_core::config::{
-    clamp_jpeg_quality, Config, Expiry, Hotkey, HotkeyRole, Hotkeys, UploadFormat,
-    JPEG_QUALITY_MAX, JPEG_QUALITY_MIN,
+    clamp_jpeg_quality, Config, Expiry, HotkeyRole, Hotkeys, UploadFormat, JPEG_QUALITY_MAX,
+    JPEG_QUALITY_MIN,
 };
+use darkshot_core::hotkey_keys::{Capture, CaptureState, KeyEv};
 use darkshot_core::i18n::{self, expiry_label, t, Lang, Msg};
 use darkshot_core::settings_form::{
     apply_form, initial_tab, key_route, quality_enabled, tab_of, tabs_fit, Field, Form, FormError,
@@ -81,118 +82,6 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 /// Lý do mở cửa sổ Tùy chọn (định nghĩa ở core, dùng chung mọi nền tảng).
 pub use darkshot_core::app_flow::OpenReason;
-
-/// Kết quả xử lý một lần nhả phím khi đang chọn phím tắt mới.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Capture {
-    /// Phím bổ trợ đứng một mình: chờ tiếp.
-    Ignore,
-    /// Phím thường cần kèm Ctrl, Alt hoặc Win (Shift một mình không đủ).
-    NeedModifier,
-    /// Không nuốt phím: để hệ thống xử lý như thường (Alt+F4 đóng cửa sổ).
-    PassThrough,
-    Got(Hotkey),
-}
-
-/// Sự kiện phím khi đang chọn phím tắt, kèm trạng thái phím bổ trợ lúc xảy ra.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum KeyEv {
-    Down {
-        vk: u32,
-        ctrl: bool,
-        alt: bool,
-        shift: bool,
-        win: bool,
-    },
-    Up {
-        vk: u32,
-        ctrl: bool,
-        alt: bool,
-        shift: bool,
-        win: bool,
-    },
-}
-
-/// Máy trạng thái của chế độ bắt phím: chốt tổ hợp ở KEYDOWN (đúng phím bổ trợ lúc bấm);
-/// KEYUP không có KEYDOWN tương ứng bị bỏ, trừ PrintScreen (không sinh KEYDOWN).
-#[derive(Debug, Default)]
-pub struct CaptureState {
-    downs: Vec<u32>,
-}
-
-impl CaptureState {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn feed(&mut self, ev: KeyEv) -> Capture {
-        match ev {
-            KeyEv::Down {
-                vk,
-                ctrl,
-                alt,
-                shift,
-                win,
-            } => {
-                let out = capture_hotkey(vk, ctrl, alt, shift, win);
-                if matches!(out, Capture::Got(_) | Capture::NeedModifier)
-                    && !self.downs.contains(&vk)
-                {
-                    self.downs.push(vk);
-                }
-                out
-            }
-            KeyEv::Up {
-                vk,
-                ctrl,
-                alt,
-                shift,
-                win,
-            } => {
-                if let Some(i) = self.downs.iter().position(|k| *k == vk) {
-                    self.downs.swap_remove(i);
-                    Capture::Ignore
-                } else if vk == 0x2C {
-                    // PrintScreen không sinh KEYDOWN: nhận ở KEYUP.
-                    capture_hotkey(vk, ctrl, alt, shift, win)
-                } else {
-                    Capture::Ignore
-                }
-            }
-        }
-    }
-}
-
-/// Phím cho phép đứng một mình làm phím tắt: PrintScreen, Pause, ScrollLock, F1..F24.
-fn allowed_bare(vk: u32) -> bool {
-    matches!(vk, 0x2C | 0x13 | 0x91 | 0x70..=0x87)
-}
-
-fn is_modifier_vk(vk: u32) -> bool {
-    matches!(vk, 0x10 | 0x11 | 0x12 | 0x5B | 0x5C | 0xA0..=0xA5)
-}
-
-pub fn capture_hotkey(vk: u32, ctrl: bool, alt: bool, shift: bool, win: bool) -> Capture {
-    if is_modifier_vk(vk) {
-        return Capture::Ignore;
-    }
-    // Alt+F4 luôn là lệnh đóng cửa sổ của hệ thống.
-    if vk == 0x73 && alt {
-        return Capture::PassThrough;
-    }
-    // Shift một mình không đủ: sẽ chặn việc gõ chữ hoa.
-    if ctrl || alt || win || allowed_bare(vk) {
-        Capture::Got(Hotkey {
-            ctrl,
-            alt,
-            shift,
-            win,
-            vk,
-        })
-    } else {
-        Capture::NeedModifier
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Cửa sổ
@@ -3322,169 +3211,6 @@ mod tests {
         let mut one_less = l;
         one_less.client_w -= 1;
         assert!(!tabs_fit(&wide, one_less.tab_strip_w()));
-    }
-
-    #[test]
-    fn capture_hotkey_rules() {
-        // PrintScreen đứng một mình được phép; phím chữ phải kèm phím bổ trợ.
-        assert_eq!(
-            capture_hotkey(0x2C, false, false, false, false),
-            Capture::Got(Hotkey::default())
-        );
-        assert_eq!(
-            capture_hotkey(0x53, false, false, false, false),
-            Capture::NeedModifier
-        );
-        assert_eq!(
-            capture_hotkey(0x53, true, false, true, false),
-            Capture::Got(Hotkey {
-                ctrl: true,
-                alt: false,
-                shift: true,
-                win: false,
-                vk: 0x53
-            })
-        );
-        // Chỉ phím bổ trợ: bỏ qua.
-        assert_eq!(
-            capture_hotkey(0x11, true, false, false, false),
-            Capture::Ignore
-        );
-        assert_eq!(
-            capture_hotkey(0x5B, false, false, false, true),
-            Capture::Ignore
-        );
-        // Shift + chữ không đủ.
-        assert_eq!(
-            capture_hotkey(0x41, false, false, true, false),
-            Capture::NeedModifier
-        );
-        // F-key đứng một mình được phép.
-        assert!(matches!(
-            capture_hotkey(0x71, false, false, false, false),
-            Capture::Got(_)
-        ));
-    }
-
-    fn dn(vk: u32, ctrl: bool, alt: bool, shift: bool, win: bool) -> KeyEv {
-        KeyEv::Down {
-            vk,
-            ctrl,
-            alt,
-            shift,
-            win,
-        }
-    }
-    fn up(vk: u32, ctrl: bool, alt: bool, shift: bool, win: bool) -> KeyEv {
-        KeyEv::Up {
-            vk,
-            ctrl,
-            alt,
-            shift,
-            win,
-        }
-    }
-    fn hk(ctrl: bool, alt: bool, shift: bool, win: bool, vk: u32) -> Capture {
-        Capture::Got(Hotkey {
-            ctrl,
-            alt,
-            shift,
-            win,
-            vk,
-        })
-    }
-
-    #[test]
-    fn ctrl_released_before_main_key_still_gives_full_combo() {
-        let mut st = CaptureState::new();
-        // Nhấn Ctrl, Shift (bổ trợ: bỏ qua), rồi S với cả hai đang giữ.
-        assert_eq!(
-            st.feed(dn(0x11, true, false, false, false)),
-            Capture::Ignore
-        );
-        assert_eq!(st.feed(dn(0x10, true, false, true, false)), Capture::Ignore);
-        assert_eq!(
-            st.feed(dn(0x53, true, false, true, false)),
-            hk(true, false, true, false, 0x53)
-        );
-        // Ctrl nhả trước S: KEYUP không đổi kết quả.
-        assert_eq!(
-            st.feed(up(0x11, false, false, true, false)),
-            Capture::Ignore
-        );
-        assert_eq!(
-            st.feed(up(0x53, false, false, true, false)),
-            Capture::Ignore
-        );
-    }
-
-    #[test]
-    fn orphan_keyup_is_ignored() {
-        let mut st = CaptureState::new();
-        assert_eq!(
-            st.feed(up(0x0D, false, false, false, false)),
-            Capture::Ignore
-        );
-        assert_eq!(
-            st.feed(up(0x20, false, false, false, false)),
-            Capture::Ignore
-        );
-    }
-
-    #[test]
-    fn printscreen_keyup_only_is_accepted() {
-        let mut st = CaptureState::new();
-        assert_eq!(
-            st.feed(up(0x2C, false, false, false, false)),
-            Capture::Got(Hotkey::default())
-        );
-    }
-
-    #[test]
-    fn shift_plus_letter_rejected_but_other_modifiers_accepted() {
-        let mut st = CaptureState::new();
-        assert_eq!(
-            st.feed(dn(0x41, false, false, true, false)),
-            Capture::NeedModifier
-        );
-        assert_eq!(
-            st.feed(dn(0x41, true, false, false, false)),
-            hk(true, false, false, false, 0x41)
-        );
-        assert_eq!(
-            st.feed(dn(0x41, false, true, false, false)),
-            hk(false, true, false, false, 0x41)
-        );
-        assert_eq!(
-            st.feed(dn(0x41, false, false, false, true)),
-            hk(false, false, false, true, 0x41)
-        );
-    }
-
-    #[test]
-    fn function_keys_alone_or_with_shift_accepted() {
-        let mut st = CaptureState::new();
-        assert_eq!(
-            st.feed(dn(0x74, false, false, true, false)),
-            hk(false, false, true, false, 0x74)
-        );
-        assert_eq!(
-            st.feed(dn(0x74, false, false, false, false)),
-            hk(false, false, false, false, 0x74)
-        );
-    }
-
-    #[test]
-    fn alt_f4_is_never_a_combo() {
-        let mut st = CaptureState::new();
-        assert_eq!(
-            st.feed(dn(0x73, false, true, false, false)),
-            Capture::PassThrough
-        );
-        assert_eq!(
-            capture_hotkey(0x73, true, true, false, false),
-            Capture::PassThrough
-        );
     }
 
     /// Cửa sổ cha ẩn riêng của một kiểm thử cửa sổ thật.
