@@ -1,6 +1,12 @@
 # Bối cảnh hiện tại
 
-Cập nhật: 2026-11-18
+Cập nhật: 2026-11-21
+
+## Nhánh macOS (đang làm, song song)
+
+- Nhánh tích hợp **`feat/macos-port`** (từ `main`). Thiết kế `docs/superpowers/specs/2026-11-21-macos-port-design.md`, kế hoạch `docs/superpowers/plans/2026-11-21-macos-port.md`, quyết định 127–129. Task từ số 100.
+- M0 xong (Rust trên Mac, core 328/328 test). M1 (thiết kế, kế hoạch) xong, **chờ chủ dự án duyệt** trước M2.
+- Đợt 13 Chụp cuộn bên dưới vẫn nguyên, chưa làm.
 
 ## Đang ở đâu
 
