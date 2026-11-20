@@ -8,7 +8,12 @@ Thiết kế: `docs/superpowers/specs/2026-11-21-macos-port-design.md`. Nhánh t
 | M1 | (phiên chính) | Thiết kế, kế hoạch, quyết định 127–129 | xong | thấp |
 | M2a | 100 | Workspace dùng `cfg` theo hệ điều hành; crate `darkshot-macos` khung; `scripts/check.sh`; `check.yml` | phiên chính (làm trực tiếp) | trung bình |
 | M2b | 101 | Chuyển logic thuần từ `main.rs`, `capture.rs`, `paths.rs` sang core (giữ test) | builder / sonnet; rà soát specialist | trung bình (chạm Windows) |
-| M2c | 102 | Chuyển logic thuần từ `overlay.rs`, `history_layout.rs`, `steps_*` sang core | builder / sonnet | trung bình |
+| M2c-1 | 102a | `overlay.rs`: bố cục thanh công cụ, bảng chọn màu, nhập số (module mới `overlay_layout`, `color_picker`) | builder / sonnet; rà soát reviewer / opus | trung bình (97 test, chạm Windows) |
+| M2c-2 | 102b | `settings.rs`: biểu mẫu Tùy chọn (`settings_form`) | builder / sonnet | trung bình |
+| M2c-3 | 102c | `hotkey.rs` và bắt phím của `settings.rs`: tên phím, luật phím hợp lệ (`hotkey_keys`) | builder / sonnet | thấp |
+| M2c-4 | 102d | `tray.rs` và `app.rs`: bố cục menu, hàng đợi thông báo, sổ tải lên (`tray_logic`, `app_state`) | builder / sonnet | trung bình |
+| M2c-5 | 102e | Hàm thuần còn lại của `windows_main.rs` (`notices`/`app_flow`) | builder / sonnet | thấp |
+| (hoãn) | – | `history_layout`, `history_service`, `snap`, `pin`, `ocr*`, `steps_*`, `annotate_draw`, `theme`: chuyển đúng lúc làm M5–M7 (quyết định 133) | – | – |
 | M3a | 103 | `coords.rs`, `Dirs`, đường dẫn dữ liệu, `SecretStore` bằng Keychain, `Clipboard`, `Notifier` | specialist / opus (bảo mật khóa) | cao |
 | M3b | 104 | Thanh menu, ScreenCaptureKit, kiểm quyền Screen Recording | specialist / opus | cao |
 | M3c | 105 | Lớp phủ chọn vùng một màn hình Retina, lưu PNG, chép clipboard | specialist / opus | cao |
@@ -17,7 +22,7 @@ Thiết kế: `docs/superpowers/specs/2026-11-21-macos-port-design.md`. Nhánh t
 | M4c | 108 | Đóng gói `.app`, ký ad-hoc, `scripts/demo-macos.sh`, README, website, memory bank | scaffolder / sonnet | thấp |
 | M5–M7 | 109+ | Đánh dấu, Ghim, Lịch sử, bắt cửa sổ, OCR, Chụp từng bước, tự khởi động, kiểm tra bản mới: tách từng task sau khi M-A được duyệt | — | — |
 
-Cổng mỗi task: `scripts/check.sh` (Mac) phải in `ALL CHECKS PASSED`; task chạm lớp Windows (100, 101, 102) phải qua job `windows` của `.github/workflows/check.yml` (chạy `scripts/check.ps1` trên runner `windows-latest`) trước khi gộp vào `main`, vì chủ dự án không có máy Windows (2026-11-21). Không gộp `main` khi job đó chưa xanh; cần đẩy nhánh lên `origin` để chạy.
+Cổng mỗi task: `scripts/check.sh` (Mac) phải in `ALL CHECKS PASSED`; task chạm lớp Windows (100, 101, 102a–102e) phải qua job `windows` của `.github/workflows/check.yml` (chạy `scripts/check.ps1` trên runner `windows-latest`) trước khi gộp vào `main`, vì chủ dự án không có máy Windows (2026-11-21). Không gộp `main` khi job đó chưa xanh; cần đẩy nhánh lên `origin` để chạy.
 
 ## Global Constraints
 
