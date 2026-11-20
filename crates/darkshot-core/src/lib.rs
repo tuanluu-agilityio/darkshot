@@ -19,6 +19,7 @@ pub mod ocr_text;
 pub mod overlay_layout;
 pub mod overlay_stroke;
 pub mod pin;
+pub mod settings_form;
 pub mod sigv4;
 pub mod snap;
 pub mod steps;

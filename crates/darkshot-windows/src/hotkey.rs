@@ -2,6 +2,7 @@
 
 use darkshot_core::config::{Hotkey, HotkeyRole, Hotkeys};
 use darkshot_core::i18n::HelpKeys;
+pub use darkshot_core::settings_form::describe;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT,
@@ -89,86 +90,9 @@ pub fn register(hwnd: HWND, role: HotkeyRole, hk: &Hotkey) -> bool {
     unsafe { RegisterHotKey(Some(hwnd), id_of(role), mods, hk.vk).is_ok() }
 }
 
-fn key_name(vk: u32) -> String {
-    match vk {
-        0x2C => "PrintScreen".into(),
-        0x08 => "Backspace".into(),
-        0x09 => "Tab".into(),
-        0x0D => "Enter".into(),
-        0x13 => "Pause".into(),
-        0x1B => "Esc".into(),
-        0x20 => "Space".into(),
-        0x21 => "PageUp".into(),
-        0x22 => "PageDown".into(),
-        0x23 => "End".into(),
-        0x24 => "Home".into(),
-        0x25 => "Left".into(),
-        0x26 => "Up".into(),
-        0x27 => "Right".into(),
-        0x28 => "Down".into(),
-        0x2D => "Insert".into(),
-        0x2E => "Delete".into(),
-        0x30..=0x39 | 0x41..=0x5A => char::from(vk as u8).to_string(),
-        0x70..=0x87 => format!("F{}", vk - 0x70 + 1),
-        _ => format!("0x{vk:02X}"),
-    }
-}
-
-/// "PrintScreen", "Ctrl+Shift+S"...
-pub fn describe(hk: &Hotkey) -> String {
-    let mut s = String::new();
-    for (on, name) in [
-        (hk.ctrl, "Ctrl"),
-        (hk.alt, "Alt"),
-        (hk.shift, "Shift"),
-        (hk.win, "Win"),
-    ] {
-        if on {
-            s.push_str(name);
-            s.push('+');
-        }
-    }
-    s.push_str(&key_name(hk.vk));
-    s
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn describe_hotkey() {
-        assert_eq!(
-            describe(&Hotkey {
-                ctrl: false,
-                alt: false,
-                shift: false,
-                win: false,
-                vk: 0x2C
-            }),
-            "PrintScreen"
-        );
-        assert_eq!(
-            describe(&Hotkey {
-                ctrl: true,
-                alt: false,
-                shift: true,
-                win: false,
-                vk: 0x53
-            }),
-            "Ctrl+Shift+S"
-        );
-        assert_eq!(
-            describe(&Hotkey {
-                ctrl: false,
-                alt: true,
-                shift: false,
-                win: false,
-                vk: 0x71
-            }),
-            "Alt+F2"
-        );
-    }
 
     #[test]
     fn ids_round_trip() {
