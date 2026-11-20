@@ -42,7 +42,7 @@ use darkshot_core::capture_gate::{
     GateEvent,
 };
 use darkshot_core::color::CustomColors;
-use darkshot_core::config::{Config, HotkeyRole, Hotkeys, UploadFormat, JPEG_QUALITY_DEFAULT};
+use darkshot_core::config::{HotkeyRole, Hotkeys, UploadFormat, JPEG_QUALITY_DEFAULT};
 use darkshot_core::geometry::{full_screen_rect, restore_selection, to_screen_coords, Point, Rect};
 use darkshot_core::i18n::{self, Lang, Msg};
 use darkshot_core::last_capture::{
@@ -1547,6 +1547,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use darkshot_core::config::Config;
 
     #[test]
     fn normal_mode_keeps_everything() {
