@@ -16,7 +16,8 @@ Thiết kế: `docs/superpowers/specs/2026-11-21-macos-port-design.md` mục 3 (
 
 | Từ | Sang core |
 |---|---|
-| `hotkey.rs`: `id_of`, `role_of`, `HelpKeys`/`help_keys`, `taken_combos`, `key_name`, `describe` | **module mới** `hotkey_keys.rs` |
+| `hotkey.rs`: `id_of`, `role_of`, `HelpKeys`/`help_keys`, `taken_combos` | **module mới** `hotkey_keys.rs` |
+| **Đã ở core từ Task 102b** (`settings_form.rs`, vì `apply_form` cần): `describe`, `key_name` và test `describe_hotkey` | **chuyển sang** `hotkey_keys.rs`; `settings_form.rs` dùng `use crate::hotkey_keys::describe;`; `hotkey.rs` (Windows) đổi `pub use darkshot_core::settings_form::describe;` thành `pub use darkshot_core::hotkey_keys::describe;`. `key_name` giữ riêng tư; test của nó đặt cùng module |
 | `settings.rs`: `Capture`, `KeyEv`, `CaptureState` (+ `impl`), `allowed_bare`, `is_modifier_vk`, `capture_hotkey` | `hotkey_keys.rs` |
 
 **Ở lại lớp Windows:** `register`/`unregister` (gọi `RegisterHotKey`), mọi thứ chạm `HWND`.
@@ -43,7 +44,7 @@ Giữ **nguyên chữ ký, tên, tên biến thể, thứ tự biến thể, gi�
 
 ## Kiểm thử (viết trước)
 
-`hotkey.rs` có 4 test và `settings.rs` có test của `capture_hotkey`/`CaptureState`: đi theo nguyên văn. Thêm bảng test cho `key_name` (PrintScreen, F1..F24, chữ, số, mã lạ `0x..`) và `capture_hotkey` (phím bổ trợ một mình bị bỏ qua, Alt+F4 đi qua, Shift một mình cần thêm phím bổ trợ, PrintScreen đứng một mình hợp lệ) nếu chưa có. Test dùng đường dẫn thì dựng bằng `Path::join`, không `\` cứng. TDD: nếu phép chuyển không tạo test đỏ thì gộp một commit `feat:` và ghi rõ trong báo cáo; test mới (nếu có) viết trước và thấy đỏ rồi mới viết mã.
+`hotkey.rs` còn 3 test (`ids_round_trip`, `help_keys_skip_disabled_rows`, `taken_combos_follow_row_order`; `describe_hotkey` đã ở core từ 102b và nay đổi module) và `settings.rs` có test của `capture_hotkey`/`CaptureState`: đi theo nguyên văn. Thêm một test trực tiếp cho `Tab::label` (từ 102b thành `pub`, chưa có test) vào `settings_form.rs`. Thêm bảng test cho `key_name` (PrintScreen, F1..F24, chữ, số, mã lạ `0x..`) và `capture_hotkey` (phím bổ trợ một mình bị bỏ qua, Alt+F4 đi qua, Shift một mình cần thêm phím bổ trợ, PrintScreen đứng một mình hợp lệ) nếu chưa có. Test dùng đường dẫn thì dựng bằng `Path::join`, không `\` cứng. TDD: nếu phép chuyển không tạo test đỏ thì gộp một commit `feat:` và ghi rõ trong báo cáo; test mới (nếu có) viết trước và thấy đỏ rồi mới viết mã.
 
 ## Cách kiểm chứng
 
