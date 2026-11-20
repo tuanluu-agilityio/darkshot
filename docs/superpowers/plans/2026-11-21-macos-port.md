@@ -6,7 +6,7 @@ Thiết kế: `docs/superpowers/specs/2026-11-21-macos-port-design.md`. Nhánh t
 |---|---|---|---|---|
 | M0 | (phiên chính) | Cài Rust, test core trên Mac | xong | thấp |
 | M1 | (phiên chính) | Thiết kế, kế hoạch, quyết định 127–129 | xong | thấp |
-| M2a | 100 | Workspace dùng `cfg` theo hệ điều hành; crate `darkshot-macos` khung; `scripts/check.sh` | scaffolder / sonnet | trung bình |
+| M2a | 100 | Workspace dùng `cfg` theo hệ điều hành; crate `darkshot-macos` khung; `scripts/check.sh`; `check.yml` | phiên chính (làm trực tiếp) | trung bình |
 | M2b | 101 | Chuyển logic thuần từ `main.rs`, `capture.rs`, `paths.rs` sang core (giữ test) | builder / sonnet; rà soát specialist | trung bình (chạm Windows) |
 | M2c | 102 | Chuyển logic thuần từ `overlay.rs`, `history_layout.rs`, `steps_*` sang core | builder / sonnet | trung bình |
 | M3a | 103 | `coords.rs`, `Dirs`, đường dẫn dữ liệu, `SecretStore` bằng Keychain, `Clipboard`, `Notifier` | specialist / opus (bảo mật khóa) | cao |
@@ -17,4 +17,4 @@ Thiết kế: `docs/superpowers/specs/2026-11-21-macos-port-design.md`. Nhánh t
 | M4c | 108 | Đóng gói `.app`, ký ad-hoc, `scripts/demo-macos.sh`, README, website, memory bank | scaffolder / sonnet | thấp |
 | M5–M7 | 109+ | Đánh dấu, Ghim, Lịch sử, bắt cửa sổ, OCR, Chụp từng bước, tự khởi động, kiểm tra bản mới: tách từng task sau khi M-A được duyệt | — | — |
 
-Cổng mỗi task: `scripts/check.sh` (Mac) phải in `ALL CHECKS PASSED`; task chạm lớp Windows (101, 102, 100) cần thêm `powershell -File scripts/check.ps1` trên máy Windows của chủ dự án trước khi gộp vào `main`.
+Cổng mỗi task: `scripts/check.sh` (Mac) phải in `ALL CHECKS PASSED`; task chạm lớp Windows (100, 101, 102) phải qua job `windows` của `.github/workflows/check.yml` (chạy `scripts/check.ps1` trên runner `windows-latest`) trước khi gộp vào `main`, vì chủ dự án không có máy Windows (2026-11-21). Không gộp `main` khi job đó chưa xanh; cần đẩy nhánh lên `origin` để chạy.

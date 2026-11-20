@@ -1,0 +1,10 @@
+[package]
+name = "darkshot-macos"
+version = "0.4.0"
+edition = "2021"
+publish = false
+
+# Tên khác `darkshot` để không đụng bản dựng của darkshot-windows trong cùng thư mục target.
+[[bin]]
+name = "darkshot-macos"
+path = "src/main.rs"

@@ -5,7 +5,8 @@ Cập nhật: 2026-11-21
 ## Nhánh macOS (đang làm, song song)
 
 - Nhánh tích hợp **`feat/macos-port`** (từ `main`). Thiết kế `docs/superpowers/specs/2026-11-21-macos-port-design.md`, kế hoạch `docs/superpowers/plans/2026-11-21-macos-port.md`, quyết định 127–129. Task từ số 100.
-- M0 xong (Rust trên Mac, core 328/328 test). M1 (thiết kế, kế hoạch) xong, **chờ chủ dự án duyệt** trước M2.
+- M0, M1 xong; chủ dự án đã duyệt thiết kế (2026-11-21). Chủ dự án KHÔNG có máy Windows: cổng Windows là CI `windows-latest` (`.github/workflows/check.yml`), cần đẩy nhánh lên `origin` mới chạy.
+- Task 100 (M2a: khung `cfg`, crate `darkshot-macos`, `check.sh`, `check.yml`) xong trên Mac, chưa xác nhận trên CI Windows. Kế tiếp: Task 101 (chuyển logic thuần sang core).
 - Đợt 13 Chụp cuộn bên dưới vẫn nguyên, chưa làm.
 
 ## Đang ở đâu

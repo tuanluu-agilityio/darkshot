@@ -1,0 +1,32 @@
+name: Check
+
+# Cổng kiểm tra trên máy ảo của GitHub: Windows chạy scripts/check.ps1 (bản chính thức),
+# macOS chạy scripts/check.sh. Không có bí mật nào được dùng; chỉ đọc mã (repo công khai).
+on:
+  push:
+    branches: ["feat/**", "task/**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: check.ps1
+        shell: pwsh
+        run: powershell -File scripts/check.ps1
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: check.sh
+        run: ./scripts/check.sh

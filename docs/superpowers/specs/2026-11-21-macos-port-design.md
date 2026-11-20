@@ -61,7 +61,7 @@ Thêm crate `darkshot-macos` chạy trên macOS 13 trở lên, Apple silicon (`a
 - Logic mới và logic chuyển sang core có test trước khi viết mã (TDD, như quy ước).
 - `scripts/check.sh` (mới) làm đúng việc `check.ps1`: `fmt --check`, `test --workspace`, `clippy -D warnings`, kiểm core không phụ thuộc crate `windows|native-tls|schannel|rustls-platform-verifier`, và kiểm không có chuỗi tiếng Việt viết cứng. Hai script phải giữ cùng danh sách kiểm; ghi chú chéo ở đầu mỗi file.
 - Phần Mac không giả lập chuột hoặc phím thật khi chủ dự án dùng máy (quyết định 126). Demo cách ly: `scripts/demo-macos.sh` với `DARKSHOT_PROFILE_DIR` riêng.
-- Máy Windows vẫn là nơi chạy `check.ps1` cho thay đổi chạm lớp Windows (nhiệm vụ M2). Nếu chưa có máy Windows, M2 chỉ gộp sau khi chủ dự án xác nhận Windows build và test.
+- Chủ dự án không có máy Windows (2026-11-21). Biên dịch chéo từ Mac không dùng được (`ring` cần header C của MSVC). Cổng cho thay đổi chạm lớp Windows là job `windows` của `.github/workflows/check.yml`, chạy `check.ps1` trên runner `windows-latest`; M2 chỉ gộp vào `main` khi job đó xanh.
 
 ## 7. Rủi ro
 
@@ -71,7 +71,7 @@ Thêm crate `darkshot-macos` chạy trên macOS 13 trở lên, Apple silicon (`a
 | ScreenCaptureKit cần quyền, chụp ngoài ý muốn | Kiểm quyền trước khi chụp, báo rõ khi thiếu |
 | Chuyển logic sang core làm lệch Windows | Giữ nguyên test, chạy `check.ps1` trước khi gộp, tách task nhỏ |
 | `objc2` đổi API nhanh | Ghim phiên bản chính xác trong `Cargo.toml` |
-| Không có máy Windows để xác nhận M2 | Chủ dự án chạy `check.ps1` trước khi gộp M2 vào `main` |
+| Không có máy Windows để xác nhận M2 | CI `windows-latest` chạy `check.ps1`; không gộp `main` khi chưa xanh |
 
 ## 8. Việc chủ dự án cần duyệt
 
