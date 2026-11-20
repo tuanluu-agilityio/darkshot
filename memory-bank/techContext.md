@@ -59,3 +59,10 @@ Dùng bản mới nhất tại thời điểm thêm. Phiên bản thực tế n�
 - Đợt 5 (Task 34–37): không thêm crate. Crate `windows` thêm feature `Win32_UI_Input_Ime` (Task 37: `ImmGetContext`, `ImmSetCompositionWindow`, `ImmSetCompositionFontW`, `ImmGetCompositionStringW`, `ImmNotifyIME` để đặt cửa sổ soạn cạnh con trỏ ô chữ và chốt chuỗi đang soạn). Vẽ đánh dấu dùng GDI+ (`Win32_Graphics_GdiPlus`, có từ trước); dán chữ dùng `Win32_System_DataExchange` có sẵn (`clipboard::paste_text`). Kiểm thử chạy tay lớp phủ đánh dấu: `cargo test -p darkshot-windows -- --ignored overlay_round_trip_without_gdi_leaks --test-threads=1`, chạy từng cái một.
 - Đợt 7 (Task 52–57): không thêm crate và không thêm feature Win32 nào; `Cargo.toml` không đổi (`FOLDERID_LocalAppData` đã có trong `Win32_UI_Shell`; giải mã PNG dùng crate `png` sẵn có). `getrandom` dùng cho mã mục lịch sử. Dữ liệu lịch sử ở `%LOCALAPPDATA%\darkshot\history\`. Biến môi trường `DARKSHOT_PROFILE_DIR` và cờ `--history` chỉ để chạy thử. Kiểm thử chạy tay mới: `cargo test -p darkshot-windows -- --ignored history_window --test-threads=1` (từng cái), và `make_demo_store` dựng dữ liệu demo (`DARKSHOT_DEMO_DIR`).
 - Đợt 8: không thêm crate, không thêm feature `windows` (dùng `Win32_Graphics_Dwm`, `Win32_UI_Controls` có sẵn). Exe release 2.016.256 byte (đợt 7: 1.999.360, +16,9 KB). `enumerate_windows` đo 0,11–0,74 ms với 10–11 cửa sổ.
+
+## Máy macOS (nhánh `feat/macos-port`)
+
+- Apple silicon (`aarch64-apple-darwin`), macOS 15, Command Line Tools. Rust 1.100.0 cài qua rustup (profile minimal + clippy + rustfmt).
+- M0 (2026-11-21): `cargo test -p darkshot-core` đạt 328/328, `fmt` và `clippy -D warnings` sạch. Một test (`history::tests::entry_paths`) từng giả định dấu `\` là dấu phân tách đường dẫn; đã sửa bằng `Path::join`.
+- `cargo build --workspace` HỎNG trên macOS vì crate `windows` không biên dịch; trên Mac dùng `-p <crate>` cho đến khi M2 xong.
+- Nạp cargo vào shell: `. "$HOME/.cargo/env"`.

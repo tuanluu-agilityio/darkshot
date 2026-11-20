@@ -518,9 +518,10 @@ mod tests {
         let mut e = entry(1, Kind::Saved);
         let root = Path::new("root");
         assert_eq!(e.image_path(root), None);
-        e.path = Some(PathBuf::from("C:\\x\\lưu.png"));
+        let saved = Path::new("x").join("lưu.png");
+        e.path = Some(saved.clone());
         assert_eq!(e.file_name().as_deref(), Some("lưu.png"));
-        assert_eq!(e.image_path(root), Some(PathBuf::from("C:\\x\\lưu.png")));
+        assert_eq!(e.image_path(root), Some(saved));
         e.managed = true;
         assert_eq!(
             e.image_path(root),
