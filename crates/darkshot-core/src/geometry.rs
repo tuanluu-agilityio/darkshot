@@ -416,6 +416,63 @@ pub fn side_layout(n: usize, seps: &[usize], b: i32, sep: i32, max_h: i32) -> Si
     }
 }
 
+/// Đổi một hình chữ nhật từ tọa độ màn hình sang tọa độ ảnh của màn hình ảo.
+pub fn to_image_coords(screen: Rect, origin: Point) -> Rect {
+    Rect {
+        x: screen.x - origin.x,
+        y: screen.y - origin.y,
+        ..screen
+    }
+}
+
+/// Đổi một hình chữ nhật từ tọa độ ảnh của màn hình ảo sang tọa độ màn hình (ngược của
+/// `to_image_coords`).
+pub fn to_screen_coords(image: Rect, origin: Point) -> Rect {
+    Rect {
+        x: image.x + origin.x,
+        y: image.y + origin.y,
+        ..image
+    }
+}
+
+/// Góc trên trái để vẽ con trỏ vào ảnh: vị trí con trỏ (tọa độ màn hình) trừ điểm nóng,
+/// rồi đổi sang tọa độ ảnh của màn hình ảo có gốc `origin`.
+pub fn cursor_draw_origin(pos: Point, hotspot: Point, origin: Point) -> Point {
+    Point {
+        x: pos.x - hotspot.x - origin.x,
+        y: pos.y - hotspot.y - origin.y,
+    }
+}
+
+/// Phần giao của `r` với ảnh `w`×`h`; rỗng thì `None`.
+pub fn clip_to_image(r: Rect, w: i32, h: i32) -> Option<Rect> {
+    let x0 = r.x.max(0);
+    let y0 = r.y.max(0);
+    let x1 = r.right().min(w);
+    let y1 = r.bottom().min(h);
+    (x1 > x0 && y1 > y0).then_some(Rect {
+        x: x0,
+        y: y0,
+        w: x1 - x0,
+        h: y1 - y0,
+    })
+}
+
+/// Vùng (tọa độ ảnh) của lượt chụp toàn màn hình: màn hình chứa con trỏ (`cursor`, tọa độ màn
+/// hình), không chứa thì màn hình gần nhất; vùng rỗng thì cả ảnh `w`×`h`.
+pub fn full_screen_rect(cursor: Point, origin: Point, monitors: &[Rect], w: i32, h: i32) -> Rect {
+    let p = Point {
+        x: cursor.x - origin.x,
+        y: cursor.y - origin.y,
+    };
+    let m = monitor_containing(p, monitors);
+    if m.w <= 0 || m.h <= 0 {
+        Rect { x: 0, y: 0, w, h }
+    } else {
+        m
+    }
+}
+
 #[cfg(test)]
 mod side_layout_tests {
     use super::*;
@@ -930,5 +987,150 @@ mod tests {
             place(rc(100, 100, 300, 300), (40, 200), 6, MON, Some(avoid)),
             rc(406, 144, 40, 200)
         );
+    }
+
+    #[test]
+    fn image_coords_with_negative_origin() {
+        let r = to_image_coords(
+            Rect {
+                x: -1920,
+                y: -200,
+                w: 1920,
+                h: 1080,
+            },
+            Point { x: -1920, y: -200 },
+        );
+        assert_eq!(
+            r,
+            Rect {
+                x: 0,
+                y: 0,
+                w: 1920,
+                h: 1080
+            }
+        );
+        let r = to_image_coords(
+            Rect {
+                x: 0,
+                y: 0,
+                w: 2560,
+                h: 1440,
+            },
+            Point { x: -1920, y: -200 },
+        );
+        assert_eq!(
+            r,
+            Rect {
+                x: 1920,
+                y: 200,
+                w: 2560,
+                h: 1440
+            }
+        );
+    }
+
+    #[test]
+    fn screen_and_image_coords_are_inverse() {
+        let o = Point { x: -1280, y: 40 };
+        let r = Rect {
+            x: 10,
+            y: 20,
+            w: 30,
+            h: 40,
+        };
+        assert_eq!(
+            to_screen_coords(r, o),
+            Rect {
+                x: -1270,
+                y: 60,
+                w: 30,
+                h: 40
+            }
+        );
+        assert_eq!(to_image_coords(to_screen_coords(r, o), o), r);
+    }
+
+    #[test]
+    fn cursor_origin_subtracts_hotspot_and_screen_origin() {
+        assert_eq!(
+            cursor_draw_origin(
+                Point { x: 100, y: 50 },
+                Point { x: 0, y: 0 },
+                Point { x: 0, y: 0 }
+            ),
+            Point { x: 100, y: 50 }
+        );
+        // màn hình phụ bên trái: gốc âm; con trỏ chữ I có điểm nóng ở giữa
+        assert_eq!(
+            cursor_draw_origin(
+                Point { x: -200, y: 10 },
+                Point { x: 8, y: 12 },
+                Point { x: -1280, y: 0 }
+            ),
+            Point { x: 1072, y: -2 }
+        );
+    }
+
+    #[test]
+    fn full_screen_takes_the_monitor_under_the_cursor() {
+        // Màn hình phụ 1280×1024 bên trái, chính 1920×1080; gốc màn hình ảo (-1280, 0).
+        let o = Point { x: -1280, y: 0 };
+        let left = Rect {
+            x: 0,
+            y: 0,
+            w: 1280,
+            h: 1024,
+        };
+        let main = Rect {
+            x: 1280,
+            y: 0,
+            w: 1920,
+            h: 1080,
+        };
+        let mons = [left, main];
+        assert_eq!(
+            full_screen_rect(Point { x: -5, y: 500 }, o, &mons, 3200, 1080),
+            left
+        );
+        assert_eq!(
+            full_screen_rect(Point { x: 0, y: 0 }, o, &mons, 3200, 1080),
+            main
+        );
+        // vùng chết dưới màn hình trái: màn hình gần nhất
+        assert_eq!(
+            full_screen_rect(Point { x: -100, y: 1060 }, o, &mons, 3200, 1080),
+            left
+        );
+        // không có màn hình hợp lệ: cả ảnh
+        let empty = [Rect {
+            x: 0,
+            y: 0,
+            w: 0,
+            h: 0,
+        }];
+        assert_eq!(
+            full_screen_rect(Point { x: 0, y: 0 }, o, &empty, 3200, 1080),
+            Rect {
+                x: 0,
+                y: 0,
+                w: 3200,
+                h: 1080
+            }
+        );
+    }
+
+    #[test]
+    fn clip_to_image_keeps_the_part_inside() {
+        let r = |x, y, w, h| Rect { x, y, w, h };
+        assert_eq!(
+            clip_to_image(r(10, 10, 20, 20), 100, 100),
+            Some(r(10, 10, 20, 20))
+        );
+        assert_eq!(
+            clip_to_image(r(-5, 90, 20, 20), 100, 100),
+            Some(r(0, 90, 15, 10))
+        );
+        assert_eq!(clip_to_image(r(100, 0, 10, 10), 100, 100), None);
+        assert_eq!(clip_to_image(r(-30, 0, 10, 10), 100, 100), None);
     }
 }

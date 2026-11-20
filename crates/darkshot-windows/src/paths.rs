@@ -1,5 +1,7 @@
 //! Đường dẫn và giờ địa phương. Không panic: thiếu thư mục hệ thống thì dùng phương án dự phòng.
 
+use darkshot_core::dirs::{self, history_dir_in, last_capture_path_in, steps_dir_in};
+pub use darkshot_core::dirs::{config_path_in, profile_override, Known};
 use darkshot_core::naming::LocalTime;
 use std::path::{Path, PathBuf};
 use windows::core::GUID;
@@ -20,45 +22,11 @@ fn known_folder(id: &GUID) -> Option<PathBuf> {
     }
 }
 
-/// Biến môi trường của chế độ cách ly (chạy thử, không phải tính năng cho người dùng).
-pub const PROFILE_ENV: &str = "DARKSHOT_PROFILE_DIR";
-
-/// Thư mục hệ thống mà chế độ cách ly thay thế.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Known {
-    /// `%APPDATA%`
-    Roaming,
-    /// `%LOCALAPPDATA%`
-    Local,
-    /// `Pictures`
-    Pictures,
-}
-
-impl Known {
-    fn sub(self) -> &'static str {
-        match self {
-            Known::Roaming => "Roaming",
-            Known::Local => "Local",
-            Known::Pictures => "Pictures",
-        }
-    }
-}
-
-/// Giá trị biến môi trường thành thư mục cách ly; rỗng hoặc thiếu thì không cách ly.
-fn override_from(v: Option<std::ffi::OsString>) -> Option<PathBuf> {
-    v.filter(|s| !s.is_empty()).map(PathBuf::from)
-}
-
-/// Thư mục cách ly từ `DARKSHOT_PROFILE_DIR` (không rỗng), nếu có.
-pub fn profile_override() -> Option<PathBuf> {
-    override_from(std::env::var_os(PROFILE_ENV))
-}
-
 /// Đường dẫn của một thư mục hệ thống: có thư mục cách ly thì `<dir>\Roaming|Local|Pictures`
 /// (không tạo thư mục); không có thì hỏi hệ thống.
 pub fn resolve(override_dir: Option<&Path>, known: Known) -> PathBuf {
-    if let Some(dir) = override_dir {
-        return dir.join(known.sub());
+    if let Some(p) = dirs::sandboxed(override_dir, known) {
+        return p;
     }
     match known {
         Known::Roaming => known_folder(&FOLDERID_RoamingAppData)
@@ -88,19 +56,9 @@ pub fn pictures_dir() -> PathBuf {
     resolve(profile_override().as_deref(), Known::Pictures)
 }
 
-/// `<local>\darkshot\history` với thư mục gốc truyền vào.
-pub fn history_dir_in(local: &Path) -> PathBuf {
-    local.join("darkshot").join("history")
-}
-
 /// `%LOCALAPPDATA%\darkshot\history`
 pub fn history_dir() -> PathBuf {
     history_dir_in(&local_appdata_dir())
-}
-
-/// `<local>\darkshot\steps\current` với thư mục gốc truyền vào.
-pub fn steps_dir_in(local: &Path) -> PathBuf {
-    local.join("darkshot").join("steps").join("current")
 }
 
 /// `%LOCALAPPDATA%\darkshot\steps\current`: phiên chụp từng bước (theo `DARKSHOT_PROFILE_DIR`).
@@ -108,19 +66,9 @@ pub fn steps_dir() -> PathBuf {
     steps_dir_in(&local_appdata_dir())
 }
 
-/// `<appdata>\darkshot\config.json` với thư mục gốc truyền vào.
-pub fn config_path_in(appdata: &Path) -> PathBuf {
-    appdata.join("darkshot").join("config.json")
-}
-
 /// `%APPDATA%\darkshot\config.json`
 pub fn config_path() -> PathBuf {
     config_path_in(&appdata_dir())
-}
-
-/// `<appdata>\darkshot\last_capture.json` (cùng thư mục với `config.json`).
-pub fn last_capture_path_in(appdata: &Path) -> PathBuf {
-    appdata.join("darkshot").join("last_capture.json")
 }
 
 /// `%APPDATA%\darkshot\last_capture.json` (theo `DARKSHOT_PROFILE_DIR`).
@@ -187,16 +135,6 @@ mod tests {
             assert!(p.is_absolute(), "{k:?}");
         }
         assert_ne!(resolve(None, Known::Roaming), resolve(None, Known::Local));
-    }
-
-    #[test]
-    fn profile_value_must_be_non_empty() {
-        assert_eq!(override_from(None), None);
-        assert_eq!(override_from(Some(std::ffi::OsString::new())), None);
-        assert_eq!(
-            override_from(Some("D:\\sb".into())),
-            Some(PathBuf::from("D:\\sb"))
-        );
     }
 
     #[test]

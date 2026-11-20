@@ -1,6 +1,6 @@
 //! Chụp toàn bộ màn hình ảo vào bộ nhớ.
 
-use darkshot_core::geometry::{Point, Rect};
+use darkshot_core::geometry::{clip_to_image, cursor_draw_origin, to_image_coords, Point, Rect};
 use darkshot_core::image::Image;
 use std::ffi::c_void;
 use windows::core::{Error, BOOL};
@@ -30,34 +30,6 @@ pub struct Screenshot {
     pub cursor: Point,
     /// Khung cửa sổ ở TỌA ĐỘ ẢNH (đã trừ origin); None = tắt gợi ý cửa sổ.
     pub windows: Option<Vec<Rect>>,
-}
-
-/// Đổi một hình chữ nhật từ tọa độ màn hình sang tọa độ ảnh của màn hình ảo.
-pub fn to_image_coords(screen: Rect, origin: Point) -> Rect {
-    Rect {
-        x: screen.x - origin.x,
-        y: screen.y - origin.y,
-        ..screen
-    }
-}
-
-/// Đổi một hình chữ nhật từ tọa độ ảnh của màn hình ảo sang tọa độ màn hình (ngược của
-/// `to_image_coords`).
-pub fn to_screen_coords(image: Rect, origin: Point) -> Rect {
-    Rect {
-        x: image.x + origin.x,
-        y: image.y + origin.y,
-        ..image
-    }
-}
-
-/// Góc trên trái để vẽ con trỏ vào ảnh: vị trí con trỏ (tọa độ màn hình) trừ điểm nóng,
-/// rồi đổi sang tọa độ ảnh của màn hình ảo có gốc `origin`.
-pub fn cursor_draw_origin(pos: Point, hotspot: Point, origin: Point) -> Point {
-    Point {
-        x: pos.x - hotspot.x - origin.x,
-        y: pos.y - hotspot.y - origin.y,
-    }
 }
 
 /// Lỗi Win32 của luồng hiện tại; nếu luồng không ghi mã lỗi thì dùng `E_FAIL`.
@@ -223,20 +195,6 @@ unsafe extern "system" fn collect_monitor(
     BOOL(1)
 }
 
-/// Phần giao của `r` với ảnh `w`×`h`; rỗng thì `None`.
-fn clip_to_image(r: Rect, w: i32, h: i32) -> Option<Rect> {
-    let x0 = r.x.max(0);
-    let y0 = r.y.max(0);
-    let x1 = r.right().min(w);
-    let y1 = r.bottom().min(h);
-    (x1 > x0 && y1 > y0).then_some(Rect {
-        x: x0,
-        y: y0,
-        w: x1 - x0,
-        h: y1 - y0,
-    })
-}
-
 /// Chụp toàn bộ màn hình ảo (mọi màn hình). `include_cursor`: vẽ con trỏ đang hiện vào ảnh.
 pub fn capture_virtual_screen(include_cursor: bool) -> windows::core::Result<Screenshot> {
     let _dpi = DpiScope::per_monitor_v2();
@@ -375,88 +333,6 @@ pub static GDI_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn image_coords_with_negative_origin() {
-        let r = to_image_coords(
-            Rect {
-                x: -1920,
-                y: -200,
-                w: 1920,
-                h: 1080,
-            },
-            Point { x: -1920, y: -200 },
-        );
-        assert_eq!(
-            r,
-            Rect {
-                x: 0,
-                y: 0,
-                w: 1920,
-                h: 1080
-            }
-        );
-        let r = to_image_coords(
-            Rect {
-                x: 0,
-                y: 0,
-                w: 2560,
-                h: 1440,
-            },
-            Point { x: -1920, y: -200 },
-        );
-        assert_eq!(
-            r,
-            Rect {
-                x: 1920,
-                y: 200,
-                w: 2560,
-                h: 1440
-            }
-        );
-    }
-
-    #[test]
-    fn screen_and_image_coords_are_inverse() {
-        let o = Point { x: -1280, y: 40 };
-        let r = Rect {
-            x: 10,
-            y: 20,
-            w: 30,
-            h: 40,
-        };
-        assert_eq!(
-            to_screen_coords(r, o),
-            Rect {
-                x: -1270,
-                y: 60,
-                w: 30,
-                h: 40
-            }
-        );
-        assert_eq!(to_image_coords(to_screen_coords(r, o), o), r);
-    }
-
-    #[test]
-    fn cursor_origin_subtracts_hotspot_and_screen_origin() {
-        assert_eq!(
-            cursor_draw_origin(
-                Point { x: 100, y: 50 },
-                Point { x: 0, y: 0 },
-                Point { x: 0, y: 0 }
-            ),
-            Point { x: 100, y: 50 }
-        );
-        // màn hình phụ bên trái: gốc âm; con trỏ chữ I có điểm nóng ở giữa
-        assert_eq!(
-            cursor_draw_origin(
-                Point { x: -200, y: 10 },
-                Point { x: 8, y: 12 },
-                Point { x: -1280, y: 0 }
-            ),
-            Point { x: 1072, y: -2 }
-        );
-    }
 
     #[test]
     fn capture_matches_virtual_screen() {

@@ -34,15 +34,26 @@ use app::{AppState, UploadJob};
 use darkshot_core::actions::{
     notice_visible, run_action, Action, Clipboard, Ctx, NoticeKind, Notifier,
 };
+use darkshot_core::app_flow::{
+    history_window_stale, info_windows_stale, lang_after_save, merge_reason, parse_args, OpenReason,
+};
+use darkshot_core::capture_gate::{
+    enumerates_windows, gate_step, kind_of, next_kind, CaptureGate, CaptureKind, GateAction,
+    GateEvent,
+};
 use darkshot_core::color::CustomColors;
-use darkshot_core::config::{Config, HotkeyRole, Hotkeys, UploadFormat, JPEG_QUALITY_DEFAULT};
-use darkshot_core::geometry::{monitor_containing, restore_selection, Point, Rect};
+use darkshot_core::config::{HotkeyRole, Hotkeys, UploadFormat, JPEG_QUALITY_DEFAULT};
+use darkshot_core::geometry::{full_screen_rect, restore_selection, to_screen_coords, Point, Rect};
 use darkshot_core::i18n::{self, Lang, Msg};
-use darkshot_core::last_capture::{self, LastCapture};
-use darkshot_core::update::{self, Release, Version, RELEASE_URL_PREFIX};
+use darkshot_core::last_capture::{
+    last_capture_after, read_last_capture, remember_after, repeat_plan, write_last_capture,
+    LastCapture, RepeatPlan,
+};
+use darkshot_core::update::{
+    self, update_after_check, update_outcome, Release, Version, RELEASE_URL_PREFIX,
+};
 use darkshot_core::upload::{R2Uploader, Uploader};
 use secret::DpapiStore;
-use settings::OpenReason;
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::path::Path;
@@ -78,207 +89,6 @@ pub enum AppEvent {
     Quit,
 }
 
-/// Cổng chụp: bảo đảm không bao giờ có hai lớp phủ và menu khay không chen vào lúc chờ chụp.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CaptureGate {
-    Idle,
-    /// Đã chọn "Chụp màn hình" ở menu, đang chờ menu tắt hẳn.
-    PendingMenu,
-    /// Đang chụp hoặc lớp phủ đang mở.
-    Capturing,
-    /// Cửa sổ Cài đặt đang mở.
-    SettingsOpen,
-    /// Như `PendingMenu`, kèm yêu cầu mở Cài đặt đang chờ.
-    PendingMenuSettings,
-    /// Như `Capturing`, kèm yêu cầu mở Cài đặt đang chờ.
-    CapturingSettings,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GateEvent {
-    MenuCapture,
-    Hotkey,
-    TimerFired,
-    OverlayClosed,
-    TrayClick,
-    OpenSettings,
-    SettingsClosed,
-}
-
-/// Việc bên gọi phải làm sau một sự kiện.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GateAction {
-    /// Không có gì đặc biệt (với `TrayClick`: mở menu như thường).
-    None,
-    StartTimer,
-    /// Hủy bộ hẹn giờ của menu (nếu có) rồi chụp ngay.
-    CaptureNow,
-    /// Mở cửa sổ Cài đặt.
-    OpenSettings,
-    /// Đưa cửa sổ Cài đặt đang mở ra trước.
-    FocusSettings,
-    Ignore,
-}
-
-/// Hàm chuyển trạng thái thuần của cổng chụp.
-pub fn gate_step(state: CaptureGate, ev: GateEvent) -> (CaptureGate, GateAction) {
-    use CaptureGate::*;
-    use GateEvent::*;
-    match (state, ev) {
-        (Idle, MenuCapture) => (PendingMenu, GateAction::StartTimer),
-        (Idle | PendingMenu, Hotkey) | (PendingMenu, TimerFired) => {
-            (Capturing, GateAction::CaptureNow)
-        }
-        (PendingMenuSettings, Hotkey | TimerFired) => (CapturingSettings, GateAction::CaptureNow),
-        (Idle, TrayClick) => (Idle, GateAction::None),
-        (Idle, OpenSettings) => (SettingsOpen, GateAction::OpenSettings),
-        // Yêu cầu mở Cài đặt đến lúc đang chụp hoặc chờ menu: nhớ lại, mở sau khi lớp phủ đóng.
-        (PendingMenu | PendingMenuSettings, OpenSettings) => {
-            (PendingMenuSettings, GateAction::Ignore)
-        }
-        (Capturing | CapturingSettings, OpenSettings) => (CapturingSettings, GateAction::Ignore),
-        // Cài đặt đang mở: mọi yêu cầu từ người dùng (kể cả chụp) đưa cửa sổ ra trước để nó không bị khuất.
-        (SettingsOpen, TrayClick | OpenSettings | Hotkey | MenuCapture) => {
-            (SettingsOpen, GateAction::FocusSettings)
-        }
-        (SettingsOpen, SettingsClosed) => (Idle, GateAction::None),
-        (s, SettingsClosed) => (s, GateAction::None),
-        (Capturing, OverlayClosed) => (Idle, GateAction::None),
-        (CapturingSettings, OverlayClosed) => (SettingsOpen, GateAction::OpenSettings),
-        (s, OverlayClosed) => (s, GateAction::None),
-        (s, _) => (s, GateAction::Ignore),
-    }
-}
-
-/// Loại của một lượt chụp: chụp vùng (lớp phủ), một trong hai kiểu toàn màn hình, hoặc lặp lại
-/// lần chụp vùng trước.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CaptureKind {
-    Region,
-    SaveFull,
-    UploadFull,
-    RepeatLast,
-}
-
-/// Loại chụp của một dòng phím tắt.
-pub fn kind_of(role: HotkeyRole) -> CaptureKind {
-    match role {
-        HotkeyRole::Region => CaptureKind::Region,
-        HotkeyRole::SaveFull => CaptureKind::SaveFull,
-        HotkeyRole::UploadFull => CaptureKind::UploadFull,
-        HotkeyRole::RepeatLast => CaptureKind::RepeatLast,
-    }
-}
-
-/// Loại chụp sau một bước của cổng: chỉ yêu cầu được nhận (`StartTimer`, `CaptureNow`) mới đổi loại.
-pub fn next_kind(current: CaptureKind, requested: CaptureKind, act: GateAction) -> CaptureKind {
-    match act {
-        GateAction::StartTimer | GateAction::CaptureNow => requested,
-        _ => current,
-    }
-}
-
-/// Khung nhớ (tọa độ màn hình) sau một lượt chụp vùng kết thúc bằng `action` với khung `picked`:
-/// tải lên, lưu, chép thì nhớ khung mới; hủy thì giữ khung cũ.
-pub fn remember_after(prev: Option<Rect>, action: Action, picked: Rect) -> Option<Rect> {
-    match action {
-        Action::Upload | Action::Save | Action::Copy | Action::Pin => Some(picked),
-        Action::Cancel | Action::Ocr | Action::AddStep => prev,
-    }
-}
-
-/// Việc của một lượt "Chụp lại vùng trước" sau khi đã chụp màn hình.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RepeatPlan {
-    /// Chưa có lần chụp trước: mở lớp phủ như phím chụp vùng.
-    Overlay,
-    /// Vùng trước không còn trên màn hình: thông báo rồi mở lớp phủ trên cùng ảnh chụp.
-    OverlayWithNotice,
-    /// Cắt vùng (tọa độ ảnh) rồi chạy hành động.
-    Run(Rect, Action),
-}
-
-/// Kế hoạch lặp lại `last` trên ảnh chụp có gốc `origin` (tọa độ màn hình), cỡ `img_w`×`img_h`,
-/// các màn hình `monitors` ở tọa độ ẢNH (như `Screenshot.monitors`).
-pub fn repeat_plan(
-    last: Option<LastCapture>,
-    origin: Point,
-    img_w: i32,
-    img_h: i32,
-    monitors: &[Rect],
-) -> RepeatPlan {
-    let Some(last) = last else {
-        return RepeatPlan::Overlay;
-    };
-    // `repeat_rect` nhận màn hình theo tọa độ màn hình và tự trừ gốc đúng một lần.
-    let screens: Vec<Rect> = monitors
-        .iter()
-        .map(|m| capture::to_screen_coords(*m, origin))
-        .collect();
-    match last_capture::repeat_rect(&last, origin, img_w, img_h, &screens) {
-        Some(r) => RepeatPlan::Run(r, last.action),
-        None => RepeatPlan::OverlayWithNotice,
-    }
-}
-
-/// Lần chụp trước mới sau một lượt chụp vùng kết thúc bằng `action` với vùng `screen` (tọa độ
-/// màn hình), và có phải ghi tệp không: chỉ khi giá trị mới khác giá trị đã ghi thành công lên đĩa
-/// (`on_disk`), để lần ghi lỗi trước được thử lại; Hủy không bao giờ ghi.
-pub fn last_capture_after(
-    prev: Option<LastCapture>,
-    on_disk: Option<LastCapture>,
-    action: Action,
-    screen: Rect,
-) -> (Option<LastCapture>, bool) {
-    let next = last_capture::remember(prev, action, screen);
-    let write = action != Action::Cancel && next.is_some() && next != on_disk;
-    (next, write)
-}
-
-/// Tệp lần chụp trước lớn hơn mức này là hỏng (tệp thật chỉ vài chục byte).
-const LAST_CAPTURE_MAX_BYTES: u64 = 4096;
-
-/// Đọc tệp lần chụp trước; thiếu, quá lớn hay hỏng thì `None` (im lặng).
-pub fn read_last_capture(path: &Path) -> Option<LastCapture> {
-    use std::io::Read;
-    let f = std::fs::File::open(path).ok()?;
-    let mut s = String::new();
-    // Đọc tối đa một byte quá giới hạn để nhận ra tệp quá lớn mà không đọc hết.
-    f.take(LAST_CAPTURE_MAX_BYTES + 1)
-        .read_to_string(&mut s)
-        .ok()?;
-    if s.len() as u64 > LAST_CAPTURE_MAX_BYTES {
-        return None;
-    }
-    last_capture::from_json(&s)
-}
-
-/// Ghi tệp lần chụp trước nguyên tử: tệp tạm cùng thư mục, `sync_all`, đổi tên; tạo thư mục nếu
-/// thiếu. Lỗi thì xóa tệp tạm và trả lỗi (bên gọi nuốt).
-pub fn write_last_capture(path: &Path, l: &LastCapture) -> std::io::Result<()> {
-    use std::io::Write;
-    let dir = path
-        .parent()
-        .filter(|d| !d.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    std::fs::create_dir_all(dir)?;
-    let mut tmp_name = path.file_name().unwrap_or_default().to_os_string();
-    tmp_name.push(".tmp");
-    let tmp = dir.join(tmp_name);
-    let write_tmp = || -> std::io::Result<()> {
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(last_capture::to_json(l).as_bytes())?;
-        f.sync_all()
-    };
-    if let Err(e) = write_tmp() {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e);
-    }
-    std::fs::rename(&tmp, path).inspect_err(|_| {
-        let _ = std::fs::remove_file(&tmp);
-    })
-}
-
 /// Nhớ lượt chụp vùng vừa kết thúc bằng `action` với vùng `screen` (tọa độ màn hình); giá trị đổi
 /// thì ghi tệp. Lỗi ghi bị nuốt: không bao giờ làm hỏng luồng chụp.
 fn remember_last_capture(action: Action, screen: Rect) {
@@ -291,56 +101,6 @@ fn remember_last_capture(action: Action, screen: Rect) {
             LAST_CAPTURE_ON_DISK.with(|d| d.set(Some(l)));
         }
     }
-}
-
-/// Có liệt kê cửa sổ (gợi ý khung) trước khi chụp không, theo loại chụp `kind` (sau khi đã đổi phím
-/// lặp lại chưa có lần chụp trước thành `Region`) và ô gợi ý cửa sổ `snap_windows`.
-pub fn enumerates_windows(kind: CaptureKind, snap_windows: bool) -> bool {
-    snap_windows && matches!(kind, CaptureKind::Region | CaptureKind::RepeatLast)
-}
-
-/// Vùng (tọa độ ảnh) của lượt chụp toàn màn hình: màn hình chứa con trỏ (`cursor`, tọa độ màn
-/// hình), không chứa thì màn hình gần nhất; vùng rỗng thì cả ảnh `w`×`h`.
-fn full_screen_rect(cursor: Point, origin: Point, monitors: &[Rect], w: i32, h: i32) -> Rect {
-    let p = Point {
-        x: cursor.x - origin.x,
-        y: cursor.y - origin.y,
-    };
-    let m = monitor_containing(p, monitors);
-    if m.w <= 0 || m.h <= 0 {
-        Rect { x: 0, y: 0, w, h }
-    } else {
-        m
-    }
-}
-
-/// Gộp lý do của hai yêu cầu mở Tùy chọn đang chờ: `NeedsR2` thắng.
-pub fn merge_reason(a: OpenReason, b: OpenReason) -> OpenReason {
-    if a == OpenReason::NeedsR2 || b == OpenReason::NeedsR2 {
-        OpenReason::NeedsR2
-    } else {
-        OpenReason::User
-    }
-}
-
-/// Ngôn ngữ sau khi đóng Tùy chọn: chỉ đổi khi đã ghi cấu hình thành công.
-pub fn lang_after_save(old: Lang, new: Lang, saved: bool) -> Lang {
-    if saved {
-        new
-    } else {
-        old
-    }
-}
-
-/// Chữ trong cửa sổ Thông tin và Trợ giúp đã cũ sau khi lưu cấu hình mới (ngôn ngữ hoặc phím tắt đổi).
-pub fn info_windows_stale(old: &Config, new: &Config) -> bool {
-    old.language != new.language || old.hotkeys != new.hotkeys
-}
-
-/// Chữ trong cửa sổ Lịch sử đã cũ sau khi lưu cấu hình mới: chỉ khi đổi ngôn ngữ (cửa sổ này không
-/// hiện phím tắt nên đổi phím không cần đóng).
-pub fn history_window_stale(old: &Config, new: &Config) -> bool {
-    old.language != new.language
 }
 
 /// Sự kiện chuột `ev` (từ `WM_TRAY`) có mở menu khay không. Menu đang mở thì không mở lồng.
@@ -376,21 +136,6 @@ thread_local! {
     static UPDATE_CHECKING: Cell<bool> = const { Cell::new(false) };
     /// Sổ các lượt tải lên đang chạy; luồng tải lên giữ bản sao `Arc`.
     static PENDING: Arc<app::PendingUploads> = Arc::new(app::PendingUploads::new());
-}
-
-/// Luật hiển thị khi kiểm tra bản mới xong: (hiện mục menu, hiện thông báo).
-/// Có bản mới thì luôn hiện mục menu; chỉ thông báo khi chưa báo đúng bản đó.
-pub fn update_outcome(found: Option<&Release>, notified: Option<Version>) -> (bool, bool) {
-    match found {
-        None => (false, false),
-        Some(r) => (true, notified != Some(r.version)),
-    }
-}
-
-/// Mục "Có bản mới" sau một lần kiểm tra: lỗi hoặc không có bản mới (`None`) không xóa mục đã
-/// hiện (lỗi mạng ở lần kiểm tra sau không được làm mất nó); chỉ có bản mới thì ghi đè.
-pub fn update_after_check(current: Option<Release>, found: Option<Release>) -> Option<Release> {
-    found.or(current)
 }
 
 /// Mở trang tải về bằng trình duyệt mặc định. Chỉ mở link thuộc repo darkshot; lỗi thì bỏ qua.
@@ -512,20 +257,6 @@ fn on_update_result(found: Option<Release>) {
     });
     if let (Some(cfg), true) = (cfg, write) {
         let _ = darkshot_core::config::save(&paths::config_path(), &cfg, &DpapiStore);
-    }
-}
-
-/// Đối số dòng lệnh đã phân tích.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Args {
-    /// `--history`: mở cửa sổ Lịch sử ngay khi khởi động.
-    pub open_history: bool,
-}
-
-/// Phân tích đối số (không gồm tên chương trình); đối số lạ bị bỏ qua.
-pub fn parse_args(args: &[String]) -> Args {
-    Args {
-        open_history: args.iter().any(|a| a == "--history"),
     }
 }
 
@@ -803,7 +534,7 @@ fn capture_flow_with(hwnd: HWND, requested: CaptureKind, notifier: Option<Arc<dy
                 let screens: Vec<Rect> = shot
                     .monitors
                     .iter()
-                    .map(|m| capture::to_screen_coords(*m, shot.origin))
+                    .map(|m| to_screen_coords(*m, shot.origin))
                     .collect();
                 prev.and_then(|r| restore_selection(r, shot.origin, img_w, img_h, &screens))
             } else {
@@ -831,7 +562,7 @@ fn capture_flow_with(hwnd: HWND, requested: CaptureKind, notifier: Option<Arc<dy
             match picked {
                 Ok(Some(p)) => {
                     // Nhớ cả khi ô "giữ vị trí" đang tắt, để bật lên là có ngay.
-                    let screen = capture::to_screen_coords(p.rect, shot.origin);
+                    let screen = to_screen_coords(p.rect, shot.origin);
                     LAST_SELECTION.with(|s| s.set(remember_after(prev, p.action, screen)));
                     // Trước khi chạy hành động: tải lên lâu thì lần chụp vẫn đã được nhớ.
                     remember_last_capture(p.action, screen);
@@ -1039,7 +770,7 @@ pub fn pin_origin(rect: Rect, origin: Point) -> Point {
         y: rect.y.max(0),
         ..rect
     };
-    let r = capture::to_screen_coords(clamped, origin);
+    let r = to_screen_coords(clamped, origin);
     Point { x: r.x, y: r.y }
 }
 
@@ -1816,17 +1547,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use CaptureGate::*;
-    use GateEvent::*;
-
-    #[test]
-    fn parse_args_history_flag() {
-        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
-        assert!(!parse_args(&s(&[])).open_history);
-        assert!(parse_args(&s(&["--history"])).open_history);
-        assert!(parse_args(&s(&["--foo", "--history"])).open_history);
-        assert!(!parse_args(&s(&["--histories", "history", "-history"])).open_history);
-    }
+    use darkshot_core::config::Config;
 
     #[test]
     fn normal_mode_keeps_everything() {
@@ -1914,40 +1635,6 @@ mod tests {
         assert_ne!(WM_OPEN_HISTORY, WM_OPEN_SETTINGS);
         assert_ne!(WM_OPEN_HISTORY, WM_UPDATE_RESULT);
         assert_ne!(WM_OPEN_HISTORY, history_service::WM_HISTORY_CHANGED);
-    }
-
-    #[test]
-    fn update_after_check_keeps_item_on_none() {
-        let rel = |p| Release {
-            version: Version {
-                major: 0,
-                minor: 3,
-                patch: p,
-            },
-            url: String::new(),
-        };
-        assert_eq!(update_after_check(None, None), None);
-        assert_eq!(update_after_check(Some(rel(0)), None), Some(rel(0)));
-        assert_eq!(update_after_check(None, Some(rel(1))), Some(rel(1)));
-        assert_eq!(update_after_check(Some(rel(0)), Some(rel(1))), Some(rel(1)));
-    }
-
-    #[test]
-    fn update_outcome_rules() {
-        let v = |m, n, p| Version {
-            major: m,
-            minor: n,
-            patch: p,
-        };
-        let rel = Release {
-            version: v(0, 3, 0),
-            url: String::new(),
-        };
-        assert_eq!(update_outcome(None, None), (false, false));
-        assert_eq!(update_outcome(None, Some(v(0, 3, 0))), (false, false));
-        assert_eq!(update_outcome(Some(&rel), None), (true, true));
-        assert_eq!(update_outcome(Some(&rel), Some(v(0, 3, 0))), (true, false));
-        assert_eq!(update_outcome(Some(&rel), Some(v(0, 2, 0))), (true, true));
     }
 
     #[test]
@@ -2046,171 +1733,6 @@ mod tests {
     }
 
     #[test]
-    fn capture_gate_transitions() {
-        assert_eq!(
-            gate_step(Idle, MenuCapture),
-            (PendingMenu, GateAction::StartTimer)
-        );
-        assert_eq!(
-            gate_step(PendingMenu, TrayClick),
-            (PendingMenu, GateAction::Ignore)
-        );
-        assert_eq!(
-            gate_step(PendingMenu, Hotkey),
-            (Capturing, GateAction::CaptureNow)
-        );
-        assert_eq!(
-            gate_step(PendingMenu, TimerFired),
-            (Capturing, GateAction::CaptureNow)
-        );
-        assert_eq!(
-            gate_step(Capturing, Hotkey),
-            (Capturing, GateAction::Ignore)
-        );
-        assert_eq!(
-            gate_step(Capturing, TimerFired),
-            (Capturing, GateAction::Ignore)
-        );
-        assert_eq!(
-            gate_step(Capturing, OverlayClosed),
-            (Idle, GateAction::None)
-        );
-        // Thêm: phím tắt khi rảnh chụp ngay; bấm khay khi rảnh mở menu như thường;
-        // menu và khay khi đang chụp bị bỏ qua; hẹn giờ cũ khi rảnh bị bỏ qua.
-        assert_eq!(gate_step(Idle, Hotkey), (Capturing, GateAction::CaptureNow));
-        assert_eq!(gate_step(Idle, TrayClick), (Idle, GateAction::None));
-        assert_eq!(
-            gate_step(Capturing, TrayClick),
-            (Capturing, GateAction::Ignore)
-        );
-        assert_eq!(
-            gate_step(Capturing, MenuCapture),
-            (Capturing, GateAction::Ignore)
-        );
-        assert_eq!(gate_step(Idle, TimerFired), (Idle, GateAction::Ignore));
-        assert_eq!(
-            gate_step(PendingMenu, MenuCapture),
-            (PendingMenu, GateAction::Ignore)
-        );
-    }
-
-    #[test]
-    fn settings_gate_transitions() {
-        assert_eq!(
-            gate_step(Idle, OpenSettings),
-            (SettingsOpen, GateAction::OpenSettings)
-        );
-        // Đang mở Cài đặt: bấm khay hoặc mở lại thì đưa cửa sổ ra trước, vẫn SettingsOpen.
-        for ev in [TrayClick, OpenSettings] {
-            assert_eq!(
-                gate_step(SettingsOpen, ev),
-                (SettingsOpen, GateAction::FocusSettings),
-                "{ev:?}"
-            );
-        }
-        // Yêu cầu chụp không chụp nhưng đưa cửa sổ Cài đặt ra trước để nó không bị khuất.
-        for ev in [MenuCapture, Hotkey] {
-            assert_eq!(
-                gate_step(SettingsOpen, ev),
-                (SettingsOpen, GateAction::FocusSettings),
-                "{ev:?}"
-            );
-        }
-        // Hẹn giờ cũ của menu thì chỉ bị bỏ qua.
-        assert_eq!(
-            gate_step(SettingsOpen, TimerFired),
-            (SettingsOpen, GateAction::Ignore)
-        );
-        assert_eq!(
-            gate_step(SettingsOpen, OverlayClosed),
-            (SettingsOpen, GateAction::None)
-        );
-        assert_eq!(
-            gate_step(SettingsOpen, SettingsClosed),
-            (Idle, GateAction::None)
-        );
-        // Đóng Cài đặt khi không ở trạng thái đó: không đổi.
-        assert_eq!(gate_step(Idle, SettingsClosed), (Idle, GateAction::None));
-        assert_eq!(
-            gate_step(Capturing, SettingsClosed),
-            (Capturing, GateAction::None)
-        );
-    }
-
-    #[test]
-    fn open_reason_merge_prefers_r2() {
-        use settings::OpenReason::*;
-        assert_eq!(merge_reason(User, User), User);
-        assert_eq!(merge_reason(User, NeedsR2), NeedsR2);
-        assert_eq!(merge_reason(NeedsR2, User), NeedsR2);
-    }
-
-    #[test]
-    fn language_changes_only_when_saved() {
-        assert_eq!(lang_after_save(Lang::Vi, Lang::En, true), Lang::En);
-        assert_eq!(lang_after_save(Lang::Vi, Lang::En, false), Lang::Vi);
-    }
-
-    #[test]
-    fn info_windows_close_when_language_or_hotkey_changes() {
-        use std::path::Path;
-        let a = Config::defaults(Path::new("C:/p"), Lang::Vi);
-        assert!(!info_windows_stale(&a, &a.clone()));
-        let mut b = a.clone();
-        b.language = Lang::En;
-        assert!(info_windows_stale(&a, &b));
-        let mut b = a.clone();
-        b.hotkeys.region.key.ctrl = true;
-        assert!(info_windows_stale(&a, &b));
-        let mut b = a.clone();
-        b.autostart = true;
-        assert!(!info_windows_stale(&a, &b));
-    }
-
-    /// Lịch sử chỉ có chữ theo ngôn ngữ (không hiện phím tắt): đổi ngôn ngữ thì đóng, đổi phím thì không.
-    #[test]
-    fn history_window_closes_only_when_language_changes() {
-        use std::path::Path;
-        let a = Config::defaults(Path::new("C:/p"), Lang::Vi);
-        assert!(!history_window_stale(&a, &a.clone()));
-        let mut b = a.clone();
-        b.language = Lang::En;
-        assert!(history_window_stale(&a, &b));
-        let mut b = a.clone();
-        b.hotkeys.region.key.ctrl = !b.hotkeys.region.key.ctrl;
-        assert!(info_windows_stale(&a, &b));
-        assert!(!history_window_stale(&a, &b));
-        let mut b = a.clone();
-        b.history_enabled = !b.history_enabled;
-        assert!(!history_window_stale(&a, &b));
-    }
-
-    #[test]
-    fn info_windows_close_when_any_hotkey_row_changes() {
-        use std::path::Path;
-        let a = Config::defaults(Path::new("C:/p"), Lang::Vi);
-        // Bật/tắt một dòng: stale.
-        for r in darkshot_core::config::HotkeyRole::ALL {
-            let mut b = a.clone();
-            let mut slot = b.hotkeys.get(r);
-            slot.enabled = !slot.enabled;
-            b.hotkeys.set(r, slot);
-            assert!(info_windows_stale(&a, &b), "{r:?}");
-        }
-        // Đổi tổ hợp của dòng 2 hay 3: stale.
-        let mut b = a.clone();
-        b.hotkeys.save_full.key.alt = true;
-        assert!(info_windows_stale(&a, &b));
-        let mut b = a.clone();
-        b.hotkeys.upload_full.key.vk = 0x71;
-        assert!(info_windows_stale(&a, &b));
-        // Đổi show_success_notices: không stale.
-        let mut b = a.clone();
-        b.show_success_notices = !b.show_success_notices;
-        assert!(!info_windows_stale(&a, &b));
-    }
-
-    #[test]
     fn hotkeys_taken_notice_only_when_rows_failed() {
         use darkshot_core::config::HotkeyRole::*;
         let keys = Hotkeys::default();
@@ -2235,47 +1757,6 @@ mod tests {
         assert!(!tray_click_opens_menu(WM_TIMER, false));
     }
 
-    #[test]
-    fn settings_request_during_capture_is_remembered() {
-        let (s, a) = gate_step(Capturing, OpenSettings);
-        assert_eq!(a, GateAction::Ignore);
-        // Hai yêu cầu chờ chỉ mở một lần.
-        let (s, a) = gate_step(s, OpenSettings);
-        assert_eq!(a, GateAction::Ignore);
-        // Phím chụp trong lúc đó vẫn bị bỏ qua.
-        assert_eq!(gate_step(s, Hotkey).1, GateAction::Ignore);
-        assert_eq!(
-            gate_step(s, OverlayClosed),
-            (SettingsOpen, GateAction::OpenSettings)
-        );
-        // Không có yêu cầu chờ: về Idle như cũ.
-        assert_eq!(
-            gate_step(Capturing, OverlayClosed),
-            (Idle, GateAction::None)
-        );
-    }
-
-    #[test]
-    fn enumerates_windows_for_region_and_repeat_fallback() {
-        use CaptureKind::*;
-        // Lặp lại cũng liệt kê: vùng trước có thể đã mất và lớp phủ dự phòng cần gợi ý cửa sổ.
-        assert!(enumerates_windows(Region, true));
-        assert!(enumerates_windows(RepeatLast, true));
-        for k in [Region, RepeatLast, SaveFull, UploadFull] {
-            assert!(!enumerates_windows(k, false), "{k:?}");
-        }
-        assert!(!enumerates_windows(SaveFull, true));
-        assert!(!enumerates_windows(UploadFull, true));
-    }
-
-    #[test]
-    fn kinds_of_roles() {
-        assert_eq!(kind_of(HotkeyRole::Region), CaptureKind::Region);
-        assert_eq!(kind_of(HotkeyRole::SaveFull), CaptureKind::SaveFull);
-        assert_eq!(kind_of(HotkeyRole::UploadFull), CaptureKind::UploadFull);
-        assert_eq!(kind_of(HotkeyRole::RepeatLast), CaptureKind::RepeatLast);
-    }
-
     fn rc(x: i32, y: i32, w: i32, h: i32) -> Rect {
         Rect { x, y, w, h }
     }
@@ -2284,203 +1765,11 @@ mod tests {
         LastCapture { rect, action }
     }
 
-    #[test]
-    fn repeat_plan_without_last_opens_overlay() {
-        let mons = [rc(0, 0, 1920, 1080)];
-        assert_eq!(
-            repeat_plan(None, Point { x: 0, y: 0 }, 1920, 1080, &mons),
-            RepeatPlan::Overlay
-        );
-    }
-
-    #[test]
-    fn repeat_plan_gone_region_notifies_then_overlay() {
-        // Vùng nằm trên màn hình trái đã rút.
-        let mons = [rc(0, 0, 1920, 1080)];
-        let last = lc(rc(-1000, 100, 300, 200), Action::Save);
-        assert_eq!(
-            repeat_plan(Some(last), Point { x: 0, y: 0 }, 1920, 1080, &mons),
-            RepeatPlan::OverlayWithNotice
-        );
-        // Còn dưới MIN_SIZE trong ảnh.
-        let last = lc(rc(1918, 100, 300, 200), Action::Copy);
-        assert_eq!(
-            repeat_plan(Some(last), Point { x: 0, y: 0 }, 1920, 1080, &mons),
-            RepeatPlan::OverlayWithNotice
-        );
-    }
-
-    #[test]
-    fn repeat_plan_valid_region_runs_same_action() {
-        let mons = [rc(0, 0, 1920, 1080)];
-        for a in [Action::Save, Action::Copy, Action::Upload, Action::Pin] {
-            let last = lc(rc(100, 100, 300, 200), a);
-            assert_eq!(
-                repeat_plan(Some(last), Point { x: 0, y: 0 }, 1920, 1080, &mons),
-                RepeatPlan::Run(rc(100, 100, 300, 200), a)
-            );
-        }
-        // Một phần ra ngoài ảnh: cắt phần còn trong ảnh.
-        let last = lc(rc(1800, 100, 300, 200), Action::Save);
-        assert_eq!(
-            repeat_plan(Some(last), Point { x: 0, y: 0 }, 1920, 1080, &mons),
-            RepeatPlan::Run(rc(1800, 100, 120, 200), Action::Save)
-        );
-    }
-
-    #[test]
-    fn repeat_plan_negative_origin_subtracts_once() {
-        // Màn hình trái ở x âm; `monitors` ở tọa độ ảnh như `Screenshot.monitors`.
-        let origin = Point { x: -1920, y: -200 };
-        let mons = [rc(0, 0, 1920, 1080), rc(1920, 200, 1920, 1080)];
-        let last = lc(rc(-1000, 100, 300, 200), Action::Pin);
-        assert_eq!(
-            repeat_plan(Some(last), origin, 3840, 1280, &mons),
-            RepeatPlan::Run(rc(920, 300, 300, 200), Action::Pin)
-        );
-        // Vùng trên màn hình chính (tọa độ màn hình dương).
-        let last = lc(rc(10, 20, 300, 200), Action::Save);
-        assert_eq!(
-            repeat_plan(Some(last), origin, 3840, 1280, &mons),
-            RepeatPlan::Run(rc(1930, 220, 300, 200), Action::Save)
-        );
-    }
-
-    #[test]
-    fn last_capture_after_writes_only_on_change() {
-        let r = rc(1, 2, 30, 40);
-        let prev = lc(r, Action::Save);
-        // Hủy: giữ nguyên, không ghi.
-        assert_eq!(
-            last_capture_after(None, None, Action::Cancel, r),
-            (None, false)
-        );
-        assert_eq!(
-            last_capture_after(Some(prev), Some(prev), Action::Cancel, rc(9, 9, 50, 50)),
-            (Some(prev), false)
-        );
-        // Nhận dạng chữ: như Hủy, giữ nguyên lần chụp trước, không ghi.
-        assert_eq!(
-            last_capture_after(Some(prev), Some(prev), Action::Ocr, rc(9, 9, 50, 50)),
-            (Some(prev), false)
-        );
-        assert_eq!(
-            last_capture_after(None, None, Action::Ocr, r),
-            (None, false)
-        );
-        // Giống hệt giá trị đã ghi: không ghi lại.
-        assert_eq!(
-            last_capture_after(Some(prev), Some(prev), Action::Save, r),
-            (Some(prev), false)
-        );
-        // Đổi vùng hoặc hành động: ghi.
-        assert_eq!(
-            last_capture_after(Some(prev), Some(prev), Action::Pin, r),
-            (Some(lc(r, Action::Pin)), true)
-        );
-        assert_eq!(
-            last_capture_after(None, None, Action::Copy, rc(5, 5, 60, 60)),
-            (Some(lc(rc(5, 5, 60, 60), Action::Copy)), true)
-        );
-    }
-
-    #[test]
-    fn last_capture_after_retries_failed_write() {
-        let r = rc(1, 2, 30, 40);
-        let cur = lc(r, Action::Save);
-        // Lần ghi trước lỗi: trên đĩa chưa có gì (hoặc giá trị cũ), chụp lại cùng vùng phải ghi.
-        assert_eq!(
-            last_capture_after(Some(cur), None, Action::Save, r),
-            (Some(cur), true)
-        );
-        let old = lc(rc(9, 9, 50, 50), Action::Copy);
-        assert_eq!(
-            last_capture_after(Some(cur), Some(old), Action::Save, r),
-            (Some(cur), true)
-        );
-        // Hủy vẫn không bao giờ ghi, kể cả khi trên đĩa đang cũ.
-        assert_eq!(
-            last_capture_after(Some(cur), None, Action::Cancel, r),
-            (Some(cur), false)
-        );
-        assert_eq!(
-            last_capture_after(Some(cur), Some(old), Action::Cancel, r),
-            (Some(cur), false)
-        );
-    }
-
     fn temp_dir_for(name: &str) -> std::path::PathBuf {
         let d =
             std::env::temp_dir().join(format!("darkshot_lastcap_{}_{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         d
-    }
-
-    fn names_in(dir: &Path) -> Vec<std::ffi::OsString> {
-        std::fs::read_dir(dir)
-            .unwrap()
-            .map(|e| e.unwrap().file_name())
-            .collect()
-    }
-
-    #[test]
-    fn last_capture_file_round_trip_creates_dir() {
-        let root = temp_dir_for("roundtrip");
-        let path = root.join("darkshot").join("last_capture.json");
-        assert!(!root.exists());
-        assert_eq!(read_last_capture(&path), None);
-        let l = lc(rc(-1500, -40, 300, 200), Action::Upload);
-        write_last_capture(&path, &l).unwrap();
-        assert_eq!(read_last_capture(&path), Some(l));
-        // Ghi đè tệp đã có.
-        let l2 = lc(rc(7, 8, 90, 100), Action::Pin);
-        write_last_capture(&path, &l2).unwrap();
-        assert_eq!(read_last_capture(&path), Some(l2));
-        // Không để lại tệp tạm.
-        assert_eq!(
-            names_in(path.parent().unwrap()),
-            vec![std::ffi::OsString::from("last_capture.json")]
-        );
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn last_capture_file_corrupt_is_none_and_kept() {
-        let root = temp_dir_for("corrupt");
-        std::fs::create_dir_all(&root).unwrap();
-        let path = root.join("last_capture.json");
-        for bad in [
-            "",
-            "{",
-            "null",
-            r#"{"version":2,"x":1,"y":2,"w":30,"h":40,"action":"save"}"#,
-        ] {
-            std::fs::write(&path, bad).unwrap();
-            assert_eq!(read_last_capture(&path), None, "{bad}");
-            // Không xóa tệp hỏng.
-            assert!(path.exists());
-        }
-        // Tệp quá lớn: bỏ qua.
-        std::fs::write(&path, " ".repeat(64 * 1024)).unwrap();
-        assert_eq!(read_last_capture(&path), None);
-        // Đường dẫn là thư mục: None, không panic.
-        assert_eq!(read_last_capture(&root), None);
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn last_capture_write_failure_leaves_no_temp() {
-        let root = temp_dir_for("fail");
-        // Đích là một thư mục không rỗng: đổi tên thất bại, tệp tạm phải bị xóa.
-        let path = root.join("last_capture.json");
-        std::fs::create_dir_all(path.join("sub")).unwrap();
-        let l = lc(rc(1, 2, 30, 40), Action::Save);
-        assert!(write_last_capture(&path, &l).is_err());
-        assert_eq!(
-            names_in(&root),
-            vec![std::ffi::OsString::from("last_capture.json")]
-        );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     struct NullNotifier;
@@ -2523,136 +1812,6 @@ mod tests {
         let img = darkshot_core::thumb::decode_png_file(&pngs[0]).unwrap();
         assert_eq!((img.width, img.height), (200, 120));
         let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn capture_kind_follows_the_accepted_request() {
-        use CaptureKind::*;
-        let step = |state, ev, cur, req| {
-            let (s, a) = gate_step(state, ev);
-            (s, a, next_kind(cur, req, a))
-        };
-        // rảnh, bấm phím lưu toàn màn hình: chụp ngay loại đó
-        assert_eq!(
-            step(Idle, Hotkey, Region, SaveFull),
-            (Capturing, GateAction::CaptureNow, SaveFull)
-        );
-        // menu đang mở: chờ, loại được nhớ; hết giờ không đổi loại
-        let (s, a, k) = step(Idle, MenuCapture, Region, UploadFull);
-        assert_eq!((s, a, k), (PendingMenu, GateAction::StartTimer, UploadFull));
-        assert_eq!(
-            gate_step(s, TimerFired),
-            (Capturing, GateAction::CaptureNow)
-        );
-        // đang chờ menu (Region) mà bấm phím loại khác: chụp ngay một lần, loại của phím vừa bấm
-        assert_eq!(
-            step(PendingMenu, Hotkey, Region, SaveFull),
-            (Capturing, GateAction::CaptureNow, SaveFull)
-        );
-        // lớp phủ đang mở: bỏ qua, loại không đổi
-        assert_eq!(
-            step(Capturing, Hotkey, Region, SaveFull),
-            (Capturing, GateAction::Ignore, Region)
-        );
-        assert_eq!(step(Capturing, MenuCapture, Region, UploadFull).2, Region);
-        // Tùy chọn đang mở: đưa ra trước, loại không đổi
-        assert_eq!(
-            step(SettingsOpen, Hotkey, Region, UploadFull),
-            (SettingsOpen, GateAction::FocusSettings, Region)
-        );
-    }
-
-    #[test]
-    fn full_screen_takes_the_monitor_under_the_cursor() {
-        // Màn hình phụ 1280×1024 bên trái, chính 1920×1080; gốc màn hình ảo (-1280, 0).
-        let o = Point { x: -1280, y: 0 };
-        let left = Rect {
-            x: 0,
-            y: 0,
-            w: 1280,
-            h: 1024,
-        };
-        let main = Rect {
-            x: 1280,
-            y: 0,
-            w: 1920,
-            h: 1080,
-        };
-        let mons = [left, main];
-        assert_eq!(
-            full_screen_rect(Point { x: -5, y: 500 }, o, &mons, 3200, 1080),
-            left
-        );
-        assert_eq!(
-            full_screen_rect(Point { x: 0, y: 0 }, o, &mons, 3200, 1080),
-            main
-        );
-        // vùng chết dưới màn hình trái: màn hình gần nhất
-        assert_eq!(
-            full_screen_rect(Point { x: -100, y: 1060 }, o, &mons, 3200, 1080),
-            left
-        );
-        // không có màn hình hợp lệ: cả ảnh
-        let empty = [Rect {
-            x: 0,
-            y: 0,
-            w: 0,
-            h: 0,
-        }];
-        assert_eq!(
-            full_screen_rect(Point { x: 0, y: 0 }, o, &empty, 3200, 1080),
-            Rect {
-                x: 0,
-                y: 0,
-                w: 3200,
-                h: 1080
-            }
-        );
-    }
-
-    #[test]
-    fn selection_is_remembered_only_when_used() {
-        let old = Some(Rect {
-            x: 1,
-            y: 2,
-            w: 3,
-            h: 4,
-        });
-        let new = Rect {
-            x: 10,
-            y: 20,
-            w: 30,
-            h: 40,
-        };
-        for a in [Action::Upload, Action::Save, Action::Copy, Action::Pin] {
-            assert_eq!(remember_after(old, a, new), Some(new));
-            assert_eq!(remember_after(None, a, new), Some(new));
-        }
-        assert_eq!(remember_after(old, Action::Cancel, new), old);
-        assert_eq!(remember_after(None, Action::Cancel, new), None);
-    }
-
-    #[test]
-    fn settings_request_during_pending_menu_is_remembered() {
-        let (s, a) = gate_step(PendingMenu, OpenSettings);
-        assert_eq!(a, GateAction::Ignore);
-        let (s, a) = gate_step(s, OpenSettings);
-        assert_eq!(a, GateAction::Ignore);
-        // Hẹn giờ nổ: vẫn chụp trước, yêu cầu còn chờ.
-        let (s, a) = gate_step(s, TimerFired);
-        assert_eq!(a, GateAction::CaptureNow);
-        assert_eq!(
-            gate_step(s, OverlayClosed),
-            (SettingsOpen, GateAction::OpenSettings)
-        );
-        // Phím chụp thay cho hẹn giờ cũng vậy.
-        let (s, _) = gate_step(PendingMenu, OpenSettings);
-        let (s, a) = gate_step(s, Hotkey);
-        assert_eq!(a, GateAction::CaptureNow);
-        assert_eq!(
-            gate_step(s, OverlayClosed),
-            (SettingsOpen, GateAction::OpenSettings)
-        );
     }
 
     /// Góc ảnh ghim = góc trên trái vùng (đã kẹp vào ảnh) cộng gốc màn hình ảo, đúng một lần.
