@@ -1,7 +1,10 @@
 pub mod actions;
 pub mod annotate;
+pub mod app_flow;
+pub mod capture_gate;
 pub mod color;
 pub mod config;
+pub mod dirs;
 pub mod edit;
 pub mod geometry;
 pub mod history;

@@ -213,14 +213,8 @@ fn tabs_fit(tab_widths: &[i32], client_w: i32) -> bool {
     total <= i64::from(client_w)
 }
 
-/// Lý do mở cửa sổ Tùy chọn.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum OpenReason {
-    /// Người dùng chọn "Tùy chọn..." ở menu.
-    User,
-    /// Ứng dụng tự mở vì R2 chưa cấu hình, mất khóa hoặc cấu hình lỗi.
-    NeedsR2,
-}
+/// Lý do mở cửa sổ Tùy chọn (định nghĩa ở core, dùng chung mọi nền tảng).
+pub use darkshot_core::app_flow::OpenReason;
 
 /// Tab mở đầu theo lý do mở.
 pub fn initial_tab(reason: OpenReason) -> Tab {

@@ -119,6 +119,21 @@ pub fn fetch_latest(url: &str, current: Version) -> Option<Release> {
     parse_latest(std::str::from_utf8(&buf).ok()?)
 }
 
+/// Luật hiển thị khi kiểm tra bản mới xong: (hiện mục menu, hiện thông báo).
+/// Có bản mới thì luôn hiện mục menu; chỉ thông báo khi chưa báo đúng bản đó.
+pub fn update_outcome(found: Option<&Release>, notified: Option<Version>) -> (bool, bool) {
+    match found {
+        None => (false, false),
+        Some(r) => (true, notified != Some(r.version)),
+    }
+}
+
+/// Mục "Có bản mới" sau một lần kiểm tra: lỗi hoặc không có bản mới (`None`) không xóa mục đã
+/// hiện (lỗi mạng ở lần kiểm tra sau không được làm mất nó); chỉ có bản mới thì ghi đè.
+pub fn update_after_check(current: Option<Release>, found: Option<Release>) -> Option<Release> {
+    found.or(current)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -345,5 +360,39 @@ mod tests {
             fetch_latest(&format!("http://127.0.0.1:{port}/"), v(0, 2, 0)),
             None
         );
+    }
+
+    #[test]
+    fn update_after_check_keeps_item_on_none() {
+        let rel = |p| Release {
+            version: Version {
+                major: 0,
+                minor: 3,
+                patch: p,
+            },
+            url: String::new(),
+        };
+        assert_eq!(update_after_check(None, None), None);
+        assert_eq!(update_after_check(Some(rel(0)), None), Some(rel(0)));
+        assert_eq!(update_after_check(None, Some(rel(1))), Some(rel(1)));
+        assert_eq!(update_after_check(Some(rel(0)), Some(rel(1))), Some(rel(1)));
+    }
+
+    #[test]
+    fn update_outcome_rules() {
+        let v = |m, n, p| Version {
+            major: m,
+            minor: n,
+            patch: p,
+        };
+        let rel = Release {
+            version: v(0, 3, 0),
+            url: String::new(),
+        };
+        assert_eq!(update_outcome(None, None), (false, false));
+        assert_eq!(update_outcome(None, Some(v(0, 3, 0))), (false, false));
+        assert_eq!(update_outcome(Some(&rel), None), (true, true));
+        assert_eq!(update_outcome(Some(&rel), Some(v(0, 3, 0))), (true, false));
+        assert_eq!(update_outcome(Some(&rel), Some(v(0, 2, 0))), (true, true));
     }
 }
