@@ -111,6 +111,7 @@ Trạng thái: `chờ`, `đang làm`, `rà soát`, `xong`. Token là số do age
 | 87 Chụp từng bước: tài liệu, website, demo | task/87-steps-docs | scaffolder | haiku | xong | 119.967 | phiên điều phối đọc báo cáo | 0 | 119.967 |
 | Rà soát toàn đợt 12 (kèm xác nhận sửa lỗi chặn Task 86) | feature/step-capture | specialist | fable | xong | | 207.923 | | 207.923 |
 | 88 Chụp từng bước: sửa sau rà soát toàn đợt (bước đang ghi khi kết thúc, hạn chót thoát chung, phần sót khi xóa, Markdown) | task/88-steps-review-fixes | specialist (agent Task 86) | opus | xong | 39.629 | 65.468 (reviewer fable) | 7.940 | 113.037 |
+| 101 Bản macOS (đợt M, M2b): chuyển logic thuần sang core (cổng chụp, lặp lại lần chụp trước, tọa độ, cập nhật, OpenReason, dirs) | task/101-core-shared-logic | builder | sonnet | xong | 142.175 | 75.624 (reviewer opus, DUYỆT, không lỗi) | 0 (một sửa nhỏ do phiên điều phối: import `Config` thừa, bắt bởi CI Windows) | 217.799 |
 
 Task 15–19 là đợt 1 (kế hoạch `docs/superpowers/plans/2026-11-16-options-tabs-i18n.md`). Cộng Task 15–19: 1.326.884 (làm 847.114; rà soát 448.567; sửa 31.203). Theo model: opus (Task 17) 413.406; sonnet (15, 16, 18 và rà soát 19) 724.702; haiku (làm và sửa 19) 188.776. Chủ dự án đã nghiệm thu đợt 1 qua thử tay (2026-11-16).
 
