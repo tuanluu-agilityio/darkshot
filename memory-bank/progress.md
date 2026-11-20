@@ -113,6 +113,7 @@ Trạng thái: `chờ`, `đang làm`, `rà soát`, `xong`. Token là số do age
 | 88 Chụp từng bước: sửa sau rà soát toàn đợt (bước đang ghi khi kết thúc, hạn chót thoát chung, phần sót khi xóa, Markdown) | task/88-steps-review-fixes | specialist (agent Task 86) | opus | xong | 39.629 | 65.468 (reviewer fable) | 7.940 | 113.037 |
 | 101 Bản macOS (đợt M, M2b): chuyển logic thuần sang core (cổng chụp, lặp lại lần chụp trước, tọa độ, cập nhật, OpenReason, dirs) | task/101-core-shared-logic | builder | sonnet | xong | 142.175 | 75.624 (reviewer opus, DUYỆT, không lỗi) | 0 (một sửa nhỏ do phiên điều phối: import `Config` thừa, bắt bởi CI Windows) | 217.799 |
 | 102a Bản macOS (đợt M, M2c 1/5): chuyển logic thuần của `overlay.rs` sang core (`overlay_layout`, `color_picker`, `overlay_stroke`) | task/102a-overlay-logic | builder | sonnet | xong | 152.137 | 50.705 (reviewer opus, DUYỆT, không lỗi) | 0 | 202.842 |
+| 102b Bản macOS (đợt M, M2c 2/5): chuyển biểu mẫu Tùy chọn của `settings.rs` sang core (`settings_form`, kèm `describe`/`key_name` do `apply_form` cần) | task/102b-settings-form-logic | builder | sonnet | xong | 104.697 | 58.958 (reviewer opus, DUYỆT, không lỗi) | 0 | 163.655 |
 
 Task 15–19 là đợt 1 (kế hoạch `docs/superpowers/plans/2026-11-16-options-tabs-i18n.md`). Cộng Task 15–19: 1.326.884 (làm 847.114; rà soát 448.567; sửa 31.203). Theo model: opus (Task 17) 413.406; sonnet (15, 16, 18 và rà soát 19) 724.702; haiku (làm và sửa 19) 188.776. Chủ dự án đã nghiệm thu đợt 1 qua thử tay (2026-11-16).
 
