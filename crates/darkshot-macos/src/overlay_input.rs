@@ -493,6 +493,11 @@ impl Model {
     /// Nhấn chuột trái ở `p` (pixel của màn hình `screen`).
     pub fn press(&mut self, screen: usize, p: Point, now: Instant) {
         self.last_input = now;
+        // Một cú nhấn mới khi nét hay cử chỉ vẫn đang giữ nghĩa là đã mất `mouseUp` (nhả ngoài cửa
+        // sổ, mất key): chốt cái cũ trước, để lớp phủ không bao giờ kẹt ở trạng thái "đang kéo".
+        if self.annot.capturing() || self.annot.press_pending() {
+            self.lost_capture(now);
+        }
         let Some(bounds) = self.bounds(screen) else {
             return;
         };
@@ -618,11 +623,10 @@ impl Model {
         self.last_input = now;
         let bar = self.bar().filter(|(s, _)| *s == screen);
         self.hover = bar.and_then(|(s, bar)| bar_item_at(bar, p, self.dpi(s)));
-        if let Some(lay) = self.layout(screen) {
-            if let Some(img) = self.images.get(screen) {
-                let env = lay.env(img);
-                self.annot.hover(&env, p);
-            }
+        match (self.layout(screen), self.images.get(screen)) {
+            (Some(lay), Some(img)) => self.annot.hover(&lay.env(img), p),
+            // Chuột ở màn hình khác (hoặc chưa có vùng chọn): không mục nào được trỏ.
+            _ => self.annot.clear_hover(),
         }
     }
 
@@ -1911,6 +1915,44 @@ mod tests {
         let out = m.take_image(0).unwrap();
         assert_eq!((out.width, out.height), (3024, 1964));
         assert!(out.is_valid());
+    }
+
+    #[test]
+    fn a_missed_mouse_up_never_wedges_the_overlay() {
+        let t0 = Instant::now();
+        let mut m = selected_model(t0);
+        click_side(&mut m, SideItem::Tool(Tool::Pen), t0);
+        // Nét đang vẽ mà không có mouseUp (nhả ngoài cửa sổ).
+        m.press(0, pt(200, 150), t0);
+        m.drag(pt(250, 180), t0);
+        assert!(m.annot().capturing());
+        // Nhấn tiếp vào nút Hủy: nét cũ được chốt, nút hoạt động bình thường.
+        let (_, bar) = m.bar().unwrap();
+        let c = bar_button_rect(bar, m.dpi(0), BarItem::Act(Action::Cancel)).unwrap();
+        let p = pt(c.x + c.w / 2, c.y + c.h / 2);
+        m.press(0, p, t0);
+        assert!(!m.annot().capturing());
+        assert_eq!(m.annot().shapes().len(), 1);
+        assert_eq!(m.release(p, t0), Some(Action::Cancel));
+        // Mất key giữa lúc kéo: chốt nét.
+        let mut m = selected_model(t0);
+        click_side(&mut m, SideItem::Tool(Tool::Pen), t0);
+        m.press(0, pt(200, 150), t0);
+        m.drag(pt(250, 180), t0);
+        m.lost_capture(t0);
+        assert!(!m.annot().capturing());
+        assert_eq!(m.annot().shapes().len(), 1);
+    }
+
+    #[test]
+    fn hover_on_another_screen_clears_the_side_bar_highlight() {
+        let t0 = Instant::now();
+        let mut m = selected_model(t0);
+        let (_, side) = m.side().unwrap();
+        m.hover(0, pt(side.x + 2, side.y + 2), t0);
+        assert!(m.annot().side_hover().is_some());
+        m.hover(1, pt(side.x + 2, side.y + 2), t0);
+        assert_eq!(m.annot().side_hover(), None);
     }
 
     #[test]

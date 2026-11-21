@@ -1456,6 +1456,14 @@ impl Annot {
         };
     }
 
+    /// Chuột rời khỏi vùng công cụ (sang màn hình khác): bỏ mọi mục đang trỏ.
+    pub fn clear_hover(&mut self) {
+        self.side_hover = None;
+        self.size_hover = None;
+        self.shape_hover = None;
+        self.color_hover = None;
+    }
+
     /// Con trỏ chuột theo ngữ cảnh ở `p`.
     pub fn cursor_at(&self, env: &Env, p: Point, hit: Hit) -> CursorKind {
         if self.stroke.is_some() {
@@ -2655,6 +2663,48 @@ mod tests {
         );
         assert!(h.a.shapes().is_empty());
         assert!(h.a.text().is_none());
+    }
+
+    #[test]
+    fn burned_image_shows_later_shapes_in_front() {
+        let mut h = H::new();
+        h.draw(Tool::Blur, pt(100, 100), pt(200, 200));
+        h.draw(Tool::Blur, pt(150, 150), pt(300, 300));
+        let shapes = h.a.take_shapes(96);
+        let colors: Vec<Rgb> = shapes
+            .iter()
+            .map(|s| match s {
+                Shape::Blur { color, .. } => *color,
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(colors.len(), 2);
+        assert_ne!(colors[0], colors[1]);
+        let (w, hh) = (h.img.width as i32, h.img.height as i32);
+        let mut out = h.img.clone();
+        crate::annotate_draw::burn(
+            &mut out,
+            &shapes,
+            Rect {
+                x: 0,
+                y: 0,
+                w,
+                h: hh,
+            },
+        )
+        .unwrap();
+        let px = |x: i32, y: i32| {
+            let i = ((y * w + x) * 4) as usize;
+            Rgb(out.bgra[i + 2], out.bgra[i + 1], out.bgra[i])
+        };
+        // Phần chỉ có hình dưới; phần chồng nhau thấy hình trên (vẽ sau); phần chỉ có hình trên.
+        assert_eq!(px(120, 120), colors[0]);
+        assert_eq!(
+            px(175, 175),
+            colors[1],
+            "chỗ chồng nhau: hình vẽ sau ở phía trước"
+        );
+        assert_eq!(px(250, 250), colors[1]);
     }
 
     #[test]
