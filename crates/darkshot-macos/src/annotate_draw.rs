@@ -6,8 +6,8 @@
 //! `draw_shapes` duyệt danh sách theo chỉ số tăng dần, hình sau đè lên hình trước.
 
 use darkshot_core::annotate::{
-    arrow_geometry, arrow_min_head, blur_pixel_rect, outline_color, Pt, Shape, TextEdit,
-    MARKER_ALPHA, STEP_RING, TEXT_DIP, TEXT_OUTLINE_DIP,
+    align_offsets, arrow_geometry, arrow_min_head, blur_pixel_rect, outline_color, Align, Pt,
+    Shape, Style, TextEdit, LABEL_PAD_EM, MARKER_ALPHA, STEP_RING, TEXT_DIP, TEXT_OUTLINE_DIP,
 };
 use darkshot_core::geometry::Rect;
 use darkshot_core::image::Image;
@@ -368,6 +368,154 @@ fn draw_blur(c: &CGContext, a: Pt, b: Pt, color: Rgb) -> bool {
     true
 }
 
+// ---------------------------------------------------------------- Hộp có kiểu và khối chữ
+
+/// Chạy `paint` trong một lớp trong suốt hợp nhất với độ trong suốt `opacity`: nền và viền vẽ đặc
+/// rồi cả khối trộn với ảnh bên dưới một lần (chỗ viền đè nền không bị trộn hai lần).
+fn with_opacity(c: &CGContext, opacity: f32, paint: impl FnOnce()) {
+    CGContext::save_g_state(Some(c));
+    CGContext::set_alpha(Some(c), f64::from(opacity.clamp(0.0, 1.0)));
+    // SAFETY: không truyền thông tin phụ; lớp được đóng ngay sau đó trên cùng ngữ cảnh.
+    unsafe { CGContext::begin_transparency_layer(Some(c), None) };
+    paint();
+    CGContext::end_transparency_layer(Some(c));
+    CGContext::restore_g_state(Some(c));
+}
+
+/// Nền và viền của hình chữ nhật/elip `r` theo `style` (viền căn giữa trên cạnh `r`).
+fn paint_box(c: &CGContext, r: CGRect, oval: bool, style: &Style) {
+    if let Some(fill) = style.fill {
+        set_fill(c, fill, 1.0);
+        if oval {
+            CGContext::fill_ellipse_in_rect(Some(c), r);
+        } else {
+            CGContext::fill_rect(Some(c), r);
+        }
+    }
+    if style.stroke_width > 0.0 {
+        set_stroke(c, style.stroke, 1.0);
+        CGContext::set_line_width(Some(c), f(style.stroke_width));
+        if oval {
+            CGContext::stroke_ellipse_in_rect(Some(c), r);
+        } else {
+            CGContext::set_line_join(Some(c), CGLineJoin::Miter);
+            CGContext::set_line_cap(Some(c), CGLineCap::Butt);
+            CGContext::stroke_rect(Some(c), r);
+        }
+    }
+}
+
+fn draw_box(c: &CGContext, a: Pt, b: Pt, oval: bool, style: &Style) -> bool {
+    let w = style.stroke_width;
+    if !(sane_pt(a) && sane_pt(b) && sane(w)) || w < 0.0 || !style.opacity.is_finite() {
+        return false;
+    }
+    if style.fill.is_none() && w <= 0.0 {
+        return true;
+    }
+    let r = cg_rect(
+        a.x.min(b.x),
+        a.y.min(b.y),
+        (b.x - a.x).abs(),
+        (b.y - a.y).abs(),
+    );
+    with_opacity(c, style.opacity, || paint_box(c, r, oval, style));
+    true
+}
+
+/// Số đo khối chữ: hộp (góc trên trái, rộng, cao), đệm, và từng dòng với x bắt đầu (tọa độ ảnh).
+struct LabelMetrics {
+    style: TextStyle,
+    pad: f32,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    /// (dòng, x bắt đầu chữ của dòng)
+    lines: Vec<(String, f32)>,
+}
+
+fn label_pad(size: f32) -> f32 {
+    LABEL_PAD_EM * size
+}
+
+fn label_metrics(origin: Pt, text: &str, size: f32, align: Align) -> Option<LabelMetrics> {
+    if !sane_pt(origin) {
+        return None;
+    }
+    let style = TextStyle::new(size)?;
+    let pad = label_pad(size);
+    let strs: Vec<&str> = text.split('\n').collect();
+    let widths = strs
+        .iter()
+        .map(|l| advance_width(&style, l))
+        .collect::<Option<Vec<f32>>>()?;
+    let (inner_w, offs) = align_offsets(align, &widths);
+    let h = strs.len() as f32 * style.line_height + 2.0 * pad;
+    let lines = strs
+        .iter()
+        .zip(&offs)
+        .map(|(l, o)| ((*l).to_string(), origin.x + pad + o))
+        .collect();
+    Some(LabelMetrics {
+        style,
+        pad,
+        x: origin.x,
+        y: origin.y,
+        w: inner_w + 2.0 * pad,
+        h,
+        lines,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_label(
+    c: &CGContext,
+    origin: Pt,
+    text: &str,
+    size: f32,
+    color: Rgb,
+    align: Align,
+    style: &Style,
+) -> bool {
+    if !sane(style.stroke_width) || style.stroke_width < 0.0 || !style.opacity.is_finite() {
+        return false;
+    }
+    let Some(m) = label_metrics(origin, text, size, align) else {
+        return false;
+    };
+    if style.fill.is_some() || style.stroke_width > 0.0 {
+        // Viền nằm trọn trong hộp: thụt vào nửa độ dày.
+        let inset = style.stroke_width / 2.0;
+        let r = cg_rect(
+            m.x + inset,
+            m.y + inset,
+            (m.w - style.stroke_width).max(0.0),
+            (m.h - style.stroke_width).max(0.0),
+        );
+        with_opacity(c, style.opacity, || paint_box(c, r, false, style));
+    }
+    // Có nền thì chữ đủ rõ không cần nét ngoài; không nền giữ nét ngoài như chữ thường.
+    let outline = style
+        .fill
+        .is_none()
+        .then(|| (outline_color(color), outline_width(size)));
+    for (i, (l, x)) in m.lines.iter().enumerate() {
+        if l.is_empty() {
+            continue;
+        }
+        let Some(line) = m.style.line(l) else {
+            return false;
+        };
+        let baseline = m.y + m.pad + m.style.ascent + i as f32 * m.style.line_height;
+        if !sane(baseline) {
+            return false;
+        }
+        draw_line(c, &line, *x, baseline, color, outline);
+    }
+    true
+}
+
 fn draw_one(c: &CGContext, s: &Shape) -> bool {
     match s {
         Shape::Pen {
@@ -462,6 +610,15 @@ fn draw_one(c: &CGContext, s: &Shape) -> bool {
             n,
             color,
         } => draw_step(c, *center, *radius, *n, *color),
+        Shape::Box { a, b, oval, style } => draw_box(c, *a, *b, *oval, style),
+        Shape::Label {
+            origin,
+            text,
+            size,
+            color,
+            align,
+            style,
+        } => draw_label(c, *origin, text, *size, *color, *align, style),
     }
 }
 
@@ -522,6 +679,17 @@ pub fn shape_bounds(s: &Shape) -> Rect {
     if let Some(r) = s.bounds() {
         return r;
     }
+    if let Shape::Label {
+        origin,
+        text,
+        size,
+        align,
+        style,
+        ..
+    } = s
+    {
+        return label_bounds(*origin, text, *size, *align, style);
+    }
     let Shape::Text {
         origin, text, size, ..
     } = s
@@ -545,6 +713,61 @@ pub fn shape_bounds(s: &Shape) -> Rect {
             origin.y + lines * size * 1.5 + pad,
         )
     })
+}
+
+/// Hộp bao của khối chữ: cả hộp (gồm đệm và viền), nới nét ngoài của chữ.
+fn label_bounds(origin: Pt, text: &str, size: f32, align: Align, style: &Style) -> Rect {
+    let margin = (outline_width(size) / 2.0).max(style.stroke_width.max(0.0) / 2.0);
+    let (x, y, w, h) = match label_metrics(origin, text, size, align) {
+        Some(m) => (m.x, m.y, m.w, m.h),
+        None => {
+            // Không đo được: ước lượng (mỗi ký tự 0,6 em, dòng 1,5 em).
+            let lines = text.split('\n').count().max(1) as f32;
+            let cols = text
+                .split('\n')
+                .map(|l| l.chars().count())
+                .max()
+                .unwrap_or(0) as f32;
+            let pad = label_pad(size);
+            (
+                origin.x,
+                origin.y,
+                cols * size * 0.6 + 2.0 * pad,
+                lines * size * 1.5 + 2.0 * pad,
+            )
+        }
+    };
+    round_out(x - margin, y - margin, x + w + margin, y + h + margin)
+}
+
+/// Vị trí và chiều cao con trỏ nháy của ô chữ có kiểu: x theo căn lề của dòng chứa con trỏ.
+pub fn label_caret_rect(edit: &TextEdit, align: Align) -> Rect {
+    let (origin, size) = (edit.origin(), edit.size());
+    let (line, col) = edit.line_col();
+    let text = edit.text();
+    let prefix: String = text
+        .split('\n')
+        .nth(line)
+        .unwrap_or("")
+        .chars()
+        .take(col)
+        .collect();
+    let pad = label_pad(size);
+    let measured = label_metrics(origin, &text, size, align).and_then(|m| {
+        let x = m.lines.get(line).map(|(_, x)| *x)?;
+        let w = advance_width(&m.style, &prefix)?;
+        Some((x + w, m.style.line_height))
+    });
+    let (cx, lh) = measured.unwrap_or((
+        origin.x + pad + prefix.chars().count() as f32 * size * 0.5,
+        size * 1.33,
+    ));
+    Rect {
+        x: cx.floor() as i32,
+        y: (origin.y + pad + line as f32 * lh).floor() as i32,
+        w: ((size / TEXT_DIP).round() as i32).max(1),
+        h: (lh.ceil() as i32).max(1),
+    }
 }
 
 /// Hộp mực của mọi dòng cộng nửa nét ngoài, hợp với góc đặt chữ, làm tròn ra ngoài.
@@ -582,7 +805,9 @@ fn text_bounds(origin: Pt, text: &str, size: f32) -> Option<Rect> {
     (r.x.abs() < i32::MAX / 2 && r.w >= 0 && r.h >= 0).then_some(r)
 }
 
-/// Vị trí và chiều cao con trỏ nháy (tọa độ ảnh chụp) của ô chữ đang soạn.
+/// Vị trí và chiều cao con trỏ nháy (tọa độ ảnh chụp) của ô chữ thường (chưa có kiểu); ô chữ có
+/// kiểu dùng `label_caret_rect`.
+#[cfg(test)]
 pub fn caret_rect(edit: &TextEdit) -> Rect {
     // TextEdit không cho đọc gốc và cỡ chữ: lấy qua bản sao có thêm một ký tự (to_shape luôn Some).
     let mut probe = edit.clone();
@@ -1491,6 +1716,211 @@ mod tests {
         assert_ne!(render(60, 50, 90, &rev), a);
     }
 
+    // ---- Task 112: kiểu cho Hình và Chữ
+
+    const GREEN: Rgb = Rgb(0, 200, 0);
+
+    fn styled(oval: bool, fill: Option<Rgb>, width: f32, opacity: f32) -> Shape {
+        Shape::Box {
+            a: pt(10.0, 10.0),
+            b: pt(50.0, 40.0),
+            oval,
+            style: Style {
+                fill,
+                stroke: RED,
+                stroke_width: width,
+                opacity,
+            },
+        }
+    }
+
+    #[test]
+    fn box_border_has_the_right_color_and_thickness() {
+        let img = render(60, 50, 0, &[styled(false, Some(GREEN), 4.0, 1.0)]);
+        assert_eq!(px(&img, 7, 25), [0, 0, 0, 255], "ngoài viền");
+        assert!(near(px(&img, 8, 25), bgr(RED), 3), "mép ngoài viền");
+        assert!(near(px(&img, 11, 25), bgr(RED), 3), "mép trong viền");
+        assert!(near(px(&img, 13, 25), bgr(GREEN), 3), "nền ngay sau viền");
+        assert!(near(px(&img, 30, 25), bgr(GREEN), 3), "tâm là nền");
+        assert!(!near(px(&img, 12, 25), bgr(RED), 30), "hết viền ở x = 12");
+    }
+
+    #[test]
+    fn box_without_fill_is_hollow_and_zero_width_hides_the_border() {
+        let img = render(60, 50, 40, &[styled(false, None, 4.0, 1.0)]);
+        assert_eq!(px(&img, 30, 25), [40, 40, 40, 255]);
+        assert!(near(px(&img, 10, 25), bgr(RED), 3));
+        let img = render(60, 50, 40, &[styled(false, Some(GREEN), 0.0, 1.0)]);
+        assert!(
+            near(px(&img, 10, 25), bgr(GREEN), 3),
+            "không viền: nền tới sát mép"
+        );
+        assert_eq!(px(&img, 8, 25), [40, 40, 40, 255]);
+        let img = render(60, 50, 40, &[styled(true, None, 0.0, 1.0)]);
+        assert_eq!(img, solid(60, 50, 40), "không nền, không viền: không vẽ gì");
+    }
+
+    #[test]
+    fn box_fill_at_half_opacity_blends_with_the_screenshot_once() {
+        let fill = Rgb(255, 255, 255);
+        let img = render(60, 50, 0, &[styled(false, Some(fill), 4.0, 0.5)]);
+        let c = px(&img, 30, 25);
+        assert!(near(c, [128, 128, 128, 255], 3), "{c:?}");
+        let e = px(&img, 9, 25);
+        assert!(near(e, [0, 0, 128, 255], 3), "{e:?}");
+        // Chỗ viền đè nền (x = 11): chỉ trộn MỘT lần, bằng màu viền 50%, không sẫm hơn.
+        let o = px(&img, 11, 25);
+        assert!(near(o, [0, 0, 128, 255], 3), "{o:?}");
+        let img = render(60, 50, 200, &[styled(false, Some(Rgb(0, 0, 0)), 0.0, 0.5)]);
+        let c = px(&img, 30, 25);
+        assert!(near(c, [100, 100, 100, 255], 3), "{c:?}");
+    }
+
+    #[test]
+    fn oval_box_fills_the_ellipse_only() {
+        let img = render(60, 50, 0, &[styled(true, Some(GREEN), 2.0, 1.0)]);
+        assert!(near(px(&img, 30, 25), bgr(GREEN), 3));
+        assert_eq!(px(&img, 11, 11), [0, 0, 0, 255], "góc khung nằm ngoài elip");
+    }
+
+    fn label(text: &str, align: Align, fill: Option<Rgb>, width: f32, opacity: f32) -> Shape {
+        Shape::Label {
+            origin: pt(10.0, 10.0),
+            text: text.into(),
+            size: 24.0,
+            color: RED,
+            align,
+            style: Style {
+                fill,
+                stroke: BLUE,
+                stroke_width: width,
+                opacity,
+            },
+        }
+    }
+
+    /// Cột nhỏ nhất và lớn nhất có điểm đỏ trong các hàng [y0, y1).
+    fn red_span(img: &Image, y0: u32, y1: u32) -> Option<(u32, u32)> {
+        let mut span: Option<(u32, u32)> = None;
+        for y in y0..y1 {
+            for x in 0..img.width {
+                let p = px(img, x, y);
+                if p[2] > 200 && p[1] < 60 && p[0] < 60 {
+                    span = Some(match span {
+                        None => (x, x),
+                        Some((a, b)) => (a.min(x), b.max(x)),
+                    });
+                }
+            }
+        }
+        span
+    }
+
+    #[test]
+    fn label_alignment_places_each_line_in_the_box() {
+        let text = "WWWWWWWW\nW";
+        let mut starts = Vec::new();
+        for align in Align::ALL {
+            let s = label(text, align, Some(Rgb(255, 255, 255)), 0.0, 1.0);
+            let bounds = shape_bounds(&s);
+            let img = render(260, 120, 0, &[s]);
+            let line_h = (bounds.h as f32 / 2.0) as u32;
+            let second = red_span(&img, 10 + line_h + 2, 10 + 2 * line_h - 2).expect("dòng 2");
+            let first = red_span(&img, 10 + 4, 10 + line_h - 2).expect("dòng 1");
+            let centre2 = (second.0 + second.1) as f32 / 2.0;
+            let centre1 = (first.0 + first.1) as f32 / 2.0;
+            match align {
+                Align::Left => assert!(second.0.abs_diff(first.0) <= 2, "{first:?} {second:?}"),
+                Align::Center => assert!((centre2 - centre1).abs() <= 3.0, "{centre1} {centre2}"),
+                Align::Right => assert!(second.1.abs_diff(first.1) <= 2, "{first:?} {second:?}"),
+            }
+            starts.push(second.0);
+        }
+        assert!(starts[0] < starts[1] && starts[1] < starts[2], "{starts:?}");
+    }
+
+    #[test]
+    fn label_box_has_border_fill_and_padding() {
+        let s = label("Hi", Align::Left, Some(GREEN), 3.0, 1.0);
+        let b = shape_bounds(&s);
+        let img = render(200, 100, 0, &[s]);
+        assert!(
+            near(px(&img, 11, 20), bgr(BLUE), 3),
+            "{:?}",
+            px(&img, 11, 20)
+        );
+        assert!(near(px(&img, 14, 20), bgr(GREEN), 3));
+        assert!(b.x <= 10 && b.y <= 10 && b.right() > 10 + 20);
+    }
+
+    #[test]
+    fn label_background_is_optional_and_blends_with_opacity() {
+        let img = render(200, 100, 90, &[label("Hi", Align::Left, None, 0.0, 1.0)]);
+        assert_eq!(px(&img, 11, 11), [90, 90, 90, 255]);
+        let img = render(
+            200,
+            100,
+            0,
+            &[label("Hi", Align::Left, Some(Rgb(255, 255, 255)), 0.0, 0.5)],
+        );
+        assert!(near(px(&img, 11, 11), [128, 128, 128, 255], 3));
+    }
+
+    #[test]
+    fn label_bounds_grow_with_text_and_contain_the_caret() {
+        let one = shape_bounds(&label("a", Align::Left, None, 0.0, 1.0));
+        let two = shape_bounds(&label("a\nbbbbbb", Align::Left, None, 0.0, 1.0));
+        assert!(two.w > one.w && two.h > one.h);
+        let thick = shape_bounds(&label("a", Align::Left, Some(GREEN), 12.0, 1.0));
+        assert!(thick.w >= one.w);
+        let mut e = TextEdit::new(pt(10.0, 10.0), 24.0, RED);
+        e.insert("ab\ncdef");
+        for align in Align::ALL {
+            let r = label_caret_rect(&e, align);
+            let s = label("ab\ncdef", align, None, 0.0, 1.0);
+            let b = shape_bounds(&s);
+            assert!(r.x >= b.x && r.x <= b.right(), "{align:?} {r:?} {b:?}");
+            assert!(
+                r.y >= b.y && r.bottom() <= b.bottom() + 1,
+                "{align:?} {r:?} {b:?}"
+            );
+        }
+        let mut short = TextEdit::new(pt(10.0, 10.0), 24.0, RED);
+        short.insert("WWWWWW\nW");
+        let (l, r) = (
+            label_caret_rect(&short, Align::Left),
+            label_caret_rect(&short, Align::Right),
+        );
+        assert!(r.x > l.x + 10, "{l:?} {r:?}");
+    }
+
+    #[test]
+    fn styled_shapes_keep_z_order_and_burn_offsets() {
+        let back = styled(false, Some(BLUE), 0.0, 1.0);
+        let front = Shape::Box {
+            a: pt(20.0, 15.0),
+            b: pt(40.0, 35.0),
+            oval: false,
+            style: Style {
+                fill: Some(GREEN),
+                ..Style::new(RED, 0.0)
+            },
+        };
+        let img = render(60, 50, 0, &[back.clone(), front.clone()]);
+        assert!(near(px(&img, 30, 25), bgr(GREEN), 3));
+        let img = render(60, 50, 0, &[front, back]);
+        assert!(near(px(&img, 30, 25), bgr(BLUE), 3));
+        let mut img = solid(30, 30, 0);
+        let crop = Rect {
+            x: 10,
+            y: 10,
+            w: 30,
+            h: 30,
+        };
+        burn(&mut img, &[styled(false, Some(GREEN), 0.0, 1.0)], crop).unwrap();
+        assert!(near(px(&img, 5, 5), bgr(GREEN), 3), "dịch theo vùng cắt");
+    }
+
     /// Chạy tay (an toàn, chỉ ghi một tệp PNG vào thư mục tạm): ảnh mẫu có mọi loại hình để xem bằng
     /// mắt. Lệnh: `cargo test -p darkshot-macos --bin darkshot-macos -- --ignored annotate_sample
     /// --test-threads=1`.
@@ -1588,6 +2018,49 @@ mod tests {
                 b: pt(630.0, 400.0),
                 width: 12.0,
                 color: BLUE,
+            },
+            Shape::Box {
+                a: pt(240.0, 320.0),
+                b: pt(330.0, 400.0),
+                oval: false,
+                style: Style {
+                    fill: Some(Rgb(255, 255, 255)),
+                    stroke: Rgb(0, 90, 200),
+                    stroke_width: 6.0,
+                    opacity: 0.5,
+                },
+            },
+            Shape::Box {
+                a: pt(340.0, 320.0),
+                b: pt(420.0, 400.0),
+                oval: true,
+                style: Style {
+                    fill: Some(Rgb(255, 200, 0)),
+                    stroke: Rgb(120, 0, 0),
+                    stroke_width: 4.0,
+                    opacity: 1.0,
+                },
+            },
+            Shape::Label {
+                origin: pt(450.0, 20.0),
+                text: "Căn giữa\nmột dòng dài hơn\nxin chào".into(),
+                size: 20.0,
+                color: Rgb(20, 20, 20),
+                align: Align::Center,
+                style: Style {
+                    fill: Some(Rgb(255, 255, 160)),
+                    stroke: Rgb(120, 90, 0),
+                    stroke_width: 3.0,
+                    opacity: 0.85,
+                },
+            },
+            Shape::Label {
+                origin: pt(450.0, 150.0),
+                text: "Căn phải\nngắn".into(),
+                size: 20.0,
+                color: YELLOW,
+                align: Align::Right,
+                style: Style::new(Rgb(0, 0, 0), 0.0),
             },
         ];
         let crop = full(&img);

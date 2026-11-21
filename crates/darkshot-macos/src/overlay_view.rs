@@ -4,9 +4,12 @@
 //! gian pixel của màn hình đó; mọi trạng thái nằm ở `overlay` (mô hình thuần `overlay_input`).
 
 use crate::annotate_draw;
+use crate::annotate_style::{
+    layout as style_layout, opacity_percent, StyleCell, StyleLayout, StyleTarget,
+};
 use crate::annotate_ui::{
-    flyout_rect_for, flyout_tip_rect, palette_cell_rect, side_tip_rect, Annot, Flyout, Layer,
-    TextCmd,
+    flyout_rect_for, flyout_tip_rect, palette_cell_rect, side_tip_rect, style_rect_for, Annot,
+    Flyout, Layer, TextCmd,
 };
 use crate::coords::px_to_pt;
 use crate::lang;
@@ -15,7 +18,7 @@ use crate::overlay_input::{
     bar_button_rect, bar_layout, bar_tip, hint_rect, label_rect, size_label, tip_rect, Mods,
 };
 use darkshot_core::actions::Action;
-use darkshot_core::annotate::{SizeLevel, Tool, PALETTE};
+use darkshot_core::annotate::{Align, SizeLevel, Tool, PALETTE};
 use darkshot_core::color_picker::size_dot;
 use darkshot_core::edit::{frame, handles};
 use darkshot_core::geometry::Rect;
@@ -749,7 +752,7 @@ fn draw_marks(cg: &CGContext, a: &Annot, clip: Rect) {
             Layer::Preview(s) | Layer::Stroke(s) => {
                 annotate_draw::draw_shapes(cg, std::slice::from_ref(s), 0, 0, clip);
             }
-            Layer::Typing(s) => {
+            Layer::Boxed(s) | Layer::Typing(s) => {
                 annotate_draw::draw_shapes(cg, std::slice::from_ref(&s), 0, 0, clip);
             }
         }
@@ -1021,6 +1024,10 @@ fn draw_side(c: Option<&CGContext>, f: &Frame, a: &Annot, side: Rect, sel: Rect,
             OVERLAY_BORDER,
         );
     }
+    // Bảng thuộc tính của Hình/Chữ (khi không có bảng Cỡ/Hình/Màu mở).
+    if a.style_panel_open() {
+        draw_style_panel(c, f, a, side, sel, mon, &attrs);
+    }
     // Bảng đang mở.
     let Some(fly) = flyout_rect_for(a.flyout(), side, sel, mon, dpi) else {
         return;
@@ -1084,6 +1091,189 @@ fn draw_side(c: Option<&CGContext>, f: &Frame, a: &Annot, side: Rect, sel: Rect,
                     inner_frame(c, inflate(cell, -t), t.max(1), ACCENT);
                 } else if a.color_hover() == Some(i) {
                     inner_frame(c, cell, t, WHITE);
+                }
+            }
+        }
+    }
+}
+
+/// Chữ `s` trong ô `r`: giữa ô, hoặc sát trái (đệm nhỏ) khi `centered` là false.
+fn text_in(
+    r: Rect,
+    s: &str,
+    attrs: &NSDictionary<NSAttributedStringKey, AnyObject>,
+    centered: bool,
+    dpi: u32,
+) {
+    let text = NSString::from_str(s);
+    let size = text_size(&text, attrs);
+    let x = if centered {
+        f64::from(r.x) + f64::from(r.w - size.0) / 2.0
+    } else {
+        f64::from(r.x + scaled(2, dpi))
+    };
+    let at = CGPoint::new(x, f64::from(r.y) + f64::from(r.h - size.1) / 2.0);
+    // SAFETY: như `bubble`.
+    unsafe { text.drawAtPoint_withAttributes(at, Some(attrs)) };
+}
+
+/// Nút của bảng thuộc tính: nền khi trỏ, viền `ACCENT` khi đang bật.
+fn style_button(c: Option<&CGContext>, r: Rect, on: bool, hot: bool, dpi: u32) {
+    if hot {
+        fill(c, inflate(r, -1), OVERLAY_HOVER);
+    }
+    if on {
+        inner_frame(c, r, scaled(MARK, dpi).max(1), ACCENT);
+    }
+}
+
+/// Ba vạch của biểu tượng căn lề trong ô `r`.
+fn align_glyph(c: Option<&CGContext>, r: Rect, a: Align, color: Rgb) {
+    let (w, h) = (r.w * 5 / 10, r.h * 5 / 10);
+    let (x0, y0) = (r.x + (r.w - w) / 2, r.y + (r.h - h) / 2);
+    let bar_h = (h / 5).max(1);
+    for (i, frac) in [10, 6, 8].iter().enumerate() {
+        let bw = w * frac / 10;
+        let x = match a {
+            Align::Left => x0,
+            Align::Center => x0 + (w - bw) / 2,
+            Align::Right => x0 + w - bw,
+        };
+        let y = y0 + i as i32 * (h - bar_h) / 2;
+        fill(
+            c,
+            Rect {
+                x,
+                y,
+                w: bw,
+                h: bar_h,
+            },
+            color,
+        );
+    }
+}
+
+fn style_tip(cell: StyleCell) -> Option<Msg> {
+    match cell {
+        StyleCell::Align(Align::Left) => Some(Msg::AlignLeft),
+        StyleCell::Align(Align::Center) => Some(Msg::AlignCenter),
+        StyleCell::Align(Align::Right) => Some(Msg::AlignRight),
+        _ => None,
+    }
+}
+
+/// Bảng thuộc tính của Hình và Chữ: ô Nền/Viền/Không nền, 48 màu, độ dày viền, độ trong suốt và
+/// (Chữ) căn lề.
+fn draw_style_panel(
+    c: Option<&CGContext>,
+    f: &Frame,
+    a: &Annot,
+    side: Rect,
+    sel: Rect,
+    mon: Rect,
+    attrs: &NSDictionary<NSAttributedStringKey, AnyObject>,
+) {
+    let dpi = f.dpi;
+    let Some(view) = a.style_view(dpi) else {
+        return;
+    };
+    let Some(rect) = style_rect_for(view.kind, side, sel, mon, dpi) else {
+        return;
+    };
+    let l: StyleLayout = style_layout(rect, view.kind, dpi);
+    panel(c, rect, dpi);
+    let small = text_attrs(FONT_PT * f.scale * 0.9);
+    let hover = a.style_hover();
+    let target = a.style_target();
+    let t = scaled(MARK, dpi).max(1);
+    // Hàng ô: Nền, Viền, Không nền.
+    let chips = [
+        (
+            l.fill_chip,
+            Msg::StyleFill,
+            target == StyleTarget::Fill,
+            StyleCell::Target(StyleTarget::Fill),
+        ),
+        (
+            l.border_chip,
+            Msg::StyleBorder,
+            target == StyleTarget::Border,
+            StyleCell::Target(StyleTarget::Border),
+        ),
+        (
+            l.no_fill,
+            Msg::StyleNoFill,
+            view.fill.is_none(),
+            StyleCell::NoFill,
+        ),
+    ];
+    for (r, msg, on, cell) in chips {
+        style_button(c, r, on, hover == Some(cell), dpi);
+        text_in(r, lang::tr(msg), &small, true, dpi);
+    }
+    // 48 màu: ô đang áp cho nền hoặc viền có viền trắng rồi `ACCENT`.
+    let active = match target {
+        StyleTarget::Fill => view.fill,
+        StyleTarget::Border => Some(view.stroke),
+    };
+    for (i, color) in PALETTE.iter().enumerate() {
+        let Some(cell) = l.cells.get(i).copied() else {
+            continue;
+        };
+        fill(c, cell, *color);
+        if Some(*color) == active {
+            inner_frame(c, cell, t, WHITE);
+            inner_frame(c, inflate(cell, -t), t.max(1), ACCENT);
+        } else if hover == Some(StyleCell::Color(i)) {
+            inner_frame(c, cell, t, WHITE);
+        }
+    }
+    // Độ dày viền và độ trong suốt: nhãn, [-], giá trị, [+].
+    let width = format!("{}", view.width_dip.round() as i32);
+    let opacity = format!("{}%", opacity_percent(view.opacity));
+    let rows = [
+        (
+            l.width_label,
+            Msg::StyleWidth,
+            (l.width_minus, StyleCell::Width(-1)),
+            l.width_value,
+            width,
+            (l.width_plus, StyleCell::Width(1)),
+        ),
+        (
+            l.opacity_label,
+            Msg::StyleOpacity,
+            (l.opacity_minus, StyleCell::Opacity(-1)),
+            l.opacity_value,
+            opacity,
+            (l.opacity_plus, StyleCell::Opacity(1)),
+        ),
+    ];
+    for (label, msg, minus, value, text, plus) in rows {
+        text_in(label, lang::tr(msg), &small, false, dpi);
+        for (r, cell) in [minus, plus] {
+            style_button(c, r, false, hover == Some(cell), dpi);
+            inner_frame(c, r, 1, OVERLAY_BORDER);
+            let sign = if matches!(cell, StyleCell::Width(-1) | StyleCell::Opacity(-1)) {
+                "\u{2212}"
+            } else {
+                "+"
+            };
+            text_in(r, sign, attrs, true, dpi);
+        }
+        text_in(value, &text, attrs, true, dpi);
+    }
+    // Căn lề (Chữ).
+    if let (Some(aligns), Some(cur)) = (l.aligns, view.align) {
+        for (al, r) in Align::ALL.iter().zip(aligns) {
+            let cell = StyleCell::Align(*al);
+            let on = cur == *al;
+            let hot = hover == Some(cell);
+            style_button(c, r, on, hot, dpi);
+            align_glyph(c, r, *al, if on || hot { ACCENT } else { OVERLAY_ICON });
+            if hot {
+                if let Some(msg) = style_tip(cell) {
+                    flyout_tip(c, attrs, r, rect, mon, dpi, msg);
                 }
             }
         }
