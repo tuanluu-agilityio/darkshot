@@ -1,7 +1,8 @@
 //! Khóa bí mật R2 lưu trong Keychain của macOS (quyết định 136).
 //!
 //! Tệp cấu hình chỉ giữ dấu `keychain:v1`; khóa thật nằm trong Keychain (mục mật khẩu chung,
-//! service `darkshot`, tài khoản cố định). Logic dấu/kiểm tách khỏi Keychain qua `KeyBackend`
+//! service `darkshot`, tài khoản cố định). Hồ sơ cách ly (`DARKSHOT_PROFILE_DIR`) dùng service
+//! riêng `darkshot-sandbox-<băm>` để không bao giờ ghi đè khóa thật (quyết định 138). Logic dấu/kiểm tách khỏi Keychain qua `KeyBackend`
 //! để kiểm thử không chạm Keychain thật. Lỗi là chuỗi kỹ thuật cho nhật ký, không bao giờ
 //! chứa khóa.
 
@@ -9,6 +10,7 @@ use darkshot_core::config::SecretStore;
 use security_framework::passwords::{
     delete_generic_password, get_generic_password, set_generic_password,
 };
+use std::path::Path;
 
 /// `errSecItemNotFound` (Security/SecBase.h); `security-framework` không xuất lại hằng này.
 const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
@@ -17,8 +19,23 @@ const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
 pub const MARKER: &[u8] = b"keychain:v1";
 /// Service của mục Keychain của ứng dụng.
 pub const SERVICE: &str = "darkshot";
+/// Tiền tố service của hồ sơ cách ly.
+pub const SANDBOX_SERVICE_PREFIX: &str = "darkshot-sandbox-";
 /// Tài khoản cố định của mục Keychain.
 pub const ACCOUNT: &str = "r2-secret-access-key";
+
+/// Băm FNV-1a 64 bit của đường dẫn (chữ thường), như tên mutex cách ly của lớp Windows.
+pub fn profile_hash(p: &Path) -> u64 {
+    let _ = p;
+    0 // STUB
+}
+
+/// Service Keychain cho hồ sơ: không có hồ sơ cách ly thì `darkshot`; có thì
+/// `darkshot-sandbox-<16 chữ số hex của profile_hash>`.
+pub fn service_for_profile(profile: Option<&Path>) -> String {
+    let _ = profile;
+    SERVICE.to_string() // STUB
+}
 
 /// Nơi cất khóa thật (Keychain, hoặc bản giả trong kiểm thử).
 pub trait KeyBackend: Send + Sync {
@@ -61,6 +78,17 @@ impl KeychainStore {
     /// Mục Keychain của ứng dụng (service `darkshot`).
     pub fn new() -> Self {
         Self::with_service(SERVICE)
+    }
+
+    /// Mục Keychain của hồ sơ: dùng ở mọi nơi ứng dụng tạo `KeychainStore`, với
+    /// `paths::profile_override()`.
+    pub fn for_profile(profile: Option<&Path>) -> Self {
+        Self::with_service(&service_for_profile(profile))
+    }
+
+    /// Service của mục Keychain.
+    pub fn service(&self) -> &str {
+        &self.service
     }
 
     /// Mục Keychain với service khác (cho kiểm thử: `darkshot-test-<pid>`).
@@ -227,6 +255,62 @@ mod tests {
         assert_eq!(SERVICE, "darkshot");
         assert_eq!(ACCOUNT, "r2-secret-access-key");
         assert_eq!(MARKER, b"keychain:v1");
+    }
+
+    #[test]
+    fn no_profile_uses_app_service() {
+        assert_eq!(service_for_profile(None), SERVICE);
+        assert_eq!(KeychainStore::for_profile(None).service(), "darkshot");
+    }
+
+    #[test]
+    fn same_profile_path_gives_same_service() {
+        let a = Path::new("/tmp/darkshot-demo.AbC123");
+        assert_eq!(service_for_profile(Some(a)), service_for_profile(Some(a)));
+        // Chữ hoa thường không đổi service (băm trên chữ thường, như lớp Windows).
+        assert_eq!(
+            service_for_profile(Some(Path::new("/TMP/Darkshot-Demo.abc123"))),
+            service_for_profile(Some(a))
+        );
+        assert_eq!(
+            KeychainStore::for_profile(Some(a)).service(),
+            service_for_profile(Some(a))
+        );
+    }
+
+    #[test]
+    fn different_profile_paths_give_different_services() {
+        let a = service_for_profile(Some(Path::new("/tmp/sb/one")));
+        let b = service_for_profile(Some(Path::new("/tmp/sb/two")));
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn sandbox_service_never_equals_app_service() {
+        for p in ["", "/", "/tmp/sb/one", "darkshot", "/Users/someone"] {
+            let s = service_for_profile(Some(Path::new(p)));
+            assert_ne!(s, SERVICE, "{p:?}");
+            assert!(s.starts_with(SANDBOX_SERVICE_PREFIX), "{s}");
+            let hex = &s[SANDBOX_SERVICE_PREFIX.len()..];
+            assert_eq!(hex.len(), 16, "{s}");
+            assert!(
+                hex.bytes()
+                    .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()),
+                "{s}"
+            );
+        }
+    }
+
+    #[test]
+    fn profile_hash_is_fnv1a_64_of_lowercase_path() {
+        // Giá trị chuẩn của FNV-1a 64 bit.
+        assert_eq!(profile_hash(Path::new("")), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(profile_hash(Path::new("a")), 0xaf63_dc4c_8601_ec8c);
+        assert_eq!(profile_hash(Path::new("A")), profile_hash(Path::new("a")));
+        assert_eq!(
+            service_for_profile(Some(Path::new("a"))),
+            "darkshot-sandbox-af63dc4c8601ec8c"
+        );
     }
 
     /// Xóa mục thử khi kết thúc, kể cả khi khẳng định thất bại.
