@@ -14,6 +14,8 @@ mod coords;
 mod lang;
 #[cfg(target_os = "macos")]
 mod notify;
+#[cfg(target_os = "macos")]
+mod overlay_input;
 // `paths` có các đường dẫn cho tính năng sau (lịch sử, chụp từng bước, lần chụp trước).
 #[cfg(target_os = "macos")]
 #[allow(dead_code)]

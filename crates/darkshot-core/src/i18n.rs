@@ -460,6 +460,10 @@ messages! {
         "macOS did not allow the capture right now. Try again."
     ),
     MacSetupTitle => ("Cần thiết lập darkshot", "darkshot needs setup"),
+    // Gợi ý nút của lớp phủ chọn vùng bản macOS (Task 105): phím tắt kiểu Mac.
+    OverlaySaveMac => ("Lưu vào máy (⌘S)", "Save to disk (⌘S)"),
+    OverlayCopyMac => ("Chép ảnh (⌘C)", "Copy image (⌘C)"),
+    OverlayCancelMac => ("Hủy (Esc)", "Cancel (Esc)"),
 }
 
 /// Mọi mục dùng làm tiêu đề thông báo.
