@@ -17,9 +17,10 @@ Thiết kế: `docs/superpowers/specs/2026-11-21-macos-port-design.md`. Nhánh t
 | M3a | 103 | `darkshot-macos` nền móng: `cfg` phụ thuộc, `paths.rs`, `coords.rs` (thuần, test), `timeutil.rs`, `secret.rs` (Keychain, quyết định 136), `clipboard.rs` (`NSPasteboard`) | builder / opus; rà soát reviewer / fable | cao (khóa bí mật, FFI) |
 | M3b | 104 | Vỏ ứng dụng: `.app` + ký ổn định (`scripts/bundle-macos.sh`), `NSStatusItem` + menu từ `tray_logic`, thông báo, chụp từng màn hình bằng ScreenCaptureKit, kiểm quyền, nối cấu hình, `scripts/demo-macos.sh` | builder / opus; rà soát reviewer / fable | cao (quyền hệ thống, luồng chính) |
 | M3c | 105 | Lớp phủ chọn vùng (mỗi màn hình một cửa sổ), `Selection` của core, thanh Lưu/Chép/Hủy, `run_action` | builder / opus; rà soát reviewer / fable | cao (vẽ, sự kiện, Retina) |
-| M4a | 106 | Phím tắt toàn cục, đa màn hình, tải lên R2, link có hạn | builder / sonnet | trung bình |
-| M4b | 107 | Cửa sổ Tùy chọn (3 tab), i18n, giao diện tối | builder / sonnet | trung bình |
-| M4c | 108 | `scripts/demo-macos.sh` (đã có từ Task 104) bổ sung, biểu tượng `.icns`, README, website, memory bank (đóng gói `.app` và ký đã làm ở Task 104) | scaffolder / sonnet | thấp |
+| M4a | 106 | Phím tắt toàn cục (Carbon `RegisterEventHotKey`), bảng đổi phím macOS ↔ VK, bộ phím mặc định riêng cho Mac (quyết định 139) | builder / opus; rà soát reviewer / opus | trung bình |
+| M4b | 107 | Cửa sổ Tùy chọn AppKit (4 tab, giao diện tối), dùng `settings_form` và bắt phím của core, ô bắt phím, Kiểm tra kết nối R2, khóa vào Keychain | builder / opus; rà soát reviewer / opus | cao (khóa bí mật, bố cục lớn) |
+| M4c | 108 | Nút Tải lên R2, link có hạn, sổ lượt tải lên và an toàn khi thoát (`PendingUploads`, `save_pending`) | builder / opus; rà soát reviewer / opus | cao (không được mất ảnh) |
+| M4d | 109 | Tài liệu và hoàn thiện: README (phần macOS), `.icns`, `scripts/demo-macos.sh` hoàn chỉnh, memory bank; tối ưu tốc độ và dung lượng ảnh nếu chủ dự án yêu cầu; KHÔNG sửa website cho đến khi phát hành (quy ước website) | scaffolder / sonnet | thấp |
 | M5–M7 | 109+ | Đánh dấu, Ghim, Lịch sử, bắt cửa sổ, OCR, Chụp từng bước, tự khởi động, kiểm tra bản mới: tách từng task sau khi M-A được duyệt | — | — |
 
 Cổng mỗi task: `scripts/check.sh` (Mac) phải in `ALL CHECKS PASSED`; task chạm lớp Windows (100, 101, 102a–102e) phải qua job `windows` của `.github/workflows/check.yml` (chạy `scripts/check.ps1` trên runner `windows-latest`) trước khi gộp vào `main`, vì chủ dự án không có máy Windows (2026-11-21). Không gộp `main` khi job đó chưa xanh; cần đẩy nhánh lên `origin` để chạy.
