@@ -86,7 +86,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "ghi đè clipboard thật của máy; chạy tay: cargo test -p darkshot-macos -- --ignored --test-threads=1"]
+    #[ignore = "ghi đè clipboard thật của máy; chạy tay: cargo test -p darkshot-macos --bin darkshot-macos -- --ignored --test-threads=1"]
     fn pasteboard_text_round_trip() {
         let link = "https://img.example.com/d30/Ab12.png";
         PasteboardClipboard.set_text(link).unwrap();
@@ -97,7 +97,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "ghi đè clipboard thật của máy; chạy tay: cargo test -p darkshot-macos -- --ignored --test-threads=1"]
+    #[ignore = "ghi đè clipboard thật của máy; chạy tay: cargo test -p darkshot-macos --bin darkshot-macos -- --ignored --test-threads=1"]
     fn pasteboard_image_is_png() {
         let img = Image {
             width: 3,
@@ -128,7 +128,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "ghi đè clipboard thật của máy; chạy tay: cargo test -p darkshot-macos -- --ignored --test-threads=1"]
+    #[ignore = "ghi đè clipboard thật của máy; chạy tay: cargo test -p darkshot-macos --bin darkshot-macos -- --ignored --test-threads=1"]
     fn pasteboard_writes_from_background_thread() {
         let h = std::thread::spawn(|| PasteboardClipboard.set_text("darkshot-bg-thread"));
         h.join().unwrap().unwrap();

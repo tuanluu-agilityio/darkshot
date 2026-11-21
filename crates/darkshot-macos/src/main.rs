@@ -6,7 +6,7 @@ mod app;
 mod capture;
 #[cfg(target_os = "macos")]
 mod clipboard;
-// `coords` có các hàm cho lớp phủ chọn vùng (Task 105) chưa được gọi.
+// `coords` có hàm đổi vùng điểm sang pixel và pixel sang điểm chỉ dùng trong kiểm thử.
 #[cfg(target_os = "macos")]
 #[allow(dead_code)]
 mod coords;
@@ -14,6 +14,12 @@ mod coords;
 mod lang;
 #[cfg(target_os = "macos")]
 mod notify;
+#[cfg(target_os = "macos")]
+mod overlay;
+#[cfg(target_os = "macos")]
+mod overlay_input;
+#[cfg(target_os = "macos")]
+mod overlay_view;
 // `paths` có các đường dẫn cho tính năng sau (lịch sử, chụp từng bước, lần chụp trước).
 #[cfg(target_os = "macos")]
 #[allow(dead_code)]
