@@ -225,15 +225,17 @@ pub mod layout {
     /// với chữ có dấu.
     pub const AVG_CHAR_W: f64 = 7.6;
     pub const WINDOW_W: f64 = 620.0;
-    pub const WINDOW_H: f64 = 470.0;
+    pub const WINDOW_H: f64 = 490.0;
     /// Lề trong của vùng nội dung một tab.
     pub const PAD: f64 = 20.0;
     /// Bề rộng cột nhãn của các hàng "nhãn + ô".
     pub const LABEL_W: f64 = 190.0;
-    /// Bề rộng cột nút "Đổi…" và cột trạng thái phím tắt.
-    pub const KEY_FIELD_W: f64 = 170.0;
+    /// Ô hiện tổ hợp phím (đủ cho "Control+Option+Shift+Command+Backspace" ở phông 13 pt) và nút
+    /// "Đổi…" cạnh nó.
+    pub const KEY_FIELD_W: f64 = 320.0;
     pub const CHANGE_BTN_W: f64 = 90.0;
-    pub const CHECK_W: f64 = 300.0;
+    /// Hộp tích của một dòng phím tắt (nằm riêng một dòng, trên ô phím).
+    pub const CHECK_W: f64 = 500.0;
     /// Bề rộng vùng nội dung của một tab.
     pub const CONTENT_W: f64 = 560.0;
 
@@ -647,6 +649,24 @@ mod tests {
             }
         }
         assert_eq!(tab_of(Field::SaveDir), Tab::General);
+    }
+
+    #[test]
+    fn longest_combo_fits_the_key_field() {
+        let all = Hotkey {
+            ctrl: true,
+            alt: true,
+            shift: true,
+            win: true,
+            vk: 0x08, // Backspace: tên phím dài nhất trong bảng
+        };
+        let text = mac_describe(&all);
+        assert_eq!(text, "Control+Option+Shift+Command+Backspace");
+        // Ô có đệm 8 điểm mỗi bên.
+        assert!(layout::text_fits(&text, layout::KEY_FIELD_W - 16.0));
+        // Hàng phím tắt: lề + thụt + ô + khe + nút vừa trong vùng nội dung.
+        let right = layout::PAD + 20.0 + layout::KEY_FIELD_W + 8.0 + layout::CHANGE_BTN_W;
+        assert!(right <= layout::CONTENT_W - layout::PAD / 2.0);
     }
 
     #[test]

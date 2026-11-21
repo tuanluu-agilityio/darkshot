@@ -12,16 +12,20 @@ mod clipboard;
 mod coords;
 #[cfg(target_os = "macos")]
 mod hotkey;
-// `keymap` có hàm đổi ngược mã phím Mac → VK cho cửa sổ Tùy chọn (Task 107).
 #[cfg(target_os = "macos")]
-#[allow(dead_code)]
+mod hotkey_field;
+#[cfg(target_os = "macos")]
 mod keymap;
 #[cfg(target_os = "macos")]
 mod lang;
 #[cfg(target_os = "macos")]
 mod notify;
 #[cfg(target_os = "macos")]
+mod options;
+#[cfg(target_os = "macos")]
 mod options_model;
+#[cfg(target_os = "macos")]
+mod options_view;
 #[cfg(target_os = "macos")]
 mod overlay;
 #[cfg(target_os = "macos")]
