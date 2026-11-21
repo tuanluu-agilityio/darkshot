@@ -17,6 +17,9 @@ mod coords;
 mod lang;
 #[cfg(target_os = "macos")]
 #[allow(dead_code)]
+mod notify;
+#[cfg(target_os = "macos")]
+#[allow(dead_code)]
 mod paths;
 #[cfg(target_os = "macos")]
 #[allow(dead_code)]
