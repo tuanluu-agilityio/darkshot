@@ -113,7 +113,7 @@ thread_local! {
     static RETIRED: RefCell<Vec<Retired>> = const { RefCell::new(Vec::new()) };
     static NEXT_ID: Cell<u64> = const { Cell::new(1) };
     /// Hình, cỡ, màu nhớ qua các lần mở (như Windows).
-    static PREFS: Cell<Prefs> = const { Cell::new(Prefs { shape_tool: darkshot_core::annotate::Tool::Arrow, size: darkshot_core::annotate::SizeLevel::Medium, color: darkshot_core::annotate::DEFAULT_COLOR }) };
+    static PREFS: Cell<Prefs> = const { Cell::new(Prefs::DEFAULT) };
 }
 
 define_class!(

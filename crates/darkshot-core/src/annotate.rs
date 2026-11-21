@@ -1974,12 +1974,7 @@ mod tests {
             color: PALETTE[3],
         };
         match styled_from_stroke(&r, Some(PALETTE[5]), 0.5) {
-            Shape::Box {
-                a,
-                b,
-                oval,
-                style,
-            } => {
+            Shape::Box { a, b, oval, style } => {
                 assert_eq!((a, b, oval), (p(1.0, 2.0), p(30.0, 40.0), false));
                 assert_eq!(style.stroke, PALETTE[3]);
                 assert_eq!(style.stroke_width, 5.0);
@@ -2043,7 +2038,10 @@ mod tests {
     #[test]
     fn to_label_keeps_text_origin_size_and_adds_style() {
         let mut e = TextEdit::new(p(3.0, 4.0), 24.0, DEFAULT_COLOR);
-        assert_eq!(e.to_label(Align::Left, Style::new(DEFAULT_COLOR, 0.0)), None);
+        assert_eq!(
+            e.to_label(Align::Left, Style::new(DEFAULT_COLOR, 0.0)),
+            None
+        );
         e.insert("a\nbb");
         assert_eq!((e.origin(), e.size()), (p(3.0, 4.0), 24.0));
         let st = Style {

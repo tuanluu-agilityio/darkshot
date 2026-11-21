@@ -3,6 +3,8 @@
 #[cfg(target_os = "macos")]
 mod annotate_draw;
 #[cfg(target_os = "macos")]
+mod annotate_style;
+#[cfg(target_os = "macos")]
 mod annotate_ui;
 #[cfg(target_os = "macos")]
 mod app;

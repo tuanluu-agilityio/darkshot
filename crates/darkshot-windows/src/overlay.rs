@@ -6615,6 +6615,8 @@ mod tests {
                 Shape::Blur { .. } => "Blur",
                 Shape::Text { .. } => "Text",
                 Shape::Step { .. } => "Step",
+                Shape::Box { .. } => "Box",
+                Shape::Label { .. } => "Label",
             })
             .collect()
     }

@@ -174,12 +174,7 @@ pub fn hit_shape(shape: &Shape, bounds: Rect, p: Pt, tol: f32) -> bool {
         }
         Shape::Rect { a, b, width, .. } => rect_edge_hit(*a, *b, *width, p, tol),
         Shape::Ellipse { a, b, width, .. } => ellipse_edge_hit(*a, *b, *width, p, tol),
-        Shape::Box {
-            a,
-            b,
-            oval,
-            style,
-        } => {
+        Shape::Box { a, b, oval, style } => {
             let filled = style.fill.is_some() && style.opacity > 0.0;
             let w = style.stroke_width.max(0.0);
             if *oval {
@@ -653,12 +648,7 @@ fn transform_move(g: &Gesture, to: Pt, img: &Image) -> Shape {
             size: *size,
             color: *color,
         },
-        Shape::Box {
-            a,
-            b,
-            oval,
-            style,
-        } => Shape::Box {
+        Shape::Box { a, b, oval, style } => Shape::Box {
             a: mv(a),
             b: mv(b),
             oval: *oval,
@@ -699,10 +689,9 @@ pub fn transform(g: &Gesture, to: Pt, shift: bool, min_extent: f32, img: &Image)
         Grip::Move => transform_move(g, to, img),
         Grip::End(i) => transform_end(g, i, to, shift),
         Grip::Box(h) => match &g.original {
-            Shape::Rect { .. }
-            | Shape::Ellipse { .. }
-            | Shape::Blur { .. }
-            | Shape::Box { .. } => transform_box(g, h, to, shift, min_extent, img),
+            Shape::Rect { .. } | Shape::Ellipse { .. } | Shape::Blur { .. } | Shape::Box { .. } => {
+                transform_box(g, h, to, shift, min_extent, img)
+            }
             Shape::Pen { .. } | Shape::Marker { .. } => {
                 transform_points(g, h, to, shift, min_extent)
             }

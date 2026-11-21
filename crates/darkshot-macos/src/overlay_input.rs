@@ -1821,7 +1821,7 @@ mod tests {
         assert_eq!(key(&mut m, 1, "s", CMD, t0).action, Some(Action::Save));
         // Hoàn tất: chữ đang gõ vào cuối sổ rồi mới lấy để đốt vào ảnh.
         let shapes = m.take_shapes();
-        assert!(matches!(shapes.last(), Some(Shape::Text { .. })));
+        assert!(matches!(shapes.last(), Some(Shape::Label { .. })));
         let _ = TextCmd::Newline;
     }
 
@@ -1895,7 +1895,7 @@ mod tests {
         m.drag(pt(400, 190), t0);
         m.release(pt(400, 190), t0);
         match &m.annot().shapes()[0] {
-            Shape::Rect { a, b, .. } => {
+            Shape::Box { a, b, .. } => {
                 assert_eq!(b.x - a.x, b.y - a.y, "hình vuông khi giữ Shift");
             }
             other => panic!("{other:?}"),

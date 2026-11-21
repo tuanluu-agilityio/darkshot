@@ -10,11 +10,17 @@
 //! hình dùng `replace` nên KHÔNG đổi lớp của nó. Bấm chỗ chồng nhau chọn hình phía trước
 //! (`topmost_hit` duyệt từ cuối). Hình đang vẽ dở và chữ đang gõ luôn hiện trên cùng khi vẽ.
 
-use crate::annotate_draw::{caret_rect, shape_bounds};
+use crate::annotate_draw::{label_caret_rect, shape_bounds};
+use crate::annotate_style::{
+    cell_at as style_cell_at, clamp_opacity, clamp_width, layout as style_layout, panel_size,
+    step_opacity, step_width, StyleCell, StyleEdit, StyleKind, StylePrefs, StyleTarget, StyleView,
+    BOX_DEFAULT, LABEL_DEFAULT,
+};
 use crate::overlay_input::bar_item_at;
 use darkshot_core::annotate::{
-    dip_to_px, press_mode, sanitize_paste, Annotations, Applied, Change, PressMode, Pt, Shape,
-    SizeLevel, TextEdit, Tool, DEFAULT_COLOR, HIT_TOL_DIP, MIN_EXTENT_DIP, PALETTE,
+    dip_to_px, press_mode, sanitize_paste, styled_from_stroke, Align, Annotations, Applied, Change,
+    PressMode, Pt, Shape, SizeLevel, Style, TextEdit, Tool, DEFAULT_COLOR, HIT_TOL_DIP,
+    MIN_EXTENT_DIP, PALETTE,
 };
 use darkshot_core::color::picker_layout;
 use darkshot_core::color_picker::{VK_OEM_4, VK_OEM_6};
@@ -92,15 +98,27 @@ pub struct Prefs {
     pub shape_tool: Tool,
     pub size: SizeLevel,
     pub color: Rgb,
+    /// Kiểu mặc định của Hình chữ nhật và Elip (nền, độ dày viền, độ trong suốt).
+    pub box_style: StylePrefs,
+    /// Kiểu mặc định của Chữ (nền, viền, độ trong suốt).
+    pub label_style: StylePrefs,
+    pub align: Align,
+}
+
+impl Prefs {
+    pub const DEFAULT: Prefs = Prefs {
+        shape_tool: Tool::Arrow,
+        size: SizeLevel::Medium,
+        color: DEFAULT_COLOR,
+        box_style: BOX_DEFAULT,
+        label_style: LABEL_DEFAULT,
+        align: Align::Left,
+    };
 }
 
 impl Default for Prefs {
     fn default() -> Prefs {
-        Prefs {
-            shape_tool: Tool::Arrow,
-            size: SizeLevel::Medium,
-            color: DEFAULT_COLOR,
-        }
+        Prefs::DEFAULT
     }
 }
 
@@ -155,10 +173,20 @@ pub struct TextBox {
     pub frame: Rect,
     /// Số ký tự bộ gõ đang soạn (chuỗi "marked"), nằm ngay trước con trỏ trong `edit`.
     pub marked: usize,
+    /// Kiểu khối chữ (nền, viền, độ trong suốt) và căn lề; đổi được khi đang gõ.
+    pub style: Style,
+    pub align: Align,
 }
 
 impl TextBox {
-    fn new(at: Point, dpi: u32, level: SizeLevel, color: Rgb) -> TextBox {
+    fn new(
+        at: Point,
+        dpi: u32,
+        level: SizeLevel,
+        color: Rgb,
+        style: Style,
+        align: Align,
+    ) -> TextBox {
         let size = dip_to_px(level.text_dip(), dpi);
         let mut b = TextBox {
             edit: TextEdit::new(Self::origin(at), size, color),
@@ -168,6 +196,8 @@ impl TextBox {
             caret: NO_RECT,
             frame: NO_RECT,
             marked: 0,
+            style,
+            align,
         };
         b.measure();
         b
@@ -183,19 +213,26 @@ impl TextBox {
     /// Đo lại con trỏ và khung. Khung gồm phần mực của chữ và con trỏ, nới `TEXT_FRAME_PAD`; ô chỉ
     /// có khoảng trắng thì tính từ điểm đặt ô, cao một dòng, rộng tối thiểu `TEXT_EMPTY_W`.
     fn measure(&mut self) {
-        self.caret = caret_rect(&self.edit);
-        let base = match self.edit.to_shape() {
-            Some(shape) => union(Some(shape_bounds(&shape)), Some(self.caret)),
-            None => union(
-                Some(Rect {
-                    x: self.at.x,
-                    y: self.at.y,
-                    w: scaled(TEXT_EMPTY_W, self.dpi),
-                    h: self.caret.h,
-                }),
-                Some(self.caret),
-            ),
-        }
+        self.caret = label_caret_rect(&self.edit, self.align);
+        // Hộp khối chữ (gồm đệm, viền) đo cả khi chỉ có khoảng trắng.
+        let label = Shape::Label {
+            origin: Self::origin(self.at),
+            text: self.edit.text(),
+            size: self.size,
+            color: DEFAULT_COLOR,
+            align: self.align,
+            style: self.style,
+        };
+        let min = Rect {
+            x: self.at.x,
+            y: self.at.y,
+            w: scaled(TEXT_EMPTY_W, self.dpi),
+            h: self.caret.h,
+        };
+        let base = union(
+            union(Some(shape_bounds(&label)), Some(min)),
+            Some(self.caret),
+        )
         .unwrap_or(self.caret);
         self.frame = inflate(base, scaled(TEXT_FRAME_PAD, self.dpi));
     }
@@ -255,6 +292,10 @@ pub struct ChromeSig {
     pub color_hover: Option<usize>,
     pub can_undo: bool,
     pub can_redo: bool,
+    /// Bảng thuộc tính của Hình/Chữ: loại, giá trị đang hiện, ô màu đang áp, ô đang trỏ.
+    pub style: Option<StyleView>,
+    pub style_target: StyleTarget,
+    pub style_hover: Option<StyleCell>,
 }
 
 /// Mã phím ảo (chữ hoa ASCII, như Windows) của ký tự đầu của `chars`; `[` và `]` thành `VK_OEM_4`,
@@ -397,6 +438,57 @@ pub fn flyout_tip_rect(cell: Rect, fly: Rect, mon: Rect, dpi: u32, text: (i32, i
     )
 }
 
+/// Hình chữ nhật của bảng thuộc tính `kind` cạnh nút Cỡ của thanh dọc `side`.
+///
+/// Bảng này luôn hiện khi công cụ Hình/Chữ đang chọn nên ưu tiên đặt PHÍA NGOÀI thanh dọc (xa vùng
+/// chọn) để không che vùng đang vẽ; không đủ chỗ trên màn hình thì mới đặt phía vùng chọn như các
+/// bảng bật ra.
+pub fn style_rect_for(kind: StyleKind, side: Rect, sel: Rect, mon: Rect, dpi: u32) -> Option<Rect> {
+    let btn = side_button(side, mon, dpi, SideItem::Size);
+    let (w, h) = panel_size(kind, dpi);
+    let gap = scaled(darkshot_core::overlay_layout::GAP, dpi);
+    let x = if darkshot_core::overlay_layout::side_on_right(side, sel) {
+        side.right().saturating_add(gap)
+    } else {
+        side.x.saturating_sub(gap).saturating_sub(w)
+    };
+    if x >= mon.x && x.saturating_add(w) <= mon.right() {
+        let r = Rect {
+            x,
+            y: btn.y + btn.h / 2 - h / 2,
+            w,
+            h,
+        };
+        return Some(darkshot_core::overlay_layout::clamp_into(r, mon));
+    }
+    Some(flyout_rect(side, btn, sel, mon, dpi, (w, h)))
+}
+
+/// Hình `shape` (Hình hoặc Chữ có kiểu) sau khi áp một thay đổi kiểu của bảng.
+fn restyle_shape(shape: &Shape, edit: StyleEdit, dpi: u32) -> Shape {
+    let Some(st) = shape.style() else {
+        return shape.clone();
+    };
+    let new = match edit {
+        StyleEdit::Fill(f) => Style { fill: f, ..st },
+        StyleEdit::Stroke(c) => Style { stroke: c, ..st },
+        StyleEdit::WidthDip(d) => Style {
+            stroke_width: dip_to_px(clamp_width(d), dpi),
+            ..st
+        },
+        StyleEdit::Opacity(v) => Style {
+            opacity: clamp_opacity(v),
+            ..st
+        },
+        StyleEdit::Align(_) => st,
+    };
+    let out = shape.with_style(new);
+    match edit {
+        StyleEdit::Align(a) => out.with_align(a),
+        _ => out,
+    }
+}
+
 /// Hợp các hộp bao đã đo của `shapes` thành danh sách song song (cùng chỉ số).
 fn measure_all(shapes: &[Shape]) -> Vec<Rect> {
     shapes.iter().map(shape_bounds).collect()
@@ -411,6 +503,8 @@ pub enum Layer<'a> {
     Preview(&'a Shape),
     /// Nét đang vẽ dở, trên mọi hình đã có.
     Stroke(&'a Shape),
+    /// Hình chữ nhật/elip đang kéo, đã mang kiểu (nền, độ trong suốt), trên mọi hình đã có.
+    Boxed(Shape),
     /// Chữ đang gõ, trên cùng.
     Typing(Shape),
 }
@@ -429,6 +523,12 @@ pub struct Annot {
     selected: Option<usize>,
     gesture: Option<Drag>,
     flyout: Flyout,
+    box_style: StylePrefs,
+    label_style: StylePrefs,
+    align: Align,
+    style_target: StyleTarget,
+    style_hover: Option<StyleCell>,
+    style_pressed: Option<StyleCell>,
     side_hover: Option<SideItem>,
     side_pressed: Option<SideItem>,
     size_hover: Option<SizeLevel>,
@@ -462,6 +562,12 @@ impl Annot {
             selected: None,
             gesture: None,
             flyout: Flyout::None,
+            box_style: p.box_style,
+            label_style: p.label_style,
+            align: p.align,
+            style_target: StyleTarget::Fill,
+            style_hover: None,
+            style_pressed: None,
             side_hover: None,
             side_pressed: None,
             size_hover: None,
@@ -481,6 +587,9 @@ impl Annot {
             shape_tool: self.shape_tool,
             size: self.size,
             color: self.color,
+            box_style: self.box_style,
+            label_style: self.label_style,
+            align: self.align,
         }
     }
 
@@ -574,6 +683,7 @@ impl Annot {
             || self.size_pressed.is_some()
             || self.shape_pressed.is_some()
             || self.color_pressed.is_some()
+            || self.style_pressed.is_some()
     }
 
     /// Hình trên cùng (chỉ số lớn nhất) trúng điểm `p` (theo công cụ Chọn); dùng để kiểm thử.
@@ -604,6 +714,187 @@ impl Annot {
             color_hover: self.color_hover,
             can_undo: self.can_undo(),
             can_redo: self.can_redo(),
+            style: self.style_view(96),
+            style_target: self.style_target,
+            style_hover: self.style_hover,
+        }
+    }
+
+    // ------------------------------------------------------------------ bảng thuộc tính Hình/Chữ
+
+    /// Loại hình bảng thuộc tính đang sửa: hình đang chọn (Hình có kiểu hoặc Chữ), hoặc ô chữ đang
+    /// mở, hoặc công cụ Hình chữ nhật, Elip (Hình), Chữ; `None` khi không thuộc loại nào.
+    pub fn style_kind(&self) -> Option<StyleKind> {
+        if let Some(s) = self.selected.and_then(|i| self.marks.shapes().get(i)) {
+            match s {
+                Shape::Box { .. } => return Some(StyleKind::Box),
+                Shape::Label { .. } => return Some(StyleKind::Label),
+                _ => {}
+            }
+        }
+        if self.text.is_some() {
+            return Some(StyleKind::Label);
+        }
+        match self.tool {
+            Some(Tool::Rect | Tool::Ellipse) => Some(StyleKind::Box),
+            Some(Tool::Text) => Some(StyleKind::Label),
+            _ => None,
+        }
+    }
+
+    /// Bảng thuộc tính đang hiện (không có bảng Cỡ/Hình/Màu mở).
+    pub fn style_panel_open(&self) -> bool {
+        self.flyout == Flyout::None && self.style_kind().is_some()
+    }
+
+    pub fn style_target(&self) -> StyleTarget {
+        self.style_target
+    }
+
+    pub fn style_hover(&self) -> Option<StyleCell> {
+        self.style_hover
+    }
+
+    /// Giá trị bảng thuộc tính đang hiện (độ dày theo dip ở `dpi`): của hình đang chọn nếu có,
+    /// không thì kiểu mặc định cho hình vẽ sau.
+    pub fn style_view(&self, dpi: u32) -> Option<StyleView> {
+        let kind = self.style_kind()?;
+        let px_to_dip = |px: f32| px * 96.0 / dpi.max(1) as f32;
+        if let Some(shape) = self.selected.and_then(|i| self.marks.shapes().get(i)) {
+            if let Some(st) = shape.style() {
+                return Some(StyleView {
+                    kind,
+                    fill: st.fill,
+                    stroke: st.stroke,
+                    width_dip: px_to_dip(st.stroke_width),
+                    opacity: st.opacity,
+                    align: shape.align(),
+                });
+            }
+        }
+        if let (StyleKind::Label, Some(b)) = (kind, self.text.as_ref()) {
+            return Some(StyleView {
+                kind,
+                fill: b.style.fill,
+                stroke: b.style.stroke,
+                width_dip: px_to_dip(b.style.stroke_width),
+                opacity: b.style.opacity,
+                align: Some(b.align),
+            });
+        }
+        Some(match kind {
+            StyleKind::Box => StyleView {
+                kind,
+                fill: self.box_style.fill,
+                stroke: self.color,
+                width_dip: self.box_style.width_dip,
+                opacity: self.box_style.opacity,
+                align: None,
+            },
+            StyleKind::Label => StyleView {
+                kind,
+                fill: self.label_style.fill,
+                stroke: self.label_style.stroke,
+                width_dip: self.label_style.width_dip,
+                opacity: self.label_style.opacity,
+                align: Some(self.align),
+            },
+        })
+    }
+
+    /// Hình chữ nhật của bảng thuộc tính (cạnh nút Cỡ của thanh dọc); `None` khi bảng không hiện.
+    pub fn style_rect(&self, env: &Env) -> Option<Rect> {
+        let kind = self.style_kind().filter(|_| self.flyout == Flyout::None)?;
+        style_rect_for(kind, env.side?, env.sel, env.mon, env.dpi)
+    }
+
+    /// Ô của bảng thuộc tính dưới `p`.
+    pub fn style_cell_under(&self, env: &Env, p: Point) -> Option<StyleCell> {
+        let kind = self.style_kind()?;
+        let rect = self.style_rect(env)?;
+        style_cell_at(&style_layout(rect, kind, env.dpi), p)
+    }
+
+    /// Áp một thay đổi kiểu từ bảng: cập nhật mặc định cho hình vẽ sau, rồi hình đang chọn (một
+    /// bước hoàn tác, giữ lớp) hoặc ô chữ đang gõ.
+    pub fn apply_style(&mut self, edit: StyleEdit, dpi: u32) {
+        let Some(kind) = self.style_kind() else {
+            return;
+        };
+        match kind {
+            StyleKind::Box => self.box_style.apply(edit),
+            StyleKind::Label => self.label_style.apply(edit),
+        }
+        if let StyleEdit::Align(a) = edit {
+            self.align = a;
+        }
+        // Viền của Hình là màu của nút Màu: đổi nó như chọn màu (hình đang chọn đổi theo).
+        if let (StyleKind::Box, StyleEdit::Stroke(c)) = (kind, edit) {
+            self.choose_color(c, dpi);
+            return;
+        }
+        if let Some((i, shape)) = self.selected_styled() {
+            if self.gesture.is_some() {
+                return;
+            }
+            let new = restyle_shape(&shape, edit, dpi);
+            let before = self.selection_area(dpi);
+            if let Some(a) = self.marks.replace(i, new) {
+                self.apply_change(&a);
+                let after = self.selection_area(dpi);
+                for r in before.into_iter().chain(after) {
+                    self.mark(r);
+                }
+            }
+            return;
+        }
+        if kind == StyleKind::Label {
+            self.edit_text(|b| {
+                let mut st = StylePrefs {
+                    fill: b.style.fill,
+                    stroke: b.style.stroke,
+                    width_dip: b.style.stroke_width * 96.0 / b.dpi.max(1) as f32,
+                    opacity: b.style.opacity,
+                };
+                st.apply(edit);
+                b.style = st.style(st.stroke, b.dpi);
+                if let StyleEdit::Align(a) = edit {
+                    b.align = a;
+                }
+            });
+        }
+    }
+
+    /// Hình đang chọn nếu là Hình có kiểu hoặc Chữ có kiểu (chỉ số, bản sao).
+    fn selected_styled(&self) -> Option<(usize, Shape)> {
+        let i = self.selected?;
+        let s = self.marks.shapes().get(i)?;
+        s.style().map(|_| (i, s.clone()))
+    }
+
+    /// Kích hoạt ô `cell` của bảng thuộc tính.
+    fn press_style_cell(&mut self, cell: StyleCell, dpi: u32) {
+        let Some(view) = self.style_view(dpi) else {
+            return;
+        };
+        match cell {
+            StyleCell::Target(t) => self.style_target = t,
+            StyleCell::NoFill => self.apply_style(StyleEdit::Fill(None), dpi),
+            StyleCell::Color(i) => {
+                if let Some(c) = PALETTE.get(i) {
+                    match self.style_target {
+                        StyleTarget::Fill => self.apply_style(StyleEdit::Fill(Some(*c)), dpi),
+                        StyleTarget::Border => self.apply_style(StyleEdit::Stroke(*c), dpi),
+                    }
+                }
+            }
+            StyleCell::Width(d) => {
+                self.apply_style(StyleEdit::WidthDip(step_width(view.width_dip, d)), dpi)
+            }
+            StyleCell::Opacity(d) => {
+                self.apply_style(StyleEdit::Opacity(step_opacity(view.opacity, d)), dpi)
+            }
+            StyleCell::Align(a) => self.apply_style(StyleEdit::Align(a), dpi),
         }
     }
 
@@ -642,9 +933,18 @@ impl Annot {
             _ => v.push(Layer::Run(shapes)),
         }
         if let Some(st) = &self.stroke {
-            v.push(Layer::Stroke(&st.shape));
+            match &st.shape {
+                Shape::Rect { .. } | Shape::Ellipse { .. } => v.push(Layer::Boxed(
+                    styled_from_stroke(&st.shape, self.box_style.fill, self.box_style.opacity),
+                )),
+                other => v.push(Layer::Stroke(other)),
+            }
         }
-        if let Some(shape) = self.text.as_ref().and_then(|t| t.edit.to_shape()) {
+        if let Some(shape) = self
+            .text
+            .as_ref()
+            .and_then(|t| t.edit.to_label(t.align, t.style))
+        {
             v.push(Layer::Typing(shape));
         }
         v
@@ -970,6 +1270,8 @@ impl Annot {
         self.shape_pressed = None;
         self.color_hover = None;
         self.color_pressed = None;
+        self.style_hover = None;
+        self.style_pressed = None;
     }
 
     /// Bật `t` (tắt nếu đang bật); bật một hình thì nhớ nó cho nút Hình. Bảng đóng.
@@ -998,6 +1300,8 @@ impl Annot {
     /// Đặt mức cỡ cho hình vẽ sau đó; hình đang chọn và ô chữ đang mở đổi cỡ theo.
     pub fn set_size(&mut self, level: SizeLevel, dpi: u32) {
         self.size = level;
+        // Độ dày viền mặc định của Hình theo mức cỡ (bảng thuộc tính có thể chỉnh riêng sau đó).
+        self.box_style.width_dip = clamp_width(level.stroke_dip());
         self.restyle_selected(dpi, Some(level), None);
         let color = self.color;
         let Some(b) = self.text.as_mut() else {
@@ -1048,7 +1352,8 @@ impl Annot {
 
     /// Mở ô chữ tại `p` (đã chốt ô cũ).
     pub fn open_text(&mut self, env: &Env, p: Point) {
-        let b = TextBox::new(p, env.dpi, self.size, self.color);
+        let style = self.label_style.style(self.label_style.stroke, env.dpi);
+        let b = TextBox::new(p, env.dpi, self.size, self.color, style, self.align);
         self.mark(b.dirty());
         self.text = Some(b);
         self.caret_on = true;
@@ -1068,7 +1373,7 @@ impl Annot {
             b.drop_marked();
         }
         if commit {
-            if let Some(shape) = b.edit.to_shape() {
+            if let Some(shape) = b.edit.to_label(b.align, b.style) {
                 // Chữ vào CUỐI sổ: nằm trên mọi hình đã vẽ trước đó.
                 self.add_mark(shape);
             }
@@ -1219,8 +1524,16 @@ impl Annot {
         let item = env.bar.and_then(|b| bar_item_at(b, p, env.dpi));
         let on_history = matches!(item, Some(BarItem::Undo | BarItem::Redo));
         let flyout = self.flyout != Flyout::None;
-        if self.text.is_some() && !flyout && !on_side && !on_history {
+        let style_rect = self.style_rect(env);
+        let on_style = style_rect.is_some_and(|r| r.contains(p));
+        if self.text.is_some() && !flyout && !on_side && !on_history && !on_style {
             self.close_text(true);
+        }
+        // Bảng thuộc tính (không phải bảng bật ra từ thanh dọc): bấm ô thì nhớ để làm khi nhả,
+        // bấm lề bảng thì nuốt (không vẽ xuyên bảng).
+        if on_style {
+            self.style_pressed = self.style_cell_under(env, p);
+            return Down::Handled;
         }
         if let Some(fly) = self.flyout_rect_of(env) {
             match self.flyout {
@@ -1311,9 +1624,14 @@ impl Annot {
             });
             return Down::Handled;
         }
-        let Some(stroke) = begin_stroke(tool, at, env.dpi, self.size, self.color, env.img) else {
+        let Some(mut stroke) = begin_stroke(tool, at, env.dpi, self.size, self.color, env.img)
+        else {
             return Down::Handled;
         };
+        // Hình chữ nhật, elip: độ dày viền theo kiểu mặc định (bảng thuộc tính) chứ không chỉ mức cỡ.
+        if let Shape::Rect { width, .. } | Shape::Ellipse { width, .. } = &mut stroke.shape {
+            *width = dip_to_px(self.box_style.width_dip, env.dpi);
+        }
         if let Some(b) = stroke.shape.bounds() {
             self.mark(b);
         }
@@ -1350,6 +1668,12 @@ impl Annot {
         if self.stroke.is_some() {
             self.moved(env, p, shift);
             self.commit_stroke(env);
+            return true;
+        }
+        if let Some(cell) = self.style_pressed.take() {
+            if self.style_cell_under(env, p) == Some(cell) {
+                self.press_style_cell(cell, env.dpi);
+            }
             return true;
         }
         if let Some(level) = self.size_pressed.take() {
@@ -1392,7 +1716,10 @@ impl Annot {
         };
         let drawn = s.shape.bounds();
         match end_stroke(s, env.img) {
-            Some(shape) => self.add_mark(shape),
+            Some(shape) => {
+                let shape = styled_from_stroke(&shape, self.box_style.fill, self.box_style.opacity);
+                self.add_mark(shape)
+            }
             None => {
                 if let Some(r) = drawn {
                     self.mark(r);
@@ -1413,6 +1740,7 @@ impl Annot {
         self.size_pressed = None;
         self.shape_pressed = None;
         self.color_pressed = None;
+        self.style_pressed = None;
     }
 
     /// Nhấn hoặc nhả Shift khi đang kéo hình hoặc nét có ràng buộc: cập nhật ngay theo điểm chuột
@@ -1454,6 +1782,7 @@ impl Annot {
             (Flyout::Palette, Some(f)) => palette_cell_at(f, env.dpi, p),
             _ => None,
         };
+        self.style_hover = self.style_cell_under(env, p);
     }
 
     /// Chuột rời khỏi vùng công cụ (sang màn hình khác): bỏ mọi mục đang trỏ.
@@ -1462,6 +1791,7 @@ impl Annot {
         self.size_hover = None;
         self.shape_hover = None;
         self.color_hover = None;
+        self.style_hover = None;
     }
 
     /// Con trỏ chuột theo ngữ cảnh ở `p`.
@@ -1472,7 +1802,7 @@ impl Annot {
         if self.gesture.is_some() {
             return CursorKind::Move;
         }
-        if self.flyout != Flyout::None {
+        if self.flyout != Flyout::None || self.style_rect(env).is_some_and(|r| r.contains(p)) {
             return CursorKind::Arrow;
         }
         let on_bar =
@@ -1517,6 +1847,10 @@ impl Annot {
                     v.push(inflate(r, 2));
                 }
             }
+            // Bảng thuộc tính: luôn gồm cả cỡ cao nhất (Chữ) để vùng bảng vừa đóng cũng được vẽ lại.
+            if let Some(r) = style_rect_for(StyleKind::Label, s, env.sel, env.mon, env.dpi) {
+                v.push(inflate(r, 2));
+            }
         }
         v.into_iter()
             .filter_map(|r| intersect(r, env.mon))
@@ -1533,7 +1867,9 @@ impl Default for Annot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::annotate_style::WIDTH_MAX_DIP;
     use crate::overlay_input::{bar_rect, side_rect};
+    use darkshot_core::annotate::STROKE_DIP;
     use darkshot_core::annotate::{constrain_45, constrain_square};
     use darkshot_core::geometry::Selection;
     use darkshot_core::overlay_layout::{size_cell_rect, BUTTON, GAP, SHAPE_TOOLS};
@@ -1661,7 +1997,7 @@ mod tests {
         a.shapes()
             .iter()
             .map(|s| match s {
-                Shape::Rect { a, .. } => a.x as i32,
+                Shape::Box { a, .. } => a.x as i32,
                 _ => -1,
             })
             .collect()
@@ -1688,9 +2024,9 @@ mod tests {
             h.a.shapes()
                 .iter()
                 .map(|s| match s {
-                    Shape::Rect { .. } => "rect",
+                    Shape::Box { oval: false, .. } => "rect",
                     Shape::Step { .. } => "step",
-                    Shape::Text { .. } => "text",
+                    Shape::Label { .. } => "text",
                     _ => "?",
                 })
                 .collect();
@@ -1754,7 +2090,7 @@ mod tests {
         assert_eq!(rect_xs(&h.a)[2], 140);
         assert_eq!(rect_xs(&h.a)[1], 150, "hình giữa đã dời nhưng vẫn ở giữa");
         match &h.a.shapes()[1] {
-            Shape::Rect { a, b, .. } => assert_eq!((a.y, b.x, b.y), (120.0, 230.0, 180.0)),
+            Shape::Box { a, b, .. } => assert_eq!((a.y, b.x, b.y), (120.0, 230.0, 180.0)),
             other => panic!("{other:?}"),
         }
         assert_eq!(h.a.selected(), Some(1));
@@ -1763,9 +2099,9 @@ mod tests {
         h.a.set_size(SizeLevel::Huge, 96);
         assert_eq!(h.a.shapes().len(), 3);
         match &h.a.shapes()[1] {
-            Shape::Rect { color, width, .. } => {
-                assert_eq!(*color, red());
-                assert_eq!(*width, SizeLevel::Huge.stroke_dip());
+            Shape::Box { style, .. } => {
+                assert_eq!(style.stroke, red());
+                assert_eq!(style.stroke_width, SizeLevel::Huge.stroke_dip());
             }
             other => panic!("{other:?}"),
         }
@@ -1787,7 +2123,7 @@ mod tests {
         assert_eq!(h.a.selected(), Some(1), "chọn hình phía trước");
         // Tay nắm hiện theo hình được chọn.
         let (shape, _) = h.a.shown_selection().unwrap();
-        assert!(matches!(shape, Shape::Rect { a, .. } if a.x as i32 == 150));
+        assert!(matches!(shape, Shape::Box { a, .. } if a.x as i32 == 150));
         // Hình thêm sau (lên trên) thì lại được chọn trước dù chỗ bấm cũ.
         h.a.deselect(96);
         h.draw(Tool::Rect, pt(160, 100), pt(240, 200));
@@ -1821,14 +2157,14 @@ mod tests {
         let layers = h.a.layers();
         assert!(matches!(
             layers.last(),
-            Some(Layer::Typing(Shape::Text { .. }))
+            Some(Layer::Typing(Shape::Label { .. }))
         ));
         assert_eq!(layers.len(), 2);
         drop(layers);
         // Kết thúc nhập: vào CUỐI sổ.
         h.a.close_text(true);
         assert_eq!(h.a.shapes().len(), 4);
-        assert!(matches!(h.a.shapes()[3], Shape::Text { .. }));
+        assert!(matches!(h.a.shapes()[3], Shape::Label { .. }));
     }
 
     #[test]
@@ -1913,8 +2249,8 @@ mod tests {
                 (&h.a.shapes()[0], ok),
                 (Shape::Line { .. }, 0)
                     | (Shape::Arrow { .. }, 1)
-                    | (Shape::Rect { .. }, 2)
-                    | (Shape::Ellipse { .. }, 3)
+                    | (Shape::Box { oval: false, .. }, 2)
+                    | (Shape::Box { oval: true, .. }, 3)
                     | (Shape::Blur { .. }, 4)
             );
             assert!(good, "{tool:?}: {:?}", h.a.shapes()[0]);
@@ -1970,7 +2306,7 @@ mod tests {
         h.drag(pt(200, 130), true);
         h.up(pt(200, 130), true);
         match &h.a.shapes()[0] {
-            Shape::Rect { b: end, .. } => assert_eq!(*end, constrain_square(a, b)),
+            Shape::Box { b: end, .. } => assert_eq!(*end, constrain_square(a, b)),
             other => panic!("{other:?}"),
         }
         // Nhấn/nhả Shift giữa chừng cập nhật ngay không cần di chuột.
@@ -2040,7 +2376,7 @@ mod tests {
         h.drag(pt(130, 135), false);
         h.up(pt(130, 135), false);
         match &h.a.shapes()[0] {
-            Shape::Rect { a, b, .. } => {
+            Shape::Box { a, b, .. } => {
                 assert_eq!((a.x, a.y, b.x, b.y), (130.0, 120.0, 230.0, 180.0));
             }
             other => panic!("{other:?}"),
@@ -2050,7 +2386,7 @@ mod tests {
         h.drag(pt(260, 210), false);
         h.up(pt(260, 210), false);
         match &h.a.shapes()[0] {
-            Shape::Rect { a, b, .. } => {
+            Shape::Box { a, b, .. } => {
                 assert_eq!((a.x, a.y, b.x, b.y), (130.0, 120.0, 260.0, 210.0));
             }
             other => panic!("{other:?}"),
@@ -2059,7 +2395,7 @@ mod tests {
         h.a.undo(96);
         h.a.undo(96);
         match &h.a.shapes()[0] {
-            Shape::Rect { a, b, .. } => assert_eq!((a.x, b.x), (100.0, 200.0)),
+            Shape::Box { a, b, .. } => assert_eq!((a.x, b.x), (100.0, 200.0)),
             other => panic!("{other:?}"),
         }
     }
@@ -2077,7 +2413,7 @@ mod tests {
         assert!(!h.a.capturing());
         assert_eq!(h.a.selected(), Some(0));
         match &h.a.shapes()[0] {
-            Shape::Rect { a, .. } => assert_eq!(a.x, 100.0),
+            Shape::Box { a, .. } => assert_eq!(a.x, 100.0),
             other => panic!("{other:?}"),
         }
         // Esc tiếp: bỏ chọn; Esc nữa: hết việc để đóng (hủy lớp phủ).
@@ -2102,7 +2438,7 @@ mod tests {
         h.a.text_insert("hi");
         h.a.toggle_tool(Tool::Line, 96);
         assert!(h.a.text().is_none());
-        assert!(matches!(h.a.shapes().last(), Some(Shape::Text { .. })));
+        assert!(matches!(h.a.shapes().last(), Some(Shape::Label { .. })));
         // Mở bảng rồi đổi công cụ: bảng đóng.
         h.a.activate_side(SideItem::Size, 96);
         assert_eq!(h.a.flyout(), Flyout::Sizes);
@@ -2264,7 +2600,7 @@ mod tests {
         h.a.choose_color(red(), 96);
         h.a.close_text(true);
         match &h.a.shapes()[0] {
-            Shape::Text { color, size, .. } => {
+            Shape::Label { color, size, .. } => {
                 assert_eq!(*color, red());
                 assert_eq!(*size, SizeLevel::Huge.text_dip());
             }
@@ -2656,9 +2992,9 @@ mod tests {
         h.a.text_insert("cuối");
         let shapes = h.a.take_shapes(96);
         assert_eq!(shapes.len(), 2);
-        assert!(matches!(shapes[0], Shape::Rect { .. }));
+        assert!(matches!(shapes[0], Shape::Box { .. }));
         assert!(
-            matches!(shapes[1], Shape::Text { .. }),
+            matches!(shapes[1], Shape::Label { .. }),
             "chữ đang gõ ở trên cùng"
         );
         assert!(h.a.shapes().is_empty());
@@ -2712,5 +3048,372 @@ mod tests {
         assert_eq!(GAP, 6);
         assert_eq!(shape_tol(192), dip_to_px(HIT_TOL_DIP, 192));
         assert!(grip_radius(192) > grip_radius(96));
+    }
+
+    // ---- Task 112: kiểu cho Hình và Chữ
+
+    /// Bấm (nhấn rồi nhả) ô `cell` của bảng thuộc tính đang hiện.
+    fn click_style(h: &mut H, cell: StyleCell) {
+        let lay = h.layout();
+        let env = lay.env(&h.img);
+        let kind = h.a.style_kind().expect("bảng đang hiện");
+        let rect = h.a.style_rect(&env).expect("có chỗ cho bảng");
+        let l = style_layout(rect, kind, h.dpi);
+        let r = match cell {
+            StyleCell::Color(i) => l.cells[i],
+            StyleCell::Target(StyleTarget::Fill) => l.fill_chip,
+            StyleCell::Target(StyleTarget::Border) => l.border_chip,
+            StyleCell::NoFill => l.no_fill,
+            StyleCell::Width(d) if d < 0 => l.width_minus,
+            StyleCell::Width(_) => l.width_plus,
+            StyleCell::Opacity(d) if d < 0 => l.opacity_minus,
+            StyleCell::Opacity(_) => l.opacity_plus,
+            StyleCell::Align(a) => {
+                let i = Align::ALL.iter().position(|x| *x == a).unwrap();
+                l.aligns.expect("Chữ có hàng căn lề")[i]
+            }
+        };
+        let c = pt(r.x + r.w / 2, r.y + r.h / 2);
+        assert_eq!(h.down(c), Down::Handled, "{cell:?}");
+        assert!(h.up(c, false), "{cell:?}");
+    }
+
+    fn box_style(a: &Annot, i: usize) -> Style {
+        a.shapes()[i].style().expect("Hình có kiểu")
+    }
+
+    #[test]
+    fn new_shapes_start_with_the_default_style() {
+        let mut h = H::new();
+        h.draw(Tool::Rect, pt(100, 100), pt(200, 160));
+        h.draw(Tool::Ellipse, pt(220, 100), pt(300, 160));
+        let st = box_style(&h.a, 0);
+        assert_eq!(st.fill, None);
+        assert_eq!(st.opacity, 1.0);
+        assert_eq!(st.stroke, DEFAULT_COLOR);
+        assert_eq!(st.stroke_width, STROKE_DIP);
+        assert!(matches!(h.a.shapes()[1], Shape::Box { oval: true, .. }));
+        h.a.use_tool(Tool::Text, 96);
+        h.down(pt(100, 200));
+        h.a.text_insert("ab");
+        h.a.close_text(true);
+        match &h.a.shapes()[2] {
+            Shape::Label {
+                style, align, size, ..
+            } => {
+                assert_eq!(style.fill, None);
+                assert_eq!(style.stroke_width, 0.0);
+                assert_eq!(style.opacity, 1.0);
+                assert_eq!(*align, Align::Left);
+                assert_eq!(*size, 18.0);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn style_panel_shows_for_box_and_text_tools_or_a_selected_such_shape() {
+        let mut h = H::new();
+        assert_eq!(h.a.style_kind(), None);
+        for (tool, kind) in [
+            (Tool::Rect, Some(StyleKind::Box)),
+            (Tool::Ellipse, Some(StyleKind::Box)),
+            (Tool::Text, Some(StyleKind::Label)),
+            (Tool::Line, None),
+            (Tool::Arrow, None),
+            (Tool::Pen, None),
+            (Tool::Marker, None),
+            (Tool::Blur, None),
+            (Tool::Step, None),
+            (Tool::Select, None),
+        ] {
+            h.a.use_tool(tool, 96);
+            assert_eq!(h.a.style_kind(), kind, "{tool:?}");
+            assert_eq!(h.a.style_panel_open(), kind.is_some(), "{tool:?}");
+        }
+        // Đang chọn một Hình bằng công cụ Chọn: bảng hiện; chọn nét thẳng thì không.
+        h.draw(Tool::Rect, pt(100, 100), pt(200, 160));
+        h.draw(Tool::Line, pt(100, 300), pt(300, 300));
+        h.a.use_tool(Tool::Select, 96);
+        h.down(pt(100, 130));
+        h.up(pt(100, 130), false);
+        assert_eq!(h.a.style_kind(), Some(StyleKind::Box));
+        h.a.deselect(96);
+        h.down(pt(200, 300));
+        h.up(pt(200, 300), false);
+        assert_eq!(h.a.selected(), Some(1));
+        assert_eq!(h.a.style_kind(), None);
+        // Một bảng bật ra từ thanh dọc thì bảng thuộc tính nhường chỗ.
+        h.a.use_tool(Tool::Rect, 96);
+        assert!(h.a.style_panel_open());
+        h.click_side(SideItem::Size);
+        assert!(!h.a.style_panel_open());
+        assert!(h.a.escape(96));
+        assert!(h.a.style_panel_open());
+    }
+
+    #[test]
+    fn applying_a_style_to_the_selection_is_one_undo_step_and_keeps_the_layer() {
+        let mut h = H::new();
+        h.draw(Tool::Rect, pt(100, 100), pt(200, 160));
+        h.draw(Tool::Rect, pt(120, 110), pt(220, 170));
+        h.draw(Tool::Rect, pt(140, 120), pt(240, 180));
+        h.a.use_tool(Tool::Select, 96);
+        h.down(pt(120, 125));
+        h.up(pt(120, 125), false);
+        assert_eq!(h.a.selected(), Some(1));
+        let before: Vec<Shape> = h.a.shapes().to_vec();
+        click_style(&mut h, StyleCell::Color(4));
+        // Ô màu mặc định áp cho Nền.
+        assert_eq!(box_style(&h.a, 1).fill, Some(PALETTE[4]));
+        assert_eq!(h.a.shapes().len(), 3);
+        assert_eq!(h.a.selected(), Some(1), "giữ chọn và giữ lớp");
+        assert_eq!(h.a.shapes()[0], before[0]);
+        assert_eq!(h.a.shapes()[2], before[2]);
+        // Một lần hoàn tác khôi phục đúng kiểu cũ, làm lại đưa về kiểu mới.
+        h.a.undo(96);
+        assert_eq!(h.a.shapes(), before.as_slice());
+        h.a.redo(96);
+        assert_eq!(box_style(&h.a, 1).fill, Some(PALETTE[4]));
+        // Hoàn tác/làm lại bỏ chọn: chọn lại. Không nền: một bước nữa; áp lại y hệt thì không ghi sổ.
+        h.down(pt(120, 125));
+        h.up(pt(120, 125), false);
+        assert_eq!(h.a.selected(), Some(1));
+        click_style(&mut h, StyleCell::NoFill);
+        assert_eq!(box_style(&h.a, 1).fill, None);
+        click_style(&mut h, StyleCell::NoFill);
+        h.a.undo(96);
+        assert_eq!(box_style(&h.a, 1).fill, Some(PALETTE[4]));
+        assert!(h.a.can_undo());
+    }
+
+    #[test]
+    fn style_choices_become_the_default_for_the_next_shape() {
+        let mut h = H::new();
+        h.a.use_tool(Tool::Rect, 96);
+        click_style(&mut h, StyleCell::Color(10));
+        click_style(&mut h, StyleCell::Opacity(-1));
+        click_style(&mut h, StyleCell::Opacity(-1));
+        click_style(&mut h, StyleCell::Width(1));
+        click_style(&mut h, StyleCell::Target(StyleTarget::Border));
+        click_style(&mut h, StyleCell::Color(20));
+        assert_eq!(h.a.color(), PALETTE[20], "viền Hình là màu của nút Màu");
+        h.gesture(pt(100, 100), pt(200, 160));
+        let st = box_style(&h.a, 0);
+        assert_eq!(st.fill, Some(PALETTE[10]));
+        assert!((st.opacity - 0.8).abs() < 1e-6, "{}", st.opacity);
+        assert_eq!(st.stroke, PALETTE[20]);
+        assert_eq!(st.stroke_width, STROKE_DIP + 1.0);
+        // Hình xem trước khi kéo đã mang kiểu.
+        h.down(pt(250, 100));
+        h.drag(pt(330, 160), false);
+        assert!(h
+            .a
+            .layers()
+            .iter()
+            .any(|l| matches!(l, Layer::Boxed(Shape::Box { style, .. }) if style.fill == Some(PALETTE[10]))));
+        h.up(pt(330, 160), false);
+        // Kiểu nhớ qua các lần mở lớp phủ.
+        let again = Annot::with_prefs(h.a.prefs());
+        assert_eq!(again.prefs().box_style.fill, Some(PALETTE[10]));
+        assert_eq!(
+            again.prefs().box_style.opacity,
+            h.a.prefs().box_style.opacity
+        );
+        // Mức cỡ đặt lại độ dày viền mặc định.
+        h.a.set_size(SizeLevel::Huge, 96);
+        assert_eq!(
+            h.a.prefs().box_style.width_dip,
+            SizeLevel::Huge.stroke_dip()
+        );
+    }
+
+    #[test]
+    fn opacity_and_width_stay_in_range() {
+        let mut h = H::new();
+        h.a.use_tool(Tool::Rect, 96);
+        for _ in 0..30 {
+            click_style(&mut h, StyleCell::Opacity(-1));
+            click_style(&mut h, StyleCell::Width(1));
+        }
+        let v = h.a.style_view(96).unwrap();
+        assert!(v.opacity >= 0.1 && v.opacity <= 1.0, "{}", v.opacity);
+        assert_eq!(v.width_dip, WIDTH_MAX_DIP);
+        for _ in 0..30 {
+            click_style(&mut h, StyleCell::Opacity(1));
+            click_style(&mut h, StyleCell::Width(-1));
+        }
+        let v = h.a.style_view(96).unwrap();
+        assert_eq!((v.opacity, v.width_dip), (1.0, 0.0));
+    }
+
+    #[test]
+    fn a_filled_box_is_selected_by_its_inside() {
+        let mut h = H::new();
+        h.draw(Tool::Rect, pt(100, 100), pt(200, 160));
+        h.a.use_tool(Tool::Select, 96);
+        let lay = h.layout();
+        assert_eq!(h.a.topmost_at(&lay.env(&h.img), pt(150, 130)), None);
+        click_style_with_select(&mut h);
+        let lay = h.layout();
+        assert_eq!(h.a.topmost_at(&lay.env(&h.img), pt(150, 130)), Some(0));
+    }
+
+    /// Chọn hình đầu (bấm cạnh trái) rồi tô nền.
+    fn click_style_with_select(h: &mut H) {
+        h.down(pt(100, 130));
+        h.up(pt(100, 130), false);
+        click_style(h, StyleCell::Color(3));
+    }
+
+    #[test]
+    fn width_change_grows_the_shape_bounds_and_marks_it_dirty() {
+        let mut h = H::new();
+        h.draw(Tool::Rect, pt(100, 100), pt(200, 160));
+        h.a.use_tool(Tool::Select, 96);
+        h.down(pt(100, 130));
+        h.up(pt(100, 130), false);
+        let _ = h.a.take_dirty();
+        let before = h.a.bounds[0];
+        for _ in 0..10 {
+            click_style(&mut h, StyleCell::Width(1));
+        }
+        assert!(
+            h.a.bounds[0].w > before.w,
+            "{:?} {:?}",
+            h.a.bounds[0],
+            before
+        );
+        let dirty = h.a.take_dirty();
+        assert!(!dirty.is_empty());
+        // Vùng vẽ lại phủ hộp mới (chứa cả hộp cũ).
+        let area = dirty
+            .iter()
+            .fold(None, |acc, r| union(acc, Some(*r)))
+            .unwrap();
+        assert!(area.x <= h.a.bounds[0].x && area.right() >= h.a.bounds[0].right());
+    }
+
+    #[test]
+    fn text_style_applies_while_typing_and_on_commit() {
+        let mut h = H::new();
+        h.a.use_tool(Tool::Text, 96);
+        h.down(pt(100, 100));
+        h.a.text_insert("ab\ncdef");
+        let narrow = h.a.text().unwrap().frame;
+        click_style(&mut h, StyleCell::Color(2));
+        click_style(&mut h, StyleCell::Width(1));
+        click_style(&mut h, StyleCell::Align(Align::Right));
+        assert!(h.a.text().is_some(), "bấm bảng không chốt ô chữ");
+        let b = h.a.text().unwrap();
+        assert_eq!(b.align, Align::Right);
+        assert_eq!(b.style.fill, Some(PALETTE[2]));
+        assert_eq!(b.style.stroke_width, 1.0);
+        assert_eq!(b.edit.text(), "ab\ncdef");
+        let _ = narrow;
+        // Hình xem trước khi gõ cũng mang kiểu.
+        let typing = h.a.layers().into_iter().last().unwrap();
+        assert!(matches!(
+            typing,
+            Layer::Typing(Shape::Label {
+                align: Align::Right,
+                ..
+            })
+        ));
+        h.a.close_text(true);
+        match &h.a.shapes()[0] {
+            Shape::Label { align, style, .. } => {
+                assert_eq!(*align, Align::Right);
+                assert_eq!(style.fill, Some(PALETTE[2]));
+            }
+            other => panic!("{other:?}"),
+        }
+        // Mặc định cho ô chữ kế tiếp.
+        h.down(pt(100, 250));
+        let b = h.a.text().unwrap();
+        assert_eq!((b.align, b.style.fill), (Align::Right, Some(PALETTE[2])));
+    }
+
+    #[test]
+    fn selected_text_changes_alignment_in_one_undo_step() {
+        let mut h = H::new();
+        h.a.use_tool(Tool::Text, 96);
+        h.down(pt(100, 100));
+        h.a.text_insert("short\nmuch longer line");
+        h.a.close_text(true);
+        h.a.use_tool(Tool::Select, 96);
+        let b = h.a.bounds[0];
+        h.down(pt(b.x + b.w / 2, b.y + b.h / 2));
+        h.up(pt(b.x + b.w / 2, b.y + b.h / 2), false);
+        assert_eq!(h.a.selected(), Some(0));
+        assert_eq!(h.a.style_kind(), Some(StyleKind::Label));
+        click_style(&mut h, StyleCell::Align(Align::Center));
+        assert_eq!(h.a.shapes()[0].align(), Some(Align::Center));
+        h.a.undo(96);
+        assert_eq!(h.a.shapes()[0].align(), Some(Align::Left));
+        assert!(!h.a.can_undo() || h.a.shapes().len() == 1);
+    }
+
+    #[test]
+    fn clicking_the_panel_never_draws_and_margins_are_swallowed() {
+        let mut h = H::new();
+        h.a.use_tool(Tool::Rect, 96);
+        let lay = h.layout();
+        let rect = h.a.style_rect(&lay.env(&h.img)).unwrap();
+        // Lề trên cùng của bảng: nuốt cú bấm, không tạo hình, không bắt chuột.
+        let p = pt(rect.x + 1, rect.y + 1);
+        assert_eq!(h.down(p), Down::Handled);
+        assert!(!h.a.capturing());
+        assert!(h.up(p, false) || !h.a.press_pending());
+        assert!(h.a.shapes().is_empty());
+        let hit = h.hit(p);
+        assert_eq!(h.a.cursor_at(&lay.env(&h.img), p, hit), CursorKind::Arrow);
+    }
+
+    #[test]
+    fn escape_still_unwinds_to_cancel_with_the_panel_open() {
+        let mut h = H::new();
+        h.a.use_tool(Tool::Rect, 96);
+        assert!(h.a.style_panel_open());
+        // Không còn gì để đóng: Esc trả false để bên gọi hủy cả lớp phủ.
+        assert!(!h.a.escape(96));
+        h.a.use_tool(Tool::Text, 96);
+        h.down(pt(100, 100));
+        h.a.text_insert("x");
+        assert!(h.a.escape(96), "đóng ô chữ");
+        assert!(!h.a.escape(96));
+    }
+
+    #[test]
+    fn style_panel_stays_on_screen_and_outside_the_selection_when_it_fits() {
+        for dpi in [96u32, 144, 192] {
+            for kind in [StyleKind::Box, StyleKind::Label] {
+                let mon = mon_for(dpi);
+                let sel = Rect {
+                    x: mon.x + mon.w / 4,
+                    y: mon.y + mon.h / 4,
+                    w: mon.w / 3,
+                    h: mon.h / 3,
+                };
+                let bar = bar_rect(sel, dpi, mon);
+                let side = side_rect(sel, bar, dpi, mon);
+                let r = style_rect_for(kind, side, sel, mon, dpi).unwrap();
+                assert!(inside(r, mon), "{r:?} {mon:?}");
+                assert!(!overlaps(r, sel), "ưu tiên phía ngoài: {r:?} {sel:?}");
+                assert!(!overlaps(r, side));
+            }
+        }
+        // Vùng chọn sát mép phải: không còn chỗ phía ngoài, bảng vào phía vùng chọn nhưng vẫn trong màn hình.
+        let mon = mon_for(96);
+        let sel = Rect {
+            x: mon.x + 100,
+            y: mon.y + 100,
+            w: mon.w - 140,
+            h: 300,
+        };
+        let bar = bar_rect(sel, 96, mon);
+        let side = side_rect(sel, bar, 96, mon);
+        let r = style_rect_for(StyleKind::Label, side, sel, mon, 96).unwrap();
+        assert!(inside(r, mon));
     }
 }
