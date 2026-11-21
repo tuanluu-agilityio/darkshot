@@ -16,6 +16,17 @@ Người dùng chọn công cụ và vẽ trên vùng chọn: bút, đường, m
 
 Sửa `overlay_input.rs` (mô hình thuần: trạng thái công cụ, cử chỉ, văn bản, bảng), `overlay_view.rs` (vẽ thanh dọc, bảng, hình đang vẽ; sự kiện chuột/phím), `overlay.rs`, `app.rs` (chuyển `shapes` sang `burn` — đã nối ở Task 110); tạo `crates/darkshot-macos/src/annotate_ui.rs` (mô hình thuần của công cụ) nếu hợp lý; sửa `i18n.rs` chỉ để thêm chuỗi Mac (gợi ý phím kiểu ⌘, đủ hai bản).
 
+## Quy tắc xếp lớp (z-order) — BẮT BUỘC (yêu cầu của chủ dự án)
+
+Hình hoặc chữ vẽ SAU phải nằm PHÍA TRƯỚC hình vẽ trước (chỉ số cuối trong `Annotations::shapes()` là trên cùng; xem Task 110). Giao diện phải bảo đảm:
+1. Mọi hình mới (kể cả chữ vừa nhập xong và số đánh) được thêm bằng `Annotations::add` (vào cuối = trên cùng); không bao giờ chèn vào giữa hay đầu danh sách.
+2. Hoàn tác rồi vẽ lại một hình thì hình đó vẫn nằm trên cùng (theo `add` sau `undo`); Làm lại (`redo`) khôi phục đúng vị trí cũ do core giữ.
+3. Chọn/di chuyển/đổi cỡ/đổi màu một hình (`replace`) KHÔNG đổi lớp của nó (giả định: "dùng sau" nghĩa là TẠO sau; nếu chủ dự án muốn hình vừa sửa nhảy lên trên cùng thì sẽ yêu cầu riêng, đừng tự thêm).
+4. Bấm vào chỗ có nhiều hình chồng nhau thì chọn hình PHÍA TRƯỚC (`topmost_hit` của core, không tự quét lại), tay nắm hiện theo hình đó.
+5. Hình đang vẽ dở (chưa thả chuột) hiện trên cùng mọi hình đã có; thả chuột thì `add` ở cuối nên thứ tự khớp với những gì đang thấy.
+6. Chữ đang nhập (`TextEdit`) hiện trên cùng; kết thúc nhập thì `add` ở cuối.
+7. Test thuần bắt buộc: thêm A rồi B → `shapes()` = [A, B]; `add` sau `undo` đặt lên cuối; `replace` giữ chỉ số; chồng hai hình, `topmost_hit` trả hình thêm sau; hình đang vẽ dở và chữ đang nhập được vẽ sau cùng.
+
 ## Phạm vi (làm theo thứ tự; mỗi bước commit riêng)
 
 1. **Mô hình thuần có test (TDD)**: trạng thái công cụ (công cụ hiện tại, hình nhớ, `SizeLevel`, màu), `Annotations`, cử chỉ chuột theo `PressMode` (vẽ mới / chọn / di chuyển / đổi cỡ tay nắm), phím (chọn công cụ bằng `Tool::from_key`, tăng/giảm cỡ, ⌘Z hoàn tác, ⇧⌘Z làm lại, Xóa/Delete xóa hình chọn, Esc theo Windows: bỏ chọn/kết thúc chữ/hủy), `TextEdit` (chèn, xóa, mũi tên, xuống dòng, dán qua `sanitize_paste`), con trỏ theo ngữ cảnh. Tách khỏi AppKit để kiểm bằng test thường.
@@ -46,6 +57,7 @@ Dùng `Msg` sẵn có của core cho tên công cụ/cỡ/màu; thêm chuỗi Ma
 
 ## Review Focus (builder TỰ kiểm và nêu kết quả trong báo cáo)
 
+0. **Z-order** đúng quy tắc xếp lớp ở trên (hình thêm sau luôn ở phía trước, trên màn hình lẫn ảnh cuối), có test.
 1. **Đường thoát**: không trạng thái công cụ nào (đang gõ chữ, đang kéo, bảng mở) làm `Esc`/Hủy/lưới 120 s mất tác dụng.
 2. Trạng thái kéo thả của vùng chọn (`Selection`) và của hình (`Annotations`/`Gesture`) không lẫn nhau: bấm trên hình khác với bấm tay nắm vùng chọn (theo `press_mode`); vẽ ngoài vùng chọn không tạo hình.
 3. Tọa độ: hình lưu theo tọa độ ảnh chụp (px), đúng ở Retina và màn hình phụ gốc âm; `burn` ra đúng chỗ.
