@@ -136,6 +136,9 @@ pub fn to_carbon(hk: &Hotkey) -> Option<(u32, u32)> {
 }
 
 /// Tổ hợp (dạng cấu hình) từ mã phím macOS và mặt nạ Carbon; bit khác (Caps Lock…) bị bỏ qua.
+/// Ô bắt phím đi qua `options_model::capture_step` (cần phím bổ trợ theo `NSEvent`, không phải mặt
+/// nạ Carbon), nên hàm này chỉ để kiểm chứng bảng đổi mã hai chiều.
+#[cfg(test)]
 pub fn from_carbon(code: u32, mods: u32) -> Option<Hotkey> {
     mac_to_vk(code).map(|vk| Hotkey {
         ctrl: mods & MOD_CONTROL != 0,
@@ -178,25 +181,97 @@ pub fn mac_describe(hk: &Hotkey) -> String {
     s
 }
 
+/// Các dòng đăng ký không được, tách theo lý do (Task 107, rà soát Task 106).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HotkeyFailures {
+    /// Phím có trên Mac nhưng ứng dụng khác đã giữ độc quyền (`eventHotKeyExistsErr`) hoặc không
+    /// cài được bộ xử lý. Giới hạn của Carbon: chỉ phát hiện được ứng dụng đăng ký độc quyền;
+    /// phím tắt của hệ thống hay ứng dụng đăng ký không độc quyền KHÔNG làm đăng ký thất bại, nên
+    /// "không báo gì" không có nghĩa là không trùng.
+    pub taken: Vec<HotkeyRole>,
+    /// Phím không có trên Mac (`vk_to_mac` là `None`, ví dụ Insert hay phím số bàn phụ từ cấu
+    /// hình Windows).
+    pub unsupported: Vec<HotkeyRole>,
+}
+
+impl HotkeyFailures {
+    pub fn is_empty(&self) -> bool {
+        self.taken.is_empty() && self.unsupported.is_empty()
+    }
+}
+
+/// Chia các dòng `failed` (kết quả của `hotkey::apply`) thành "bị chiếm" và "chưa hỗ trợ trên
+/// Mac", mỗi nhóm theo thứ tự `HotkeyRole::ALL`.
+pub fn classify_failed(keys: &Hotkeys, failed: &[HotkeyRole]) -> HotkeyFailures {
+    let mut out = HotkeyFailures::default();
+    for r in HotkeyRole::ALL.into_iter().filter(|r| failed.contains(r)) {
+        if to_carbon(&keys.get(r).key).is_none() {
+            out.unsupported.push(r);
+        } else {
+            out.taken.push(r);
+        }
+    }
+    out
+}
+
+/// PrintScreen, ScrollLock, Pause: có trong cấu hình mang từ Windows, trên Mac đăng ký thành
+/// F13/F14/F15 mà nhiều bàn phím Mac không có.
+pub fn is_windows_only_key(vk: u32) -> bool {
+    matches!(vk, 0x2C | 0x91 | 0x13)
+}
+
+/// Các dòng đang bật (và bản Mac có làm) dùng phím theo kiểu Windows (`is_windows_only_key`),
+/// theo thứ tự `HotkeyRole::ALL`.
+pub fn windows_key_roles(keys: &Hotkeys) -> Vec<HotkeyRole> {
+    roles_to_register(keys)
+        .into_iter()
+        .filter(|r| is_windows_only_key(keys.get(*r).key.vk))
+        .collect()
+}
+
+fn mac_combos(keys: &Hotkeys, roles: &[HotkeyRole]) -> Vec<String> {
+    HotkeyRole::ALL
+        .into_iter()
+        .filter(|r| roles.contains(r))
+        .map(|r| mac_describe(&keys.get(r).key))
+        .collect()
+}
+
 /// Thông báo "Phím tắt chưa hoạt động" như `notices::hotkeys_taken_notice` của core, nhưng tên
-/// phím theo cách gọi của Mac (core gọi Command là "Win", Option là "Alt"); `None` khi không có
-/// dòng lỗi.
+/// phím theo cách gọi của Mac (core gọi Command là "Win", Option là "Alt") và tách hai lý do:
+/// bị chiếm / chưa hỗ trợ trên Mac (hai đoạn, cách nhau một dòng). `None` khi không có dòng lỗi.
 pub fn mac_taken_notice(
     lang: Lang,
     keys: &Hotkeys,
     failed: &[HotkeyRole],
 ) -> Option<(&'static str, String)> {
-    if failed.is_empty() {
+    let f = classify_failed(keys, failed);
+    if f.is_empty() {
         return None;
     }
-    let combos: Vec<String> = HotkeyRole::ALL
-        .into_iter()
-        .filter(|r| failed.contains(r))
-        .map(|r| mac_describe(&keys.get(r).key))
-        .collect();
+    let mut parts = Vec::new();
+    if !f.taken.is_empty() {
+        parts.push(i18n::hotkeys_taken_body(lang, &mac_combos(keys, &f.taken)));
+    }
+    if !f.unsupported.is_empty() {
+        parts.push(i18n::hotkeys_unsupported_body(
+            lang,
+            &mac_combos(keys, &f.unsupported),
+        ));
+    }
+    Some((i18n::t(lang, Msg::HotkeysNotWorkingTitle), parts.join("\n")))
+}
+
+/// Thông báo một lần lúc khởi động khi cấu hình dùng PrintScreen/ScrollLock/Pause (mục 3 rà soát
+/// Task 106); `None` khi không có dòng nào như vậy.
+pub fn mac_windows_keys_notice(lang: Lang, keys: &Hotkeys) -> Option<(&'static str, String)> {
+    let roles = windows_key_roles(keys);
+    if roles.is_empty() {
+        return None;
+    }
     Some((
         i18n::t(lang, Msg::HotkeysNotWorkingTitle),
-        i18n::hotkeys_taken_body(lang, &combos),
+        i18n::hotkeys_windows_keys_body(lang, &mac_combos(keys, &roles)),
     ))
 }
 
@@ -498,6 +573,76 @@ mod tests {
         assert_eq!(
             roles_to_register(&keys),
             vec![HotkeyRole::SaveFull, HotkeyRole::UploadFull]
+        );
+    }
+
+    #[test]
+    fn failures_split_into_taken_and_unsupported() {
+        let mut keys = mac_default_hotkeys();
+        keys.save_full.enabled = true;
+        // Insert (0x2D) và phím số bàn phụ (0x60) không có trên Mac.
+        keys.save_full.key.vk = 0x2D;
+        keys.upload_full = HotkeySlot {
+            enabled: true,
+            key: Hotkey {
+                vk: 0x60,
+                ..keys.upload_full.key
+            },
+        };
+        let failed = [
+            HotkeyRole::Region,
+            HotkeyRole::SaveFull,
+            HotkeyRole::UploadFull,
+        ];
+        let f = classify_failed(&keys, &failed);
+        assert_eq!(f.taken, vec![HotkeyRole::Region]);
+        assert_eq!(
+            f.unsupported,
+            vec![HotkeyRole::SaveFull, HotkeyRole::UploadFull]
+        );
+        assert!(classify_failed(&keys, &[]).is_empty());
+        for lang in Lang::ALL {
+            let (title, body) = mac_taken_notice(lang, &keys, &failed).expect("notice");
+            assert_eq!(title, i18n::t(lang, Msg::HotkeysNotWorkingTitle));
+            let parts: Vec<&str> = body.split('\n').collect();
+            assert_eq!(parts.len(), 2, "{body}");
+            assert!(parts[0].contains("Control+Shift+4"));
+            assert!(parts[1].contains("0x2D") || parts[1].contains("Insert"));
+            // Chỉ "chưa hỗ trợ": một đoạn, không nói "bị chiếm".
+            let (_, only) = mac_taken_notice(lang, &keys, &[HotkeyRole::SaveFull]).expect("n");
+            assert_eq!(
+                only,
+                i18n::hotkeys_unsupported_body(lang, &["Control+Shift+Insert".to_string()])
+            );
+        }
+    }
+
+    #[test]
+    fn windows_only_keys_are_reported_once_at_startup() {
+        let mut keys = Hotkeys::default(); // PrintScreen bật
+        assert_eq!(windows_key_roles(&keys), vec![HotkeyRole::Region]);
+        keys.save_full.enabled = true;
+        keys.save_full.key.vk = 0x91;
+        keys.upload_full.key.vk = 0x13; // tắt: không tính
+        keys.repeat_last = HotkeySlot {
+            enabled: true,
+            key: Hotkey {
+                vk: 0x2C,
+                ..keys.repeat_last.key
+            },
+        }; // chưa làm trên Mac: không tính
+        assert_eq!(
+            windows_key_roles(&keys),
+            vec![HotkeyRole::Region, HotkeyRole::SaveFull]
+        );
+        for lang in Lang::ALL {
+            let (title, body) = mac_windows_keys_notice(lang, &keys).expect("notice");
+            assert_eq!(title, i18n::t(lang, Msg::HotkeysNotWorkingTitle));
+            assert!(body.contains("F13") && body.contains("Shift+F14"), "{body}");
+        }
+        assert_eq!(
+            mac_windows_keys_notice(Lang::Vi, &mac_default_hotkeys()),
+            None
         );
     }
 }

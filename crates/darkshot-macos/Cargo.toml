@@ -19,8 +19,11 @@ dispatch2 = { version = "=0.3.1", default-features = false, features = ["std"] }
 objc2 = "=0.6.5"
 objc2-app-kit = { version = "=0.3.2", default-features = false, features = [
     "std",
+    "block2",
     "objc2-core-foundation",
     "objc2-core-graphics",
+    "NSAlert",
+    "NSAppearance",
     "NSApplication",
     "NSAttributedString",
     "NSButton",
@@ -35,15 +38,23 @@ objc2-app-kit = { version = "=0.3.2", default-features = false, features = [
     "NSImage",
     "NSMenu",
     "NSMenuItem",
+    "NSOpenPanel",
     "NSPanel",
     "NSPasteboard",
+    "NSPopUpButton",
     "NSResponder",
     "NSRunningApplication",
+    "NSSavePanel",
     "NSScreen",
+    "NSSecureTextField",
+    "NSSlider",
     "NSStatusBar",
     "NSStatusBarButton",
     "NSStatusItem",
     "NSStringDrawing",
+    "NSTabView",
+    "NSTabViewItem",
+    "NSTextField",
     "NSView",
     "NSWindow",
 ] }
@@ -79,6 +90,7 @@ objc2-foundation = { version = "=0.3.2", default-features = false, features = [
     "NSNotification",
     "NSObject",
     "NSString",
+    "NSURL",
 ] }
 objc2-screen-capture-kit = { version = "=0.3.2", default-features = false, features = [
     "std",
