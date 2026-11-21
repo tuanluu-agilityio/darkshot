@@ -309,13 +309,14 @@ pub fn capture_displays(include_cursor: bool) -> Result<Vec<DisplayShot>, Captur
     })
 }
 
-/// `Retained` chuyển qua luồng. ScreenCaptureKit trao đối tượng cho khối hoàn tất trên hàng đợi
-/// riêng của nó; các đối tượng `SCShareableContent`/`SCDisplay` là ảnh chụp bất biến, dùng được
-/// từ luồng khác.
-struct SendRetained<T>(Retained<T>);
-// SAFETY: chỉ dùng cho `SCShareableContent` (bất biến sau khi tạo, ScreenCaptureKit không gắn
-// nó với luồng nào); chỉ một luồng giữ nó tại một thời điểm.
-unsafe impl<T> Send for SendRetained<T> {}
+/// `SCShareableContent` chuyển từ hàng đợi của khối hoàn tất (ScreenCaptureKit gọi khối trên
+/// hàng đợi riêng của nó) sang luồng chụp đang chờ.
+struct SendContent(Retained<SCShareableContent>);
+// SAFETY: `SCShareableContent` là ảnh chụp bất biến của danh sách màn hình/cửa sổ sau khi tạo,
+// ScreenCaptureKit không gắn nó với luồng hay hàng đợi nào (Apple dùng nó từ các hàng đợi khác
+// nhau). Giá trị chỉ được chuyển một lần qua kênh và chỉ một luồng giữ nó tại một thời điểm.
+// Chỉ cài cho đúng kiểu này, không cho `Retained` bất kỳ.
+unsafe impl Send for SendContent {}
 
 fn sck_error(err: *mut NSError, what: &str) -> CaptureError {
     // SAFETY: ScreenCaptureKit trao `NSError` hợp lệ hoặc null; `retain` nhận null.
@@ -327,12 +328,12 @@ fn sck_error(err: *mut NSError, what: &str) -> CaptureError {
     }
 }
 
-fn shareable_content() -> Result<SendRetained<SCShareableContent>, CaptureError> {
+fn shareable_content() -> Result<SendContent, CaptureError> {
     let (tx, rx) = mpsc::channel();
     let block = RcBlock::new(move |content: *mut SCShareableContent, err: *mut NSError| {
         // SAFETY: con trỏ hợp lệ hoặc null, do ScreenCaptureKit trao; `retain` giữ nó sống.
         let r = match unsafe { Retained::retain(content) } {
-            Some(c) => Ok(SendRetained(c)),
+            Some(c) => Ok(SendContent(c)),
             None => Err(sck_error(err, "SCShareableContent")),
         };
         let _ = tx.send(r);
