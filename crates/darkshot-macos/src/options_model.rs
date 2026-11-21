@@ -222,7 +222,8 @@ pub fn persist(path: &Path, cfg: &Config, store: &dyn SecretStore) -> Result<(),
 /// Cỡ cửa sổ và cột (điểm), dùng chung cho dựng giao diện và kiểm tra chữ không bị cắt.
 pub mod layout {
     /// Ước lượng bề rộng trung bình một ký tự (điểm) của phông hệ thống 13 pt, hơi rộng để an toàn
-    /// với chữ có dấu.
+    /// với chữ có dấu. Chỉ dùng để kiểm thử chữ không bị cắt.
+    #[cfg(test)]
     pub const AVG_CHAR_W: f64 = 7.6;
     pub const WINDOW_W: f64 = 620.0;
     pub const WINDOW_H: f64 = 490.0;
@@ -240,6 +241,7 @@ pub mod layout {
     pub const CONTENT_W: f64 = 560.0;
 
     /// Chữ `text` (một dòng) vừa trong `width` điểm theo ước lượng.
+    #[cfg(test)]
     pub fn text_fits(text: &str, width: f64) -> bool {
         text.chars().count() as f64 * AVG_CHAR_W <= width
     }

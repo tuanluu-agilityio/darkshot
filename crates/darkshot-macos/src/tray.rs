@@ -15,7 +15,10 @@ use objc2_foundation::{NSObject, NSObjectProtocol, NSString};
 
 /// Lệnh đã làm trên bản Mac. Lệnh trả `false` không xuất hiện trong menu.
 pub fn implemented(cmd: MenuCommand) -> bool {
-    matches!(cmd, MenuCommand::Capture | MenuCommand::Quit)
+    matches!(
+        cmd,
+        MenuCommand::Capture | MenuCommand::Options | MenuCommand::Quit
+    )
 }
 
 /// Nhãn cố định của một lệnh menu; `None` cho nhãn có tham số (bản mới, số bước, số ảnh ghim),
@@ -213,15 +216,19 @@ mod tests {
     ];
 
     #[test]
-    fn only_capture_and_quit_are_implemented() {
+    fn only_capture_options_and_quit_are_implemented() {
         for c in ALL {
-            assert_eq!(implemented(c), matches!(c, Capture | Quit), "{c:?}");
+            assert_eq!(
+                implemented(c),
+                matches!(c, Capture | Options | Quit),
+                "{c:?}"
+            );
         }
     }
 
     #[test]
     fn menu_shows_only_implemented_commands() {
-        let want = vec![Item(Capture), Item(Quit)];
+        let want = vec![Item(Capture), Item(Options), Item(Quit)];
         assert_eq!(visible_menu(menu_layout(false, 0, false, None)), want);
         assert_eq!(visible_menu(menu_layout(false, 0, true, None)), want);
         // Bản mới, ảnh ghim, phiên chụp từng bước: chưa làm trên Mac, vạch ngăn cũng bị bỏ.

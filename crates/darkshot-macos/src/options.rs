@@ -17,18 +17,17 @@
 use crate::keymap::HotkeyFailures;
 use crate::lang;
 use crate::options_model::{
-    error_target, expiry_from_index, form_from_config, hotkey_text,
-    initial_tab_index, lang_from_index, row_status, status_msg, visible_roles, CaptureStep,
-    RowStatus,
+    error_target, expiry_from_index, form_from_config, hotkey_text, initial_tab_index,
+    lang_from_index, row_status, status_msg, visible_roles, CaptureStep, RowStatus,
 };
 use crate::options_view::{self, Controls, OptionsTarget};
+use block2::RcBlock;
 use darkshot_core::app_flow::{merge_reason, OpenReason};
 use darkshot_core::config::{clamp_jpeg_quality, Config, HotkeyRole, Hotkeys, UploadFormat};
 use darkshot_core::i18n::{self, t, Msg, OK_LABEL};
 use darkshot_core::settings_form::{apply_form, quality_enabled, Field, Form, FormError, Tab};
 use darkshot_core::upload::R2Uploader;
 use dispatch2::{DispatchQueue, DispatchTime};
-use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{sel, MainThreadMarker};
@@ -99,11 +98,6 @@ fn inner() -> Option<Rc<Inner>> {
 
 fn checked(b: &NSButton) -> bool {
     b.state() == NSControlStateValueOn
-}
-
-/// Cửa sổ đang mở không.
-pub fn is_open() -> bool {
-    inner().is_some()
 }
 
 /// Mở cửa sổ Tùy chọn, hoặc đưa cửa sổ đang mở ra trước (và chuyển sang tab R2 nếu yêu cầu mới
@@ -193,11 +187,6 @@ fn finish(saved: bool) {
     on_close(saved);
 }
 
-/// Đóng cửa sổ không lưu (dùng khi ứng dụng thoát hay đổi ngôn ngữ ngoài ý muốn).
-pub fn close_if_open() {
-    finish(false);
-}
-
 // ---------------------------------------------------------------- đọc biểu mẫu
 
 fn read_form(i: &Inner) -> Form {
@@ -236,7 +225,9 @@ fn read_form(i: &Inner) -> Form {
 
 fn field_view(i: &Inner, field: Field) -> Option<Retained<NSView>> {
     let c = &i.controls;
-    let text = |t: &Retained<NSTextField>| -> Option<Retained<NSView>> { Some(Retained::into_super(Retained::into_super(t.clone()))) };
+    let text = |t: &Retained<NSTextField>| -> Option<Retained<NSView>> {
+        Some(Retained::into_super(Retained::into_super(t.clone())))
+    };
     match field {
         Field::SaveDir => text(&c.save_dir),
         Field::AccountId => text(&c.account),
@@ -553,12 +544,20 @@ pub fn on_test() {
             DispatchQueue::main().exec_async(move || test_done(generation, ok, &msg));
         });
     if spawned.is_err() {
-        set_test_result(&i, lang::tr(Msg::TestThreadFailed), NSColor::systemRedColor());
+        set_test_result(
+            &i,
+            lang::tr(Msg::TestThreadFailed),
+            NSColor::systemRedColor(),
+        );
         return;
     }
     i.test_generation.set(generation);
     i.controls.test_button.setEnabled(false);
-    set_test_result(&i, lang::tr(Msg::TestRunning), NSColor::secondaryLabelColor());
+    set_test_result(
+        &i,
+        lang::tr(Msg::TestRunning),
+        NSColor::secondaryLabelColor(),
+    );
     // Dự phòng: luồng nền không bao giờ báo về thì mở nút lại và báo hết giờ.
     let when = DispatchTime::NOW.time(TEST_FAILSAFE.as_nanos() as i64);
     let _ = DispatchQueue::main().after(when, move || test_timeout(generation));
@@ -591,5 +590,7 @@ pub fn selected_tab() -> Option<Tab> {
     let i = inner()?;
     let item = i.controls.tab_view.selectedTabViewItem()?;
     let idx = i.controls.tab_view.indexOfTabViewItem(&item);
-    usize::try_from(idx).ok().and_then(|n| Tab::ALL.get(n).copied())
+    usize::try_from(idx)
+        .ok()
+        .and_then(|n| Tab::ALL.get(n).copied())
 }

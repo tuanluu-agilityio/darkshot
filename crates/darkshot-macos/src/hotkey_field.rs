@@ -141,10 +141,6 @@ impl HotkeyField {
         self.setNeedsDisplay(true);
     }
 
-    pub fn is_capturing(&self) -> bool {
-        self.ivars().capturing.get()
-    }
-
     fn feed(&self, event: &NSEvent, down: bool) {
         let f = event.modifierFlags();
         let input = KeyInput {

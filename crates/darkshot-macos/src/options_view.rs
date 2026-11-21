@@ -20,8 +20,8 @@ use objc2::{define_class, msg_send, sel, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSAppearance, NSAppearanceCustomization, NSAppearanceNameDarkAqua, NSBackingStoreType,
     NSButton, NSColor, NSControl, NSControlStateValueOff, NSControlStateValueOn, NSFont,
-    NSPopUpButton, NSResponder, NSSecureTextField, NSSlider, NSTabView,
-    NSTabViewItem, NSTextField, NSView, NSWindow, NSWindowStyleMask,
+    NSPopUpButton, NSResponder, NSSecureTextField, NSSlider, NSTabView, NSTabViewItem, NSTextField,
+    NSView, NSWindow, NSWindowStyleMask,
 };
 use objc2_foundation::{
     NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
@@ -270,7 +270,12 @@ impl Builder<'_> {
         b
     }
 
-    fn field(&self, parent: &NSView, value: &str, (x, y, w): (f64, f64, f64)) -> Retained<NSTextField> {
+    fn field(
+        &self,
+        parent: &NSView,
+        value: &str,
+        (x, y, w): (f64, f64, f64),
+    ) -> Retained<NSTextField> {
         let f = NSTextField::textFieldWithString(&ns(value), self.mtm);
         f.setFrame(rect(x, y, w, 22.0));
         parent.addSubview(&f);
@@ -284,11 +289,8 @@ impl Builder<'_> {
         selected: usize,
         (x, y, w): (f64, f64, f64),
     ) -> Retained<NSPopUpButton> {
-        let p = NSPopUpButton::initWithFrame_pullsDown(
-            self.mtm.alloc(),
-            rect(x, y, w, 26.0),
-            false,
-        );
+        let p =
+            NSPopUpButton::initWithFrame_pullsDown(self.mtm.alloc(), rect(x, y, w, 26.0), false);
         for t in titles {
             p.addItemWithTitle(&ns(t));
         }
@@ -363,14 +365,44 @@ pub fn build(
     let g = pane(Tab::General);
     b.label(&g, l(Msg::LabelSaveDir), PAD, 16.0, FULL_W);
     let save_dir = b.field(&g, &form.save_dir, (PAD, 38.0, FULL_W - CHANGE_BTN_W - 8.0));
-    let choose = b.button(l(Msg::BtnChoose), (PAD + FULL_W - CHANGE_BTN_W, 36.0, CHANGE_BTN_W), sel!(choosePressed:));
+    let choose = b.button(
+        l(Msg::BtnChoose),
+        (PAD + FULL_W - CHANGE_BTN_W, 36.0, CHANGE_BTN_W),
+        sel!(choosePressed:),
+    );
     g.addSubview(&choose);
     b.label(&g, l(Msg::LabelLanguage), PAD, 84.0, LABEL_W);
     let names: Vec<&str> = Lang::ALL.iter().map(|x| x.native_name()).collect();
-    let language = b.popup(&g, &names, lang_index(form.language), (FIELD_X, 80.0, 200.0));
-    let notices = b.check(&g, l(Msg::ChkShowSuccessNotices), (PAD, 128.0, FULL_W), form.show_success_notices, sel!(rowToggled:), -1);
-    let keep_selection = b.check(&g, l(Msg::ChkKeepSelection), (PAD, 158.0, FULL_W), form.keep_selection, sel!(rowToggled:), -1);
-    let include_cursor = b.check(&g, l(Msg::ChkIncludeCursor), (PAD, 188.0, FULL_W), form.include_cursor, sel!(rowToggled:), -1);
+    let language = b.popup(
+        &g,
+        &names,
+        lang_index(form.language),
+        (FIELD_X, 80.0, 200.0),
+    );
+    let notices = b.check(
+        &g,
+        l(Msg::ChkShowSuccessNotices),
+        (PAD, 128.0, FULL_W),
+        form.show_success_notices,
+        sel!(rowToggled:),
+        -1,
+    );
+    let keep_selection = b.check(
+        &g,
+        l(Msg::ChkKeepSelection),
+        (PAD, 158.0, FULL_W),
+        form.keep_selection,
+        sel!(rowToggled:),
+        -1,
+    );
+    let include_cursor = b.check(
+        &g,
+        l(Msg::ChkIncludeCursor),
+        (PAD, 188.0, FULL_W),
+        form.include_cursor,
+        sel!(rowToggled:),
+        -1,
+    );
     // Hộp tích chung không cần hành động; bỏ đích để không gọi `rowToggled:` với tag -1.
     for c in [&notices, &keep_selection, &include_cursor] {
         // SAFETY: bỏ đích và hành động của nút; không có tham chiếu nào bị giữ.
@@ -389,12 +421,23 @@ pub fn build(
         let y = 14.0 + 86.0 * i as f64;
         let slot = form.hotkeys.get(*role);
         let tag = i as isize;
-        hk_check.push(b.check(&h, l(role.label()), (PAD, y, CHECK_W), slot.enabled, sel!(rowToggled:), tag));
+        hk_check.push(b.check(
+            &h,
+            l(role.label()),
+            (PAD, y, CHECK_W),
+            slot.enabled,
+            sel!(rowToggled:),
+            tag,
+        ));
         let field = HotkeyField::new(mtm, rect(PAD + 20.0, y + 24.0, KEY_FIELD_W, 24.0), i);
         field.set_text(&hotkey_text(&slot));
         h.addSubview(&field);
         hk_field.push(field);
-        let change = b.button(l(Msg::BtnChange), (PAD + 20.0 + KEY_FIELD_W + 8.0, y + 23.0, CHANGE_BTN_W), sel!(changeHotkey:));
+        let change = b.button(
+            l(Msg::BtnChange),
+            (PAD + 20.0 + KEY_FIELD_W + 8.0, y + 23.0, CHANGE_BTN_W),
+            sel!(changeHotkey:),
+        );
         change.setTag(tag);
         h.addSubview(&change);
         hk_change.push(change);
@@ -407,8 +450,20 @@ pub fn build(
     let f = pane(Tab::Format);
     b.label(&f, l(Msg::LabelUploadFormat), PAD, 16.0, FULL_W);
     let is_jpeg = form.upload_format == UploadFormat::Jpeg;
-    let png = b.radio(&f, l(UploadFormat::Png.label()), (PAD + 12.0, 42.0, FULL_W - 12.0), !is_jpeg, 0);
-    let jpeg = b.radio(&f, l(UploadFormat::Jpeg.label()), (PAD + 12.0, 68.0, FULL_W - 12.0), is_jpeg, 1);
+    let png = b.radio(
+        &f,
+        l(UploadFormat::Png.label()),
+        (PAD + 12.0, 42.0, FULL_W - 12.0),
+        !is_jpeg,
+        0,
+    );
+    let jpeg = b.radio(
+        &f,
+        l(UploadFormat::Jpeg.label()),
+        (PAD + 12.0, 68.0, FULL_W - 12.0),
+        is_jpeg,
+        1,
+    );
     let quality_label = b.label(&f, l(Msg::LabelJpegQuality), PAD, 114.0, LABEL_W);
     // SAFETY: đích là `OptionsTarget` sống cùng cửa sổ; bộ chọn có trên đích.
     let quality = unsafe {
@@ -424,7 +479,13 @@ pub fn build(
     quality.setFrame(rect(FIELD_X, 110.0, 240.0, 26.0));
     quality.setContinuous(true);
     f.addSubview(&quality);
-    let quality_value = b.label(&f, &form.jpeg_quality.to_string(), FIELD_X + 250.0, 114.0, 40.0);
+    let quality_value = b.label(
+        &f,
+        &form.jpeg_quality.to_string(),
+        FIELD_X + 250.0,
+        114.0,
+        40.0,
+    );
     b.note(&f, l(Msg::NoteSavedAlwaysPng), (PAD, 160.0, FULL_W, 20.0));
     quality_label.setEnabled(quality_enabled(form.upload_format));
     quality.setEnabled(quality_enabled(form.upload_format));
@@ -470,7 +531,12 @@ pub fn build(
         .iter()
         .map(|e| i18n::expiry_label(lang::current(), *e))
         .collect();
-    let expiry = b.popup(&r, &expiry_titles, expiry_index(form.expiry), (FIELD_X, y + 1.0, 200.0));
+    let expiry = b.popup(
+        &r,
+        &expiry_titles,
+        expiry_index(form.expiry),
+        (FIELD_X, y + 1.0, 200.0),
+    );
     y += 44.0;
     let test_button = b.button(l(Msg::BtnTest), (PAD, y, 150.0), sel!(testPressed:));
     r.addSubview(&test_button);
@@ -482,9 +548,17 @@ pub fn build(
     content.addSubview(&tab_view);
 
     let by = WINDOW_H - 40.0;
-    let ok = b.button(OK_LABEL, (WINDOW_W - 20.0 - 90.0, by, 90.0), sel!(okPressed:));
+    let ok = b.button(
+        OK_LABEL,
+        (WINDOW_W - 20.0 - 90.0, by, 90.0),
+        sel!(okPressed:),
+    );
     ok.setKeyEquivalent(&ns("\r"));
-    let cancel = b.button(l(Msg::BtnCancel), (WINDOW_W - 20.0 - 90.0 - 8.0 - 90.0, by, 90.0), sel!(cancelPressed:));
+    let cancel = b.button(
+        l(Msg::BtnCancel),
+        (WINDOW_W - 20.0 - 90.0 - 8.0 - 90.0, by, 90.0),
+        sel!(cancelPressed:),
+    );
     cancel.setKeyEquivalent(&ns("\u{1b}"));
     content.addSubview(&cancel);
     content.addSubview(&ok);

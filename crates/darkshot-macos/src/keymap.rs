@@ -136,6 +136,9 @@ pub fn to_carbon(hk: &Hotkey) -> Option<(u32, u32)> {
 }
 
 /// Tổ hợp (dạng cấu hình) từ mã phím macOS và mặt nạ Carbon; bit khác (Caps Lock…) bị bỏ qua.
+/// Ô bắt phím đi qua `options_model::capture_step` (cần phím bổ trợ theo `NSEvent`, không phải mặt
+/// nạ Carbon), nên hàm này chỉ để kiểm chứng bảng đổi mã hai chiều.
+#[cfg(test)]
 pub fn from_carbon(code: u32, mods: u32) -> Option<Hotkey> {
     mac_to_vk(code).map(|vk| Hotkey {
         ctrl: mods & MOD_CONTROL != 0,

@@ -8,6 +8,11 @@
 //! "Chụp" mở lớp phủ chọn vùng (`overlay`, Task 105) trên ảnh của mọi màn hình; cổng chụp chỉ
 //! về rảnh khi lớp phủ đóng (mọi đường đóng đều gọi `on_overlay_closed`).
 //!
+//! Cửa sổ Tùy chọn (`options`, Task 107) mở từ menu, khi khởi động lần đầu hay cấu hình lỗi
+//! (`app_state::needs_settings_on_start`) và khi tải lên không được vì thiếu R2
+//! (`OpenReason::NeedsR2`). Lưu: `config::save` (khóa vào Keychain) rồi cập nhật cấu hình đang chạy;
+//! đóng cửa sổ (mọi đường) đăng ký lại phím tắt.
+//!
 //! Phím tắt toàn cục (`hotkey`, Task 106) đi qua cùng cổng chụp với menu (`GateEvent::Hotkey`):
 //! chụp vùng mở lớp phủ; lưu/tải lên toàn màn hình lấy màn hình chứa con trỏ rồi chạy hành động
 //! trên luồng nền; cổng về rảnh ngay khi đã có ảnh.
@@ -15,18 +20,24 @@
 use crate::capture::{self, CaptureError, DisplayShot};
 use crate::clipboard::PasteboardClipboard;
 use crate::coords::{cocoa_to_top_left, RectF};
-use crate::keymap::{mac_default_hotkeys, mac_kind, mac_taken_notice};
+use crate::keymap::{
+    classify_failed, mac_default_hotkeys, mac_kind, mac_taken_notice, mac_windows_keys_notice,
+    HotkeyFailures,
+};
 use crate::notify::{self, MacNotifier};
+use crate::options::{self, Env};
+use crate::options_model::persist;
 use crate::overlay::{self, Outcome};
 use crate::secret::{self, KeychainStore};
 use crate::tray::Tray;
 use crate::{hotkey, lang, paths, timeutil};
 use darkshot_core::actions::{run_action, Action, Ctx, NoticeKind, Notifier};
+use darkshot_core::app_flow::OpenReason;
 use darkshot_core::app_state::{self, AppState, ConfigNotice};
 use darkshot_core::capture_gate::{
     gate_step, next_kind, CaptureGate, CaptureKind, GateAction, GateEvent,
 };
-use darkshot_core::config::{HotkeyRole, Hotkeys};
+use darkshot_core::config::{Config, HotkeyRole, Hotkeys};
 use darkshot_core::geometry::Rect;
 use darkshot_core::i18n::{t, Lang, Msg};
 use darkshot_core::image::Image;
@@ -49,6 +60,9 @@ pub const ARG_KEYCHAIN_SERVICE: &str = "--keychain-service";
 /// Tham số dòng lệnh: hiện lớp phủ trên ảnh tổng hợp (không chụp, không cần quyền, không đọc cấu
 /// hình), in kết quả rồi thoát. Cho test `#[ignore]` chạy tay `tests/overlay_gui.rs`.
 pub const ARG_OVERLAY_SELFTEST: &str = "--overlay-selftest";
+/// Tham số dòng lệnh: hiện cửa sổ Tùy chọn với cấu hình mẫu (không đọc cấu hình thật, không
+/// Keychain, không ghi tệp), in kết quả rồi thoát. Cho test `#[ignore]` `tests/options_gui.rs`.
+pub const ARG_OPTIONS_SELFTEST: &str = "--options-selftest";
 
 /// Số lượt lưu/chép đang chạy trên luồng nền.
 static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
@@ -61,6 +75,8 @@ thread_local! {
     static TRAY: RefCell<Option<Tray>> = const { RefCell::new(None) };
     /// Đã gọi `CGRequestScreenCaptureAccess` trong lần chạy này (chỉ hỏi một lần).
     static PERMISSION_ASKED: Cell<bool> = const { Cell::new(false) };
+    /// Kết quả đăng ký phím tắt lần gần nhất, cho cửa sổ Tùy chọn hiện trạng thái từng dòng.
+    static FAILURES: RefCell<HotkeyFailures> = RefCell::new(HotkeyFailures::default());
 }
 
 /// Lỗi khi giữ khóa một bản chạy.
@@ -110,8 +126,8 @@ pub fn instance_lock_path(appdata: &Path) -> std::path::PathBuf {
     appdata.join("darkshot").join("instance.lock")
 }
 
-/// Thông báo lúc khởi động: cấu hình hỏng/mất khóa, hoặc chưa cấu hình kho R2. Chưa có cửa sổ
-/// Tùy chọn trên Mac nên chỉ thông báo.
+/// Thông báo lúc khởi động: cấu hình hỏng/mất khóa, hoặc chưa cấu hình kho R2. Cửa sổ Tùy chọn
+/// cũng tự mở ở các trường hợp này (`open_options`); thông báo nói rõ lý do.
 pub fn startup_notice(
     lang: Lang,
     notice: Option<ConfigNotice>,
@@ -162,10 +178,12 @@ pub fn full_screen_index(
         .or_else(|| capture::pick_display(displays, None, main_id))
 }
 
-/// Đăng ký lại phím tắt theo `keys` (lúc khởi động; Task 107 gọi khi cấu hình đổi) và báo **một**
-/// thông báo nêu các phím bị chiếm. Trả về các dòng không đăng ký được. Chỉ gọi trên luồng chính.
+/// Đăng ký lại phím tắt theo `keys` (lúc khởi động và khi cửa sổ Tùy chọn đóng) và báo **một**
+/// thông báo nêu các phím bị chiếm hoặc chưa hỗ trợ trên Mac. Trả về các dòng không đăng ký được.
+/// Chỉ gọi trên luồng chính.
 pub fn apply_hotkeys(keys: &Hotkeys) -> Vec<HotkeyRole> {
     let failed = hotkey::apply(keys);
+    FAILURES.with(|f| *f.borrow_mut() = classify_failed(keys, &failed));
     if let Some((title, body)) = mac_taken_notice(lang::current(), keys, &failed) {
         MacNotifier.notify(NoticeKind::Error, title, &body);
     }
@@ -182,6 +200,9 @@ pub fn run(args: &[String]) -> i32 {
     }
     if args.iter().any(|a| a == ARG_OVERLAY_SELFTEST) {
         return overlay_selftest();
+    }
+    if args.iter().any(|a| a == ARG_OPTIONS_SELFTEST) {
+        return options_selftest();
     }
     let Some(mtm) = MainThreadMarker::new() else {
         eprintln!("darkshot: must start on the main thread");
@@ -232,6 +253,20 @@ pub fn run(args: &[String]) -> i32 {
     }
     hotkey::init(on_hotkey);
     apply_hotkeys(&hotkeys);
+    // Cấu hình mang từ Windows dùng PrintScreen/ScrollLock/Pause: trên Mac là F13–F15, nhiều bàn
+    // phím không có. Nhắc một lần lúc khởi động (cửa sổ Tùy chọn cũng ghi rõ ở dòng phím tắt).
+    if let Some((title, body)) = mac_windows_keys_notice(lang::current(), &hotkeys) {
+        MacNotifier.notify(NoticeKind::Info, title, &body);
+    }
+    // Lần chạy đầu hoặc cấu hình hỏng/mất khóa: mở thẳng tab R2 khi vòng lặp chính bắt đầu chạy.
+    let needs_settings = STATE.with(|s| {
+        s.borrow()
+            .as_ref()
+            .is_some_and(|st| app_state::needs_settings_on_start(st, config_file_exists))
+    });
+    if needs_settings {
+        DispatchQueue::main().exec_async(|| open_options(OpenReason::NeedsR2));
+    }
 
     app.run();
     0
@@ -299,6 +334,45 @@ fn overlay_selftest() -> i32 {
     0
 }
 
+/// Cấu hình mẫu cho `--options-selftest`: không đọc tệp hay Keychain, không có khóa.
+pub fn selftest_config() -> Config {
+    let mut c = Config::defaults(&std::env::temp_dir(), lang::os_default());
+    c.hotkeys = mac_default_hotkeys();
+    c.r2.account_id = "sample-account".into();
+    c.r2.access_key_id = "sample-key-id".into();
+    c.r2.bucket = "sample-bucket".into();
+    c.r2.public_base_url = "https://example.invalid".into();
+    c
+}
+
+/// `--options-selftest`: mở cửa sổ Tùy chọn với cấu hình mẫu; OK/Hủy in kết quả rồi thoát. Lưu
+/// không ghi gì (không tệp, không Keychain).
+fn options_selftest() -> i32 {
+    let Some(mtm) = MainThreadMarker::new() else {
+        eprintln!("darkshot: must start on the main thread");
+        return 1;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+    let config = selftest_config();
+    lang::set(config.language);
+    options::open(
+        mtm,
+        Env {
+            config,
+            failures: HotkeyFailures::default(),
+            reason: OpenReason::User,
+            on_save: |_| Ok(()),
+            on_close: |saved| {
+                println!("options: {}", if saved { "saved" } else { "cancelled" });
+                std::process::exit(0);
+            },
+        },
+    );
+    app.run();
+    0
+}
+
 fn selftest_closed(outcome: Outcome) {
     match outcome {
         Outcome::Cancelled => println!("overlay: cancelled"),
@@ -312,9 +386,71 @@ fn selftest_closed(outcome: Outcome) {
 fn on_command(cmd: MenuCommand) {
     match cmd {
         MenuCommand::Capture => request(GateEvent::MenuCapture, CaptureKind::Region),
+        MenuCommand::Options => open_options(OpenReason::User),
         MenuCommand::Quit => quit(),
         // Lệnh chưa làm trên Mac không có trong menu (`tray::implemented`).
         _ => {}
+    }
+}
+
+/// Mở cửa sổ Tùy chọn (hoặc đưa cửa sổ đang mở ra trước). Luồng chính.
+fn open_options(reason: OpenReason) {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let Some(config) = STATE.with(|s| s.borrow().as_ref().map(|a| a.config.clone())) else {
+        return;
+    };
+    options::open(
+        mtm,
+        Env {
+            config,
+            failures: FAILURES.with(|f| f.borrow().clone()),
+            reason,
+            on_save: save_options,
+            on_close: options_closed,
+        },
+    );
+}
+
+/// Lưu từ cửa sổ Tùy chọn: ghi tệp (khóa mới vào Keychain qua `config::save`), rồi cập nhật cấu
+/// hình đang chạy, ngôn ngữ, cờ thông báo và menu. Lỗi trả về là câu cho người dùng (không có
+/// khóa); khi lỗi, cấu hình cũ vẫn dùng. Phím tắt đăng ký lại ở `options_closed`.
+fn save_options(cfg: &Config) -> Result<(), String> {
+    let profile = paths::profile_override();
+    persist(
+        &paths::config_path(),
+        cfg,
+        &KeychainStore::for_profile(profile.as_deref()),
+    )?;
+    let old_lang = lang::current();
+    STATE.with(|s| {
+        if let Some(st) = s.borrow_mut().as_mut() {
+            st.config = cfg.clone();
+            // Tệp giờ khớp cấu hình trong bộ nhớ.
+            st.config_notice = None;
+        }
+    });
+    lang::set(cfg.language);
+    notify::set_show_success(cfg.show_success_notices);
+    if cfg.language != old_lang {
+        if let Some(mtm) = MainThreadMarker::new() {
+            TRAY.with(|t| {
+                if let Some(tray) = t.borrow().as_ref() {
+                    tray.rebuild(mtm);
+                }
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Cửa sổ Tùy chọn đã đóng (lưu hay hủy): đăng ký lại phím tắt của cấu hình đang chạy (cửa sổ đã
+/// gỡ chúng lúc mở) và báo phím bị chiếm hay chưa hỗ trợ.
+fn options_closed(_saved: bool) {
+    let keys = STATE.with(|s| s.borrow().as_ref().map(|a| a.config.hotkeys));
+    if let Some(keys) = keys {
+        apply_hotkeys(&keys);
     }
 }
 
@@ -345,7 +481,7 @@ fn request(ev: GateEvent, kind: CaptureKind) {
             }
         }
         GateAction::CaptureNow => start_capture(),
-        // Chưa có cửa sổ Tùy chọn trên Mac.
+        // Cổng không mở Tùy chọn: mở từ menu, khi khởi động và khi thiếu R2 (`open_options`).
         GateAction::OpenSettings
         | GateAction::FocusSettings
         | GateAction::None
@@ -502,6 +638,16 @@ fn act_in_background(action: Action, image: Image, rect: Rect) {
         return;
     };
     let lang = lang::current();
+    // Tải lên mà chưa có R2: ảnh vẫn được lưu vào máy (`run_action`), đồng thời mở thẳng tab R2.
+    if action == Action::Upload
+        && !STATE.with(|s| {
+            s.borrow()
+                .as_ref()
+                .is_some_and(|a| a.config.r2.is_complete())
+        })
+    {
+        open_options(OpenReason::NeedsR2);
+    }
     IN_FLIGHT.fetch_add(1, Ordering::SeqCst);
     let spawned = std::thread::Builder::new()
         .name("darkshot-action".into())
