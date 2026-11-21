@@ -39,6 +39,8 @@ mod paths;
 #[cfg(target_os = "macos")]
 mod secret;
 #[cfg(target_os = "macos")]
+mod shutdown;
+#[cfg(target_os = "macos")]
 mod timeutil;
 #[cfg(target_os = "macos")]
 mod tray;
