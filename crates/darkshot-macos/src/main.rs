@@ -1,6 +1,8 @@
 //! Điểm vào của darkshot cho macOS (Apple silicon, macOS 14+). Vỏ ứng dụng ở `app.rs` (Task 104).
 
 #[cfg(target_os = "macos")]
+mod annotate_draw;
+#[cfg(target_os = "macos")]
 mod app;
 #[cfg(target_os = "macos")]
 mod capture;

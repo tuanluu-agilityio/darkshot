@@ -60,12 +60,24 @@ objc2-app-kit = { version = "=0.3.2", default-features = false, features = [
 ] }
 objc2-core-foundation = { version = "=0.3.2", default-features = false, features = [
     "std",
+    "CFAttributedString",
     "CFCGTypes",
     "CFData",
+    "CFDictionary",
+    "CFNumber",
     "CFString",
+] }
+# CoreText: đo và vẽ chữ đánh dấu (Task 110).
+objc2-core-text = { version = "=0.3.2", default-features = false, features = [
+    "std",
+    "CTFont",
+    "CTLine",
+    "CTStringAttributes",
+    "objc2-core-graphics",
 ] }
 objc2-core-graphics = { version = "=0.3.2", default-features = false, features = [
     "std",
+    "CGBitmapContext",
     "CGColorSpace",
     "CGContext",
     "CGDataProvider",
@@ -74,6 +86,7 @@ objc2-core-graphics = { version = "=0.3.2", default-features = false, features =
     "CGEventSource",
     "CGEventTypes",
     "CGImage",
+    "CGPath",
     "CGWindow",
 ] }
 objc2-foundation = { version = "=0.3.2", default-features = false, features = [
