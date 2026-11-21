@@ -124,6 +124,10 @@ pub const MIN_EXTENT_DIP: f32 = 6.0;
 pub const HIT_TOL_DIP: f32 = 4.0;
 pub const TEXT_SIZE_MIN_PX: f32 = 8.0;
 pub const TEXT_SIZE_MAX_PX: f32 = 400.0;
+/// Cỡ chữ (px ảnh) nhỏ nhất, lớn nhất và bước của hàng Cỡ chữ trong bảng thuộc tính của Chữ.
+pub const FONT_PX_MIN: f32 = 8.0;
+pub const FONT_PX_MAX: f32 = 200.0;
+pub const FONT_PX_STEP: f32 = 2.0;
 pub const STEP_RADIUS_MIN_PX: f32 = 6.0;
 pub const STEP_RADIUS_MAX_PX: f32 = 300.0;
 

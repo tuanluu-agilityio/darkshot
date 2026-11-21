@@ -1048,7 +1048,7 @@ fn draw_side(c: Option<&CGContext>, f: &Frame, a: &Annot, side: Rect, lay: &Layo
         Flyout::Sizes => {
             for (i, level) in SizeLevel::ALL.iter().enumerate() {
                 let cell = size_cell_rect(fly, dpi, i);
-                let on = *level == a.size();
+                let on = a.size_level_lit(*level, dpi);
                 let hot = a.size_hover() == Some(*level);
                 if hot {
                     fill(c, inflate(cell, -1), OVERLAY_HOVER);
@@ -1308,6 +1308,7 @@ fn draw_style_panel(
     // Các hàng tăng giảm: nhãn, [-], giá trị, [+].
     let width = format!("{}", view.width_dip.round() as i32);
     let radius = format!("{}", view.radius_px.round() as i32);
+    let font = format!("{}", view.font_px.round() as i32);
     let opacity = format!("{}%", opacity_percent(view.opacity));
     let width_msg = if view.kind == StyleKind::MarkerFree {
         Msg::HighlightSize
@@ -1343,6 +1344,15 @@ fn draw_style_panel(
             (l.opacity_plus, StyleCell::Opacity(1)),
             true,
         ),
+        (
+            l.font_label,
+            Msg::StyleFontSize,
+            (l.font_minus, StyleCell::FontSize(-1)),
+            l.font_value,
+            font,
+            (l.font_plus, StyleCell::FontSize(1)),
+            view.kind.has_font_size(),
+        ),
     ];
     for (label, msg, minus, value, text, plus, shown) in rows {
         if !shown {
@@ -1354,7 +1364,10 @@ fn draw_style_panel(
             inner_frame(c, r, 1, OVERLAY_BORDER);
             let sign = if matches!(
                 cell,
-                StyleCell::Width(-1) | StyleCell::Opacity(-1) | StyleCell::Radius(-1)
+                StyleCell::Width(-1)
+                    | StyleCell::Opacity(-1)
+                    | StyleCell::Radius(-1)
+                    | StyleCell::FontSize(-1)
             ) {
                 "\u{2212}"
             } else {
