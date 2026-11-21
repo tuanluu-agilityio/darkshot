@@ -21,6 +21,8 @@ mod lang;
 #[cfg(target_os = "macos")]
 mod notify;
 #[cfg(target_os = "macos")]
+mod options_model;
+#[cfg(target_os = "macos")]
 mod overlay;
 #[cfg(target_os = "macos")]
 mod overlay_input;
