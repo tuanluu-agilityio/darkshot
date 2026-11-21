@@ -1,6 +1,8 @@
 //! Điểm vào của darkshot cho macOS (Apple silicon, macOS 14+). Vỏ ứng dụng ở `app.rs` (Task 104).
 
+// `shape_bounds` và `caret_rect` dành cho công cụ đánh dấu (Task 111); hiện chỉ có kiểm thử dùng.
 #[cfg(target_os = "macos")]
+#[allow(dead_code)]
 mod annotate_draw;
 #[cfg(target_os = "macos")]
 mod app;

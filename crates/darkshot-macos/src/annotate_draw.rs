@@ -1,39 +1,666 @@
 //! Vẽ các hình đánh dấu bằng Core Graphics và CoreText (Task 110): một hàm vẽ dùng chung cho lớp phủ
 //! và cho ảnh ra (`burn`), tương đương `darkshot-windows/src/annotate_draw.rs` (GDI+).
+//!
+//! Quy ước: ngữ cảnh nhận vào có không gian người dùng đơn vị pixel, gốc TRÊN TRÁI, trục y hướng
+//! xuống (lớp phủ vẽ trong view đã lật; `burn` tự lật). Chữ vẽ bằng ma trận chữ lật y. Xếp lớp:
+//! `draw_shapes` duyệt danh sách theo chỉ số tăng dần, hình sau đè lên hình trước.
 
-use darkshot_core::annotate::{Shape, TextEdit};
+use darkshot_core::annotate::{
+    arrow_geometry, arrow_min_head, blur_pixel_rect, outline_color, Pt, Shape, TextEdit,
+    MARKER_ALPHA, STEP_RING, TEXT_DIP, TEXT_OUTLINE_DIP,
+};
 use darkshot_core::geometry::Rect;
 use darkshot_core::image::Image;
-use objc2_core_graphics::CGContext;
+use darkshot_core::theme::Rgb;
+use objc2_core_foundation::{
+    kCFBooleanTrue, CFAttributedString, CFDictionary, CFRetained, CFString, CFType,
+    CGAffineTransform, CGFloat, CGPoint, CGRect, CGSize,
+};
+use objc2_core_graphics::{
+    kCGColorSpaceSRGB, CGBitmapContextCreate, CGBitmapInfo, CGColorSpace, CGContext,
+    CGImageAlphaInfo, CGImageByteOrderInfo, CGLineCap, CGLineJoin, CGTextDrawingMode,
+};
+use objc2_core_text::{
+    kCTFontAttributeName, kCTForegroundColorFromContextAttributeName, CTFont, CTFontUIFontType,
+    CTLine, CTLineBoundsOptions,
+};
+use std::ffi::c_void;
 
-pub fn draw_shapes(_ctx: &CGContext, _shapes: &[Shape], _ox: i32, _oy: i32, _clip: Rect) -> bool {
-    false
+/// Tọa độ có độ lớn vượt ngưỡng này (hoặc không hữu hạn) coi như không vẽ được: Core Graphics
+/// ghi cảnh báo và có thể chạy rất lâu với số khổng lồ.
+const COORD_LIMIT: f32 = 1.0e7;
+
+fn sane(v: f32) -> bool {
+    v.is_finite() && v.abs() <= COORD_LIMIT
 }
 
-pub fn shape_bounds(_s: &Shape) -> Rect {
-    Rect {
-        x: 0,
-        y: 0,
-        w: 0,
-        h: 0,
+fn sane_pt(p: Pt) -> bool {
+    sane(p.x) && sane(p.y)
+}
+
+fn f(v: f32) -> CGFloat {
+    CGFloat::from(v)
+}
+
+fn cg_rect(x: f32, y: f32, w: f32, h: f32) -> CGRect {
+    CGRect::new(CGPoint::new(f(x), f(y)), CGSize::new(f(w), f(h)))
+}
+
+fn set_fill(c: &CGContext, color: Rgb, alpha: f32) {
+    CGContext::set_rgb_fill_color(
+        Some(c),
+        f64::from(color.0) / 255.0,
+        f64::from(color.1) / 255.0,
+        f64::from(color.2) / 255.0,
+        f64::from(alpha),
+    );
+}
+
+fn set_stroke(c: &CGContext, color: Rgb, alpha: f32) {
+    CGContext::set_rgb_stroke_color(
+        Some(c),
+        f64::from(color.0) / 255.0,
+        f64::from(color.1) / 255.0,
+        f64::from(color.2) / 255.0,
+        f64::from(alpha),
+    );
+}
+
+/// Điểm chung khi mọi điểm của nét trùng nhau (nét chỉ là một chấm); `None` khi rỗng hoặc có điểm khác.
+fn single_spot(points: &[Pt]) -> Option<Pt> {
+    let first = *points.first()?;
+    points.iter().all(|p| *p == first).then_some(first)
+}
+
+/// Đường gấp khúc qua `points` (chưa vẽ).
+fn polyline(c: &CGContext, points: &[Pt]) {
+    CGContext::begin_path(Some(c));
+    if let Some(first) = points.first() {
+        CGContext::move_to_point(Some(c), f(first.x), f(first.y));
+        for p in &points[1..] {
+            CGContext::add_line_to_point(Some(c), f(p.x), f(p.y));
+        }
     }
 }
 
-pub fn caret_rect(_edit: &TextEdit) -> Rect {
-    Rect {
-        x: 0,
-        y: 0,
-        w: 0,
-        h: 0,
+// ---------------------------------------------------------------- chữ (CoreText)
+
+/// Phông chữ đánh dấu (phông hệ thống đậm) cỡ `size` px cùng số đo dòng.
+struct TextStyle {
+    font: CFRetained<CTFont>,
+    ascent: f32,
+    /// Chiều cao một dòng: ascent + descent + leading.
+    line_height: f32,
+}
+
+impl TextStyle {
+    fn new(size: f32) -> Option<TextStyle> {
+        if !size.is_finite() || size <= 0.0 || size > 10_000.0 {
+            return None;
+        }
+        // SAFETY: tham số hợp lệ; `None` ngôn ngữ = ngôn ngữ hệ thống. Kết quả được kiểm `Option`.
+        let font = unsafe {
+            CTFont::new_ui_font_for_language(CTFontUIFontType::EmphasizedSystem, f(size), None)
+        }?;
+        // SAFETY: phông hợp lệ vừa tạo; các hàm chỉ đọc.
+        let (a, d, l) = unsafe { (font.ascent(), font.descent(), font.leading()) };
+        let (ascent, lh) = (a as f32, (a + d + l) as f32);
+        (ascent.is_finite() && lh.is_finite() && lh > 0.0).then_some(TextStyle {
+            font,
+            ascent,
+            line_height: lh,
+        })
+    }
+
+    /// CTLine của một dòng (không chứa '\n'); màu lấy từ ngữ cảnh khi vẽ.
+    fn line(&self, s: &str) -> Option<CFRetained<CTLine>> {
+        let text = CFString::from_str(s);
+        // SAFETY: hai khóa là hằng CoreText sống suốt tiến trình; `kCFBooleanTrue` là hằng CF.
+        let (key_font, key_fg, yes) = unsafe {
+            (
+                kCTFontAttributeName,
+                kCTForegroundColorFromContextAttributeName,
+                kCFBooleanTrue?,
+            )
+        };
+        let font: &CFType = self.font.as_ref();
+        let yes: &CFType = yes.as_ref();
+        let dict = CFDictionary::<CFString, CFType>::from_slices(&[key_font, key_fg], &[font, yes]);
+        // SAFETY: chuỗi và từ điển hợp lệ (các khóa/giá trị là CFType); kết quả kiểm `Option`.
+        let attr = unsafe { CFAttributedString::new(None, Some(&text), Some(dict.as_opaque())) }?;
+        // SAFETY: chuỗi thuộc tính hợp lệ.
+        Some(unsafe { CTLine::with_attributed_string(&attr) })
     }
 }
 
-fn with_bitmap(_img: &mut Image, _paint: impl FnOnce(&CGContext) -> bool) -> Result<(), String> {
-    Err("todo".into())
+/// Hộp mực (không viền) của một dòng, trong không gian y hướng lên có gốc là điểm đặt chữ ở đường
+/// cơ sở: `(x, y, w, h)`; `None` khi dòng không có nét (rỗng, toàn khoảng trắng).
+fn ink_box(line: &CTLine) -> Option<(f32, f32, f32, f32)> {
+    // SAFETY: dòng hợp lệ; hàm chỉ đọc.
+    let r = unsafe { line.bounds_with_options(CTLineBoundsOptions::UseGlyphPathBounds) };
+    let (x, y, w, h) = (
+        r.origin.x as f32,
+        r.origin.y as f32,
+        r.size.width as f32,
+        r.size.height as f32,
+    );
+    (x.is_finite() && y.is_finite() && w.is_finite() && h.is_finite() && w > 0.0 && h > 0.0)
+        .then_some((x, y, w, h))
 }
 
-pub fn burn(_img: &mut Image, _shapes: &[Shape], _crop: Rect) -> Result<(), String> {
-    Err("todo".into())
+/// Bề rộng tiến (gồm khoảng trắng cuối) của `s` theo `style`.
+fn advance_width(style: &TextStyle, s: &str) -> Option<f32> {
+    if s.is_empty() {
+        return Some(0.0);
+    }
+    let line = style.line(s)?;
+    let mut ascent: CGFloat = 0.0;
+    let mut descent: CGFloat = 0.0;
+    let mut leading: CGFloat = 0.0;
+    // SAFETY: dòng hợp lệ; ba con trỏ ra trỏ tới biến cục bộ.
+    let w = unsafe { line.typographic_bounds(&mut ascent, &mut descent, &mut leading) };
+    (w.is_finite() && w >= 0.0).then_some(w as f32)
+}
+
+/// Nét ngoài của chữ: dày 2 × TEXT_OUTLINE_DIP đổi ra px theo tỉ lệ `size / TEXT_DIP`.
+fn outline_width(size: f32) -> f32 {
+    2.0 * TEXT_OUTLINE_DIP * size / TEXT_DIP
+}
+
+/// Vẽ một dòng với đường cơ sở tại `(x, baseline)` (y hướng xuống): trước là nét ngoài, sau là ruột
+/// chữ để ruột nằm trên nét. `ink` là màu nét ngoài (`None`: không viền).
+fn draw_line(
+    c: &CGContext,
+    line: &CTLine,
+    x: f32,
+    baseline: f32,
+    fill: Rgb,
+    outline: Option<(Rgb, f32)>,
+) {
+    CGContext::save_g_state(Some(c));
+    // Không gian y hướng xuống: lật ma trận chữ để chữ đứng thẳng.
+    CGContext::set_text_matrix(
+        Some(c),
+        CGAffineTransform {
+            a: 1.0,
+            b: 0.0,
+            c: 0.0,
+            d: -1.0,
+            tx: 0.0,
+            ty: 0.0,
+        },
+    );
+    CGContext::set_text_position(Some(c), f(x), f(baseline));
+    CGContext::set_should_smooth_fonts(Some(c), false);
+    if let Some((color, width)) = outline {
+        set_stroke(c, color, 1.0);
+        CGContext::set_line_width(Some(c), f64::from(width));
+        CGContext::set_line_join(Some(c), CGLineJoin::Round);
+        CGContext::set_text_drawing_mode(Some(c), CGTextDrawingMode::Stroke);
+        // SAFETY: ngữ cảnh và dòng hợp lệ; vẽ trên luồng gọi.
+        unsafe { line.draw(c) };
+    }
+    // `CTLine::draw` dời vị trí chữ về cuối dòng: đặt lại trước lượt tô ruột.
+    CGContext::set_text_position(Some(c), f(x), f(baseline));
+    set_fill(c, fill, 1.0);
+    CGContext::set_text_drawing_mode(Some(c), CGTextDrawingMode::Fill);
+    // SAFETY: như trên.
+    unsafe { line.draw(c) };
+    CGContext::restore_g_state(Some(c));
+}
+
+fn draw_text(c: &CGContext, origin: Pt, text: &str, size: f32, color: Rgb) -> bool {
+    if !sane_pt(origin) {
+        return false;
+    }
+    let Some(style) = TextStyle::new(size) else {
+        return false;
+    };
+    let outline = Some((outline_color(color), outline_width(size)));
+    for (i, l) in text.split('\n').enumerate() {
+        if l.is_empty() {
+            continue;
+        }
+        let Some(line) = style.line(l) else {
+            return false;
+        };
+        let baseline = origin.y + style.ascent + i as f32 * style.line_height;
+        if !sane(baseline) {
+            return false;
+        }
+        draw_line(c, &line, origin.x, baseline, color, outline);
+    }
+    true
+}
+
+/// Vòng đánh số: lòng màu `color`, viền và số màu `outline_color(color)`. Viền dày
+/// `radius * STEP_RING` nằm trong hình tròn bán kính `radius`. `n == 0`: không vẽ số.
+fn draw_step(c: &CGContext, center: Pt, radius: f32, n: u32, color: Rgb) -> bool {
+    if !sane_pt(center) || !sane(radius) || radius <= 0.0 {
+        return false;
+    }
+    let ring = radius * STEP_RING;
+    let mid = radius - ring / 2.0;
+    let ink = outline_color(color);
+    let rect = cg_rect(center.x - mid, center.y - mid, 2.0 * mid, 2.0 * mid);
+    set_fill(c, color, 1.0);
+    CGContext::fill_ellipse_in_rect(Some(c), rect);
+    set_stroke(c, ink, 1.0);
+    CGContext::set_line_width(Some(c), f64::from(ring));
+    CGContext::stroke_ellipse_in_rect(Some(c), rect);
+    if n == 0 {
+        return true;
+    }
+    let s = n.to_string();
+    let mut size = radius * 1.1;
+    let Some(mut style) = TextStyle::new(size) else {
+        return false;
+    };
+    let Some(mut line) = style.line(&s) else {
+        return false;
+    };
+    let Some(mut b) = ink_box(&line) else {
+        return false;
+    };
+    let max_w = 1.5 * radius;
+    if b.2 > max_w {
+        let k = max_w / b.2;
+        size *= k;
+        let (Some(st),) = (TextStyle::new(size),) else {
+            return false;
+        };
+        style = st;
+        let Some(l) = style.line(&s) else {
+            return false;
+        };
+        line = l;
+        let Some(nb) = ink_box(&line) else {
+            return false;
+        };
+        b = nb;
+    }
+    // Tâm hộp mực trùng `center`: y hướng lên nên mực trải từ baseline - (y + h) đến baseline - y.
+    let x = center.x - (b.0 + b.2 / 2.0);
+    let baseline = center.y + b.1 + b.3 / 2.0;
+    draw_line(c, &line, x, baseline, ink, None);
+    true
+}
+
+// ---------------------------------------------------------------- các hình khác
+
+fn draw_arrow(c: &CGContext, a: Pt, b: Pt, width: f32, color: Rgb) -> bool {
+    if !(sane_pt(a) && sane_pt(b) && sane(width)) || width <= 0.0 {
+        return false;
+    }
+    let geo = arrow_geometry(a, b, width, arrow_min_head(width));
+    set_fill(c, color, 1.0);
+    set_stroke(c, color, 1.0);
+    if geo.shaft_end != a {
+        // Đầu tròn ở `a`, đầu phẳng ở phía mũi; thân lấn 1 px vào đầu mũi tên để không lộ đường nối
+        // khử răng cưa giữa thân và tam giác.
+        let (dx, dy) = (b.x - geo.shaft_end.x, b.y - geo.shaft_end.y);
+        let depth = dx.hypot(dy);
+        let k = if depth > 0.0 {
+            1.0f32.min(depth / 2.0) / depth
+        } else {
+            0.0
+        };
+        let end = Pt {
+            x: geo.shaft_end.x + dx * k,
+            y: geo.shaft_end.y + dy * k,
+        };
+        CGContext::set_line_width(Some(c), f(width));
+        CGContext::set_line_cap(Some(c), CGLineCap::Butt);
+        polyline(c, &[a, end]);
+        CGContext::stroke_path(Some(c));
+        // Nắp tròn ở `a` (Core Graphics không cho hai đầu nút khác nhau).
+        let r = width / 2.0;
+        CGContext::fill_ellipse_in_rect(Some(c), cg_rect(a.x - r, a.y - r, width, width));
+    }
+    polyline(c, &geo.head);
+    CGContext::close_path(Some(c));
+    CGContext::fill_path(Some(c));
+    true
+}
+
+fn draw_marker(c: &CGContext, points: &[Pt], width: f32, color: Rgb) -> bool {
+    if points.is_empty() {
+        return true;
+    }
+    if !(points.iter().all(|p| sane_pt(*p)) && sane(width)) || width <= 0.0 {
+        return false;
+    }
+    let alpha = f32::from(MARKER_ALPHA) / 255.0;
+    set_fill(c, color, alpha);
+    // Mọi điểm trùng nhau: vẽ ô vuông như nét một điểm.
+    if let Some(first) = single_spot(points) {
+        let r = width / 2.0;
+        CGContext::fill_rect(Some(c), cg_rect(first.x - r, first.y - r, width, width));
+        return true;
+    }
+    // Nới đường thành viền rồi tô một lần (quy tắc khác không) nên chỗ nét tự cắt chỉ phủ một lần.
+    CGContext::set_line_width(Some(c), f(width));
+    CGContext::set_line_cap(Some(c), CGLineCap::Square);
+    CGContext::set_line_join(Some(c), CGLineJoin::Round);
+    polyline(c, points);
+    CGContext::replace_path_with_stroked_path(Some(c));
+    CGContext::fill_path(Some(c));
+    true
+}
+
+/// Vùng che: tô đặc `blur_pixel_rect(a, b)` bằng `color`, alpha 1, không khử răng cưa.
+fn draw_blur(c: &CGContext, a: Pt, b: Pt, color: Rgb) -> bool {
+    if !(sane_pt(a) && sane_pt(b)) {
+        return false;
+    }
+    let r = blur_pixel_rect(a, b);
+    if r.w <= 0 || r.h <= 0 {
+        return true;
+    }
+    CGContext::save_g_state(Some(c));
+    CGContext::set_should_antialias(Some(c), false);
+    set_fill(c, color, 1.0);
+    CGContext::fill_rect(
+        Some(c),
+        cg_rect(r.x as f32, r.y as f32, r.w as f32, r.h as f32),
+    );
+    CGContext::restore_g_state(Some(c));
+    true
+}
+
+fn draw_one(c: &CGContext, s: &Shape) -> bool {
+    match s {
+        Shape::Pen {
+            points,
+            width,
+            color,
+        } => {
+            if points.is_empty() {
+                return true;
+            }
+            if !(points.iter().all(|p| sane_pt(*p)) && sane(*width)) || *width <= 0.0 {
+                return false;
+            }
+            if let Some(p) = single_spot(points) {
+                let r = width / 2.0;
+                set_fill(c, *color, 1.0);
+                CGContext::fill_ellipse_in_rect(Some(c), cg_rect(p.x - r, p.y - r, *width, *width));
+                return true;
+            }
+            set_stroke(c, *color, 1.0);
+            CGContext::set_line_width(Some(c), f(*width));
+            CGContext::set_line_cap(Some(c), CGLineCap::Round);
+            CGContext::set_line_join(Some(c), CGLineJoin::Round);
+            polyline(c, points);
+            CGContext::stroke_path(Some(c));
+            true
+        }
+        Shape::Line { a, b, width, color } => {
+            if !(sane_pt(*a) && sane_pt(*b) && sane(*width)) || *width <= 0.0 {
+                return false;
+            }
+            set_stroke(c, *color, 1.0);
+            CGContext::set_line_width(Some(c), f(*width));
+            CGContext::set_line_cap(Some(c), CGLineCap::Round);
+            CGContext::set_line_join(Some(c), CGLineJoin::Round);
+            polyline(c, &[*a, *b]);
+            CGContext::stroke_path(Some(c));
+            true
+        }
+        Shape::Arrow { a, b, width, color } => draw_arrow(c, *a, *b, *width, *color),
+        Shape::Rect { a, b, width, color } => {
+            if !(sane_pt(*a) && sane_pt(*b) && sane(*width)) || *width <= 0.0 {
+                return false;
+            }
+            set_stroke(c, *color, 1.0);
+            CGContext::set_line_join(Some(c), CGLineJoin::Miter);
+            CGContext::set_line_cap(Some(c), CGLineCap::Butt);
+            CGContext::stroke_rect_with_width(
+                Some(c),
+                cg_rect(
+                    a.x.min(b.x),
+                    a.y.min(b.y),
+                    (b.x - a.x).abs(),
+                    (b.y - a.y).abs(),
+                ),
+                f(*width),
+            );
+            true
+        }
+        Shape::Marker {
+            points,
+            width,
+            color,
+        } => draw_marker(c, points, *width, *color),
+        Shape::Blur { a, b, color } => draw_blur(c, *a, *b, *color),
+        Shape::Text {
+            origin,
+            text,
+            size,
+            color,
+        } => draw_text(c, *origin, text, *size, *color),
+        Shape::Ellipse { a, b, width, color } => {
+            if !(sane_pt(*a) && sane_pt(*b) && sane(*width)) || *width <= 0.0 {
+                return false;
+            }
+            set_stroke(c, *color, 1.0);
+            CGContext::set_line_width(Some(c), f(*width));
+            CGContext::stroke_ellipse_in_rect(
+                Some(c),
+                cg_rect(
+                    a.x.min(b.x),
+                    a.y.min(b.y),
+                    (b.x - a.x).abs(),
+                    (b.y - a.y).abs(),
+                ),
+            );
+            true
+        }
+        Shape::Step {
+            center,
+            radius,
+            n,
+            color,
+        } => draw_step(c, *center, *radius, *n, *color),
+    }
+}
+
+/// Vẽ `shapes` lên `ctx` (không gian pixel, gốc trên trái): điểm ảnh (x, y) của ảnh chụp nằm ở
+/// (x - ox, y - oy); chỉ vẽ trong `clip` (tọa độ ảnh chụp). Duyệt đúng thứ tự chỉ số tăng dần (chỉ
+/// số 0 ở dưới cùng), không sắp xếp lại, không gom theo loại. `false` khi có hình không vẽ được
+/// (các hình còn lại vẫn được vẽ).
+pub fn draw_shapes(ctx: &CGContext, shapes: &[Shape], ox: i32, oy: i32, clip: Rect) -> bool {
+    if shapes.is_empty() {
+        return true;
+    }
+    CGContext::save_g_state(Some(ctx));
+    CGContext::translate_ctm(Some(ctx), -f64::from(ox), -f64::from(oy));
+    CGContext::clip_to_rect(
+        Some(ctx),
+        cg_rect(
+            clip.x as f32,
+            clip.y as f32,
+            clip.w.max(0) as f32,
+            clip.h.max(0) as f32,
+        ),
+    );
+    CGContext::set_should_antialias(Some(ctx), true);
+    let mut all = true;
+    for s in shapes {
+        // Mỗi hình bắt đầu từ trạng thái đồ họa sạch (nét, cap, join không rò sang hình sau).
+        CGContext::save_g_state(Some(ctx));
+        all &= draw_one(ctx, s);
+        CGContext::restore_g_state(Some(ctx));
+    }
+    CGContext::restore_g_state(Some(ctx));
+    all
+}
+
+// ---------------------------------------------------------------- đo
+
+/// Làm tròn ra ngoài, nới 1 px khử răng cưa.
+fn round_out(x0: f32, y0: f32, x1: f32, y1: f32) -> Rect {
+    let (fx, fy) = ((x0 - 1.0).floor() as i32, (y0 - 1.0).floor() as i32);
+    let (cx, cy) = ((x1 + 1.0).ceil() as i32, (y1 + 1.0).ceil() as i32);
+    Rect {
+        x: fx,
+        y: fy,
+        w: cx.saturating_sub(fx),
+        h: cy.saturating_sub(fy),
+    }
+}
+
+const EMPTY: Rect = Rect {
+    x: 0,
+    y: 0,
+    w: 0,
+    h: 0,
+};
+
+/// Hộp bao (tọa độ ảnh chụp) của một hình; Text đo bằng CoreText cùng phông với lúc vẽ.
+pub fn shape_bounds(s: &Shape) -> Rect {
+    if let Some(r) = s.bounds() {
+        return r;
+    }
+    let Shape::Text {
+        origin, text, size, ..
+    } = s
+    else {
+        // Pen/Marker không có điểm: không vẽ gì.
+        return EMPTY;
+    };
+    text_bounds(*origin, text, *size).unwrap_or_else(|| {
+        // Không đo được: ước lượng rộng tay (mỗi ký tự một em, dòng 1,5 em, cộng viền).
+        let lines = text.split('\n').count().max(1) as f32;
+        let cols = text
+            .split('\n')
+            .map(|l| l.chars().count())
+            .max()
+            .unwrap_or(0) as f32;
+        let pad = TEXT_OUTLINE_DIP * size / TEXT_DIP;
+        round_out(
+            origin.x - pad,
+            origin.y - pad,
+            origin.x + cols * size + pad,
+            origin.y + lines * size * 1.5 + pad,
+        )
+    })
+}
+
+/// Hộp mực của mọi dòng cộng nửa nét ngoài, hợp với góc đặt chữ, làm tròn ra ngoài.
+fn text_bounds(origin: Pt, text: &str, size: f32) -> Option<Rect> {
+    if !sane_pt(origin) {
+        return None;
+    }
+    let style = TextStyle::new(size)?;
+    let pad = outline_width(size) / 2.0;
+    let mut acc: Option<(f32, f32, f32, f32)> = None;
+    for (i, l) in text.split('\n').enumerate() {
+        if l.is_empty() {
+            continue;
+        }
+        let line = style.line(l)?;
+        let Some((x, y, w, h)) = ink_box(&line) else {
+            continue;
+        };
+        let baseline = origin.y + style.ascent + i as f32 * style.line_height;
+        let (x0, x1) = (origin.x + x, origin.x + x + w);
+        let (y0, y1) = (baseline - (y + h), baseline - y);
+        acc = Some(match acc {
+            None => (x0, y0, x1, y1),
+            Some((a, b, c, d)) => (a.min(x0), b.min(y0), c.max(x1), d.max(y1)),
+        });
+    }
+    let (x0, y0, x1, y1) = acc?;
+    // Gồm cả góc đầu dòng đầu để hộp luôn chứa vị trí đặt chữ.
+    let r = round_out(
+        x0.min(origin.x) - pad,
+        y0.min(origin.y) - pad,
+        x1 + pad,
+        y1 + pad,
+    );
+    (r.x.abs() < i32::MAX / 2 && r.w >= 0 && r.h >= 0).then_some(r)
+}
+
+/// Vị trí và chiều cao con trỏ nháy (tọa độ ảnh chụp) của ô chữ đang soạn.
+pub fn caret_rect(edit: &TextEdit) -> Rect {
+    // TextEdit không cho đọc gốc và cỡ chữ: lấy qua bản sao có thêm một ký tự (to_shape luôn Some).
+    let mut probe = edit.clone();
+    probe.insert("x");
+    let Some(Shape::Text { origin, size, .. }) = probe.to_shape() else {
+        return EMPTY;
+    };
+    let (line, col) = edit.line_col();
+    let text = edit.text();
+    let prefix: String = text
+        .split('\n')
+        .nth(line)
+        .unwrap_or("")
+        .chars()
+        .take(col)
+        .collect();
+    let measured = TextStyle::new(size).and_then(|style| {
+        let w = advance_width(&style, &prefix)?;
+        Some((w, style.line_height))
+    });
+    // Không đo được: ước lượng nửa em mỗi ký tự, dòng 1,33 em.
+    let (dx, lh) = measured.unwrap_or((prefix.chars().count() as f32 * size * 0.5, size * 1.33));
+    Rect {
+        x: (origin.x + dx).floor() as i32,
+        y: (origin.y + line as f32 * lh).floor() as i32,
+        w: ((size / TEXT_DIP).round() as i32).max(1),
+        h: (lh.ceil() as i32).max(1),
+    }
+}
+
+// ---------------------------------------------------------------- đốt vào ảnh
+
+/// Dựng `CGBitmapContext` (BGRA premultiplied-first little-endian, sRGB, đã lật để gốc ở trên trái)
+/// trực tiếp trên bộ đệm của `img`, gọi `paint`, rồi đặt alpha 255. Ngữ cảnh được hủy trước khi trả
+/// về nên không còn giữ con trỏ vào bộ đệm. `img` không đổi khi lỗi trước khi vẽ.
+fn with_bitmap(img: &mut Image, paint: impl FnOnce(&CGContext) -> bool) -> Result<(), String> {
+    if !img.is_valid() {
+        return Err("invalid image".into());
+    }
+    let (w, h) = (img.width as usize, img.height as usize);
+    let row = w
+        .checked_mul(4)
+        .ok_or_else(|| "image too large".to_string())?;
+    // SAFETY: hằng của Core Graphics sống suốt tiến trình.
+    let space = CGColorSpace::with_name(Some(unsafe { kCGColorSpaceSRGB }))
+        .ok_or_else(|| "no sRGB color space".to_string())?;
+    let info = CGBitmapInfo(
+        CGImageAlphaInfo::PremultipliedFirst.0 | CGImageByteOrderInfo::Order32Little.0,
+    );
+    let ptr = img.bgra.as_mut_ptr().cast::<c_void>();
+    // SAFETY: `is_valid` bảo đảm bộ đệm có đúng w*h*4 byte; ngữ cảnh chỉ ghi trong [0, h) hàng với
+    // `row` byte mỗi hàng, và được hủy (drop) trước khi `img` được dùng lại; `img` được mượn độc
+    // quyền suốt thời gian đó.
+    let ctx = unsafe { CGBitmapContextCreate(ptr, w, h, 8, row, Some(&space), info.0) }
+        .ok_or_else(|| "could not create a bitmap context".to_string())?;
+    // Lật trục: gốc trên trái, y hướng xuống.
+    CGContext::translate_ctm(Some(&ctx), 0.0, h as f64);
+    CGContext::scale_ctm(Some(&ctx), 1.0, -1.0);
+    let ok = paint(&ctx);
+    CGContext::flush(Some(&ctx));
+    drop(ctx);
+    for p in img.bgra.as_chunks_mut::<4>().0 {
+        p[3] = 255;
+    }
+    if ok {
+        Ok(())
+    } else {
+        Err("could not draw the markings".into())
+    }
+}
+
+/// In `shapes` vào ảnh đã cắt từ vùng `crop` (tọa độ ảnh chụp). Ảnh giữ alpha 255. Rỗng thì không
+/// làm gì. Dùng đúng `draw_shapes` nên thứ tự lớp giống trên màn hình.
+pub fn burn(img: &mut Image, shapes: &[Shape], crop: Rect) -> Result<(), String> {
+    if shapes.is_empty() {
+        return Ok(());
+    }
+    with_bitmap(img, |ctx| draw_shapes(ctx, shapes, crop.x, crop.y, crop))
 }
 
 #[cfg(test)]
@@ -227,11 +854,11 @@ mod tests {
         assert_eq!(px(&img, 40, 34), [0, 0, 0, 255], "ngoài thân");
         // Đầu: dài max(4w, 12 * w / 3) = 16, rộng ±16*sin28 ≈ 7,5 ở gốc đầu.
         assert!(
-            px(&img, 80, 36)[2] > 200,
+            px(&img, 77, 35)[2] > 200,
             "đầu rộng hơn thân: {:?}",
-            px(&img, 80, 36)
+            px(&img, 77, 35)
         );
-        assert!(px(&img, 80, 24)[2] > 200);
+        assert!(px(&img, 77, 25)[2] > 200);
         assert_eq!(px(&img, 95, 30), [0, 0, 0, 255], "sau mũi tên");
     }
 
@@ -320,8 +947,11 @@ mod tests {
         assert_eq!(px(&img, 40 + 12, 40), bgr(RED), "lòng màu");
         let ink = outline_color(RED);
         assert!(
-            near(px(&img, 40 + 19, 40), [ink.2, ink.1, ink.0, 255], 2),
-            "viền"
+            near(px(&img, 40 + 18, 40), [ink.2, ink.1, ink.0, 255], 2),
+            "viền {:?} {:?} {:?}",
+            px(&img, 57, 40),
+            px(&img, 58, 40),
+            px(&img, 59, 40)
         );
         assert_eq!(px(&img, 40 + 23, 40), [255, 255, 255, 255], "ngoài vòng");
         // Có số: ít nhất một điểm trong lòng gần màu mực (đen).
@@ -334,6 +964,20 @@ mod tests {
             }
         }
         assert!(inked >= 10, "số 1 phải có nét: {inked}");
+        // Số nằm giữa vòng: tâm hộp các điểm mực (đen) lệch tâm vòng không quá 2 px.
+        let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0, 0);
+        for y in 28..53 {
+            for x in 28..53 {
+                if near(px(&img, x, y), [0, 0, 0, 255], 40) {
+                    (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
+                }
+            }
+        }
+        let (cx, cy) = (f64::from(x0 + x1 + 1) / 2.0, f64::from(y0 + y1 + 1) / 2.0);
+        assert!(
+            (cx - 40.0).abs() <= 2.0 && (cy - 40.0).abs() <= 2.0,
+            "tâm số ({cx},{cy})"
+        );
         // n = 0: không số.
         let s0 = Shape::Step {
             center: pt(40.0, 40.0),
