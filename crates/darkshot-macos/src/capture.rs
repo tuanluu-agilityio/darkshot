@@ -156,7 +156,7 @@ pub fn to_bgra(
     );
     let mut bgra = Vec::with_capacity(total);
     for row in buf.chunks(bytes_per_row).take(height) {
-        for px in row[..row_bytes].chunks_exact(4) {
+        for px in row[..row_bytes].as_chunks::<4>().0 {
             let alpha = a.map_or(255, |i| px[at(i)]);
             let mut c = [px[at(b)], px[at(g)], px[at(r)]];
             if premultiplied && alpha < 255 {
