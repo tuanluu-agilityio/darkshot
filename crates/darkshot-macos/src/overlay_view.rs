@@ -4,38 +4,53 @@
 //! gian pixel của màn hình đó; mọi trạng thái nằm ở `overlay` (mô hình thuần `overlay_input`).
 
 use crate::annotate_draw;
+use crate::annotate_ui::{
+    flyout_rect_for, flyout_tip_rect, palette_cell_rect, side_tip_rect, Annot, Flyout, Layer,
+    TextCmd,
+};
+use crate::coords::px_to_pt;
 use crate::lang;
 use crate::overlay::{self, Frame};
 use crate::overlay_input::{
-    bar_button_rect, bar_tip, hint_rect, label_rect, size_label, tip_rect, Mods, MAC_BAR,
+    bar_button_rect, bar_layout, bar_tip, hint_rect, label_rect, size_label, tip_rect, Mods,
 };
 use darkshot_core::actions::Action;
+use darkshot_core::annotate::{SizeLevel, Tool, PALETTE};
+use darkshot_core::color_picker::size_dot;
+use darkshot_core::edit::{frame, handles};
 use darkshot_core::geometry::Rect;
 use darkshot_core::i18n::Msg;
-use darkshot_core::overlay_layout::{scaled, HANDLE_SIZE, ICON};
+use darkshot_core::overlay_layout::{
+    inflate, scaled, shape_cell_rect, shape_tip, side_item_rect, side_layout_for, size_cell_rect,
+    size_tip, BarItem, SideItem, GAP, HANDLE_SIZE, ICON, MARK, SHAPE_TOOLS, SIDE_ITEMS, SWATCH,
+    TEXT_DASH, TEXT_DASH_GAP,
+};
 use darkshot_core::theme::{
     Rgb, ACCENT, OVERLAY_BORDER, OVERLAY_HOVER, OVERLAY_ICON, OVERLAY_LABEL, OVERLAY_TIP, SURFACE,
-    TEXT, WHITE,
+    TEXT, TEXT_DISABLED, WHITE,
 };
 use objc2::rc::Retained;
-use objc2::runtime::AnyObject;
-use objc2::{define_class, msg_send, DefinedClass, MainThreadMarker, MainThreadOnly};
+use objc2::runtime::{AnyObject, Sel};
+use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSBackingStoreType, NSColor, NSCursor, NSEvent, NSEventModifierFlags, NSFont,
     NSFontAttributeName, NSForegroundColorAttributeName, NSGraphicsContext, NSPanel, NSResponder,
-    NSScreenSaverWindowLevel, NSStringDrawing, NSView, NSWindow, NSWindowAnimationBehavior,
-    NSWindowCollectionBehavior, NSWindowStyleMask,
+    NSScreenSaverWindowLevel, NSStringDrawing, NSTextInputClient, NSView, NSWindow,
+    NSWindowAnimationBehavior, NSWindowCollectionBehavior, NSWindowStyleMask,
 };
 use objc2_core_foundation::{CGFloat, CGPoint, CGRect, CGSize};
-use objc2_core_graphics::{CGContext, CGInterpolationQuality};
+use objc2_core_graphics::{CGContext, CGInterpolationQuality, CGLineCap, CGLineJoin};
 use objc2_foundation::{
-    NSAttributedStringKey, NSDictionary, NSObject, NSObjectProtocol, NSPoint, NSRect, NSString,
+    NSArray, NSAttributedString, NSAttributedStringKey, NSDictionary, NSObject, NSObjectProtocol,
+    NSPoint, NSRange, NSRect, NSSize, NSString,
 };
 
 /// Độ mờ của lớp phủ đen ngoài vùng chọn.
 const DIM_ALPHA: CGFloat = 0.45;
 /// Cỡ chữ (điểm) của nhãn, gợi ý và viên nhắc.
 const FONT_PT: CGFloat = 12.0;
+/// `NSNotFound` (= `NSIntegerMax`) cho `NSRange` của bộ gõ.
+const NOT_FOUND: usize = isize::MAX as usize;
 
 define_class!(
     // SAFETY: NSPanel cho phép kế thừa; lớp không có ivar và không cài `Drop`. Chỉ dùng trên
@@ -95,24 +110,22 @@ define_class!(
 
         #[unsafe(method(drawRect:))]
         fn draw_rect(&self, _dirty: NSRect) {
-            if let Some(frame) = overlay::frame(*self.ivars()) {
-                draw(&frame);
-            }
+            overlay::with_frame(*self.ivars(), draw);
         }
 
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
-            overlay::mouse_down(*self.ivars(), self.global_point(event));
+            overlay::mouse_down(*self.ivars(), self.global_point(event), shift_of(event));
         }
 
         #[unsafe(method(mouseDragged:))]
         fn mouse_dragged(&self, event: &NSEvent) {
-            overlay::mouse_dragged(*self.ivars(), self.global_point(event));
+            overlay::mouse_dragged(*self.ivars(), self.global_point(event), shift_of(event));
         }
 
         #[unsafe(method(mouseUp:))]
         fn mouse_up(&self, event: &NSEvent) {
-            overlay::mouse_up(*self.ivars(), self.global_point(event));
+            overlay::mouse_up(*self.ivars(), self.global_point(event), shift_of(event));
         }
 
         #[unsafe(method(mouseMoved:))]
@@ -120,22 +133,37 @@ define_class!(
             overlay::mouse_moved(*self.ivars(), self.global_point(event));
         }
 
+        /// Shift nhấn/nhả: nét hay hình đang kéo cập nhật ràng buộc (45°, vuông) ngay.
+        #[unsafe(method(flagsChanged:))]
+        fn flags_changed(&self, event: &NSEvent) {
+            overlay::flags_changed(shift_of(event));
+        }
+
         /// Chuột phải không làm gì (không chuyển tiếp để tránh menu ngữ cảnh).
         #[unsafe(method(rightMouseDown:))]
         fn right_mouse_down(&self, _event: &NSEvent) {}
 
-        /// Mọi phím bị nuốt (không chuyển tiếp: tránh tiếng bíp của hệ thống).
+        /// Mọi phím bị nuốt (không chuyển tiếp: tránh tiếng bíp của hệ thống). Khi đang gõ chữ,
+        /// phím không phải ⌘ đi qua bộ gõ (`interpretKeyEvents:`) để tiếng Việt có dấu, dead key và
+        /// emoji hoạt động; kết quả về qua `insertText:` / `setMarkedText:` / `doCommandBySelector:`.
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &NSEvent) {
             let (code, chars, mods) = key_of(event);
-            overlay::key_down(code, chars.as_deref(), mods);
+            let r = overlay::key_down(code, chars.as_deref(), mods, event.isARepeat());
+            if r.ime && !r.done {
+                self.interpretKeyEvents(&NSArray::from_slice(&[event]));
+            }
         }
 
-        /// `⌘S`/`⌘C` có thể tới đây trước `keyDown:`; chỉ nhận phím mình dùng.
+        /// Phím có ⌘ tới đây trước `keyDown:`: xử lý ở đây và NUỐT hẳn (trả `true`), nếu không
+        /// AppKit chuyển tiếp sang `keyDown:` và ⌘Z sẽ chạy hai lần.
         #[unsafe(method(performKeyEquivalent:))]
         fn perform_key_equivalent(&self, event: &NSEvent) -> bool {
             let (code, chars, mods) = key_of(event);
-            overlay::key_down(code, chars.as_deref(), mods)
+            if mods.cmd {
+                overlay::key_down(code, chars.as_deref(), mods, event.isARepeat());
+            }
+            mods.cmd
         }
 
         /// `Esc` qua hệ thống phím của AppKit: hủy.
@@ -147,6 +175,80 @@ define_class!(
         #[unsafe(method(resetCursorRects))]
         fn reset_cursor_rects(&self) {
             self.addCursorRect_cursor(self.bounds(), &NSCursor::crosshairCursor());
+        }
+    }
+
+    // Nhập chữ qua bộ gõ của hệ thống: `TextEdit` của core vẫn là nguồn dữ liệu duy nhất; chuỗi đang
+    // soạn (marked) nằm ngay trước con trỏ trong `TextEdit` và được thay mỗi lần bộ gõ cập nhật.
+    unsafe impl NSTextInputClient for OverlayView {
+        #[unsafe(method(insertText:replacementRange:))]
+        fn insert_text(&self, string: &AnyObject, _range: NSRange) {
+            overlay::text_insert(&text_of(string));
+        }
+
+        #[unsafe(method(doCommandBySelector:))]
+        fn do_command(&self, selector: Sel) {
+            if let Some(c) = command_for(selector) {
+                overlay::text_command(c);
+            }
+        }
+
+        #[unsafe(method(setMarkedText:selectedRange:replacementRange:))]
+        fn set_marked_text(&self, string: &AnyObject, _selected: NSRange, _range: NSRange) {
+            overlay::text_marked(&text_of(string));
+        }
+
+        #[unsafe(method(unmarkText))]
+        fn unmark_text(&self) {
+            overlay::text_unmark();
+        }
+
+        #[unsafe(method(selectedRange))]
+        fn selected_range(&self) -> NSRange {
+            match overlay::text_state() {
+                Some((_, caret)) => NSRange::new(caret, 0),
+                None => NSRange::new(NOT_FOUND, 0),
+            }
+        }
+
+        #[unsafe(method(markedRange))]
+        fn marked_range(&self) -> NSRange {
+            match overlay::text_state() {
+                Some((marked, caret)) if marked > 0 => {
+                    NSRange::new(caret.saturating_sub(marked), marked)
+                }
+                _ => NSRange::new(NOT_FOUND, 0),
+            }
+        }
+
+        #[unsafe(method(hasMarkedText))]
+        fn has_marked_text(&self) -> bool {
+            overlay::text_state().is_some_and(|(marked, _)| marked > 0)
+        }
+
+        #[unsafe(method_id(attributedSubstringForProposedRange:actualRange:))]
+        fn attributed_substring(
+            &self,
+            _range: NSRange,
+            _actual: *mut NSRange,
+        ) -> Option<Retained<NSAttributedString>> {
+            None
+        }
+
+        #[unsafe(method_id(validAttributesForMarkedText))]
+        fn valid_attributes(&self) -> Retained<NSArray<NSAttributedStringKey>> {
+            NSArray::new()
+        }
+
+        /// Vị trí con trỏ (toạ độ màn hình) cho cửa sổ gợi ý của bộ gõ.
+        #[unsafe(method(firstRectForCharacterRange:actualRange:))]
+        fn first_rect(&self, _range: NSRange, _actual: *mut NSRange) -> NSRect {
+            self.caret_screen_rect()
+        }
+
+        #[unsafe(method(characterIndexForPoint:))]
+        fn character_index(&self, _point: NSPoint) -> usize {
+            0
         }
     }
 );
@@ -167,6 +269,66 @@ impl OverlayView {
             .map_or(NSPoint::new(0.0, 0.0), |w| w.frame().origin);
         (origin.x + loc.x, origin.y + loc.y)
     }
+
+    /// Con trỏ của ô chữ đang gõ trong toạ độ màn hình (điểm), cho cửa sổ gợi ý của bộ gõ.
+    fn caret_screen_rect(&self) -> NSRect {
+        let i = *self.ivars();
+        let (Some(r), Some(scale)) = (overlay::text_caret(i), overlay::scale_of(i)) else {
+            return NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(0.0, 0.0));
+        };
+        let local = NSRect::new(
+            NSPoint::new(px_to_pt(r.x, scale), px_to_pt(r.y, scale)),
+            NSSize::new(px_to_pt(r.w.max(1), scale), px_to_pt(r.h.max(1), scale)),
+        );
+        let in_window = self.convertRect_toView(local, None);
+        match self.window() {
+            Some(w) => w.convertRectToScreen(in_window),
+            None => in_window,
+        }
+    }
+}
+
+/// Shift có đang giữ trong sự kiện (chuột hoặc `flagsChanged:`; không đọc chữ của phím).
+fn shift_of(event: &NSEvent) -> bool {
+    event.modifierFlags().contains(NSEventModifierFlags::Shift)
+}
+
+/// Chuỗi của đối số `insertText:`/`setMarkedText:` (`NSString` hoặc `NSAttributedString`).
+fn text_of(obj: &AnyObject) -> String {
+    if let Some(s) = obj.downcast_ref::<NSString>() {
+        s.to_string()
+    } else if let Some(a) = obj.downcast_ref::<NSAttributedString>() {
+        a.string().to_string()
+    } else {
+        String::new()
+    }
+}
+
+/// Lệnh soạn chữ của một `doCommandBySelector:`; lệnh khác (Tab, Esc...) bỏ qua.
+fn command_for(selector: Sel) -> Option<TextCmd> {
+    let table: [(Sel, TextCmd); 17] = [
+        (sel!(deleteBackward:), TextCmd::Backspace),
+        (
+            sel!(deleteBackwardByDecomposingPreviousCharacter:),
+            TextCmd::Backspace,
+        ),
+        (sel!(deleteForward:), TextCmd::Delete),
+        (sel!(moveLeft:), TextCmd::Left),
+        (sel!(moveBackward:), TextCmd::Left),
+        (sel!(moveRight:), TextCmd::Right),
+        (sel!(moveForward:), TextCmd::Right),
+        (sel!(moveUp:), TextCmd::Up),
+        (sel!(moveDown:), TextCmd::Down),
+        (sel!(moveToBeginningOfLine:), TextCmd::Home),
+        (sel!(moveToLeftEndOfLine:), TextCmd::Home),
+        (sel!(moveToBeginningOfParagraph:), TextCmd::Home),
+        (sel!(moveToEndOfLine:), TextCmd::End),
+        (sel!(moveToRightEndOfLine:), TextCmd::End),
+        (sel!(moveToEndOfParagraph:), TextCmd::End),
+        (sel!(insertNewline:), TextCmd::Newline),
+        (sel!(insertLineBreak:), TextCmd::Newline),
+    ];
+    table.iter().find(|(s, _)| *s == selector).map(|(_, c)| *c)
 }
 
 /// Mã phím, chữ (bỏ phím bổ trợ) và phím bổ trợ của một sự kiện phím.
@@ -292,59 +454,304 @@ fn bubble(
     unsafe { s.drawAtPoint_withAttributes(at, Some(attrs)) };
 }
 
-/// Đường gãy trong lưới 24×24 của biểu tượng, gốc `(ox, oy)`, hệ số `k` (pixel mỗi ô lưới).
-fn polyline(c: Option<&CGContext>, pts: &[(f64, f64)], ox: f64, oy: f64, k: f64) {
-    let Some((first, rest)) = pts.split_first() else {
-        return;
-    };
-    CGContext::begin_path(c);
-    CGContext::move_to_point(c, ox + first.0 * k, oy + first.1 * k);
-    for p in rest {
-        CGContext::add_line_to_point(c, ox + p.0 * k, oy + p.1 * k);
-    }
-    CGContext::stroke_path(c);
+/// Một nét của biểu tượng trong lưới 24×24: đường gãy, khép kín hay không.
+#[derive(Clone, Debug, PartialEq)]
+struct GlyphStroke {
+    pts: Vec<(f64, f64)>,
+    closed: bool,
 }
 
-/// Biểu tượng của một nút, vẽ bằng nét trong ô `cell`.
-fn icon(c: Option<&CGContext>, cell: Rect, dpi: u32, action: Action, color: Rgb) {
+fn line(pts: &[(f64, f64)]) -> GlyphStroke {
+    GlyphStroke {
+        pts: pts.to_vec(),
+        closed: false,
+    }
+}
+
+fn poly(pts: &[(f64, f64)]) -> GlyphStroke {
+    GlyphStroke {
+        pts: pts.to_vec(),
+        closed: true,
+    }
+}
+
+/// Điểm của cung tâm (`cx`, `cy`) bán kính `r`, từ góc `start` quét `sweep` độ; quy ước như GDI+
+/// của bản Windows (góc tăng theo chiều kim đồng hồ trên màn hình có Y hướng xuống).
+fn arc_pts(cx: f64, cy: f64, r: f64, start: f64, sweep: f64) -> Vec<(f64, f64)> {
+    let n = ((sweep.abs() / 15.0).ceil() as usize).max(2);
+    (0..=n)
+        .map(|i| {
+            let a = (start + sweep * i as f64 / n as f64).to_radians();
+            (cx + r * a.cos(), cy + r * a.sin())
+        })
+        .collect()
+}
+
+/// Elip khép kín tâm (`cx`, `cy`), nửa trục `rx`, `ry`.
+fn oval(cx: f64, cy: f64, rx: f64, ry: f64) -> GlyphStroke {
+    let mut pts = arc_pts(cx, cy, 1.0, 0.0, 360.0);
+    pts.pop();
+    for p in &mut pts {
+        p.0 = cx + (p.0 - cx) * rx;
+        p.1 = cy + (p.1 - cy) * ry;
+    }
+    GlyphStroke { pts, closed: true }
+}
+
+/// Biểu tượng cần vẽ.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Glyph {
+    Tool(Tool),
+    Undo,
+    Redo,
+    Act(Action),
+}
+
+/// Các nét của biểu tượng `g` trong lưới 24×24.
+fn glyph_strokes(g: Glyph) -> Vec<GlyphStroke> {
+    match g {
+        Glyph::Act(Action::Upload) => vec![
+            line(&[(12.0, 15.0), (12.0, 3.5)]),
+            line(&[(7.0, 8.5), (12.0, 3.5), (17.0, 8.5)]),
+            line(&[(4.0, 15.0), (4.0, 20.0), (20.0, 20.0), (20.0, 15.0)]),
+        ],
+        Glyph::Act(Action::Save) => vec![
+            line(&[(12.0, 3.5), (12.0, 15.0)]),
+            line(&[(7.0, 10.0), (12.0, 15.0), (17.0, 10.0)]),
+            line(&[(4.0, 15.0), (4.0, 20.0), (20.0, 20.0), (20.0, 15.0)]),
+        ],
+        Glyph::Act(Action::Copy) => vec![
+            line(&[
+                (9.0, 8.0),
+                (9.0, 4.0),
+                (20.0, 4.0),
+                (20.0, 15.0),
+                (16.0, 15.0),
+            ]),
+            line(&[
+                (4.0, 9.0),
+                (15.0, 9.0),
+                (15.0, 20.0),
+                (4.0, 20.0),
+                (4.0, 9.0),
+            ]),
+        ],
+        Glyph::Act(_) => vec![
+            line(&[(6.0, 6.0), (18.0, 18.0)]),
+            line(&[(18.0, 6.0), (6.0, 18.0)]),
+        ],
+        Glyph::Undo => {
+            // Mũi tên quay lại: đầu nhọn bên trái, thân vòng nửa tròn bên phải.
+            let mut body = vec![(4.0, 9.0), (14.5, 9.0)];
+            body.extend(arc_pts(14.5, 14.5, 5.5, 270.0, 180.0));
+            body.push((9.0, 20.0));
+            vec![line(&[(8.0, 5.0), (4.0, 9.0), (8.0, 13.0)]), line(&body)]
+        }
+        Glyph::Redo => {
+            let mut body = vec![(20.0, 9.0), (9.5, 9.0)];
+            body.extend(arc_pts(9.5, 14.5, 5.5, 270.0, -180.0));
+            body.push((15.0, 20.0));
+            vec![line(&[(16.0, 5.0), (20.0, 9.0), (16.0, 13.0)]), line(&body)]
+        }
+        Glyph::Tool(Tool::Select) => vec![poly(&[
+            (6.0, 3.5),
+            (6.0, 18.5),
+            (10.0, 14.5),
+            (12.8, 20.5),
+            (15.2, 19.4),
+            (12.4, 13.5),
+            (18.0, 13.5),
+        ])],
+        Glyph::Tool(Tool::Pen) => vec![
+            poly(&[
+                (4.0, 20.0),
+                (5.0, 15.5),
+                (15.5, 5.0),
+                (19.0, 8.5),
+                (8.5, 19.0),
+            ]),
+            line(&[(13.0, 7.5), (16.5, 11.0)]),
+        ],
+        Glyph::Tool(Tool::Line) => vec![line(&[(5.0, 19.0), (19.0, 5.0)])],
+        Glyph::Tool(Tool::Arrow) => vec![
+            line(&[(5.0, 19.0), (18.5, 5.5)]),
+            line(&[(10.0, 5.0), (19.0, 5.0), (19.0, 14.0)]),
+        ],
+        Glyph::Tool(Tool::Rect) => {
+            vec![poly(&[(4.0, 6.0), (20.0, 6.0), (20.0, 18.0), (4.0, 18.0)])]
+        }
+        Glyph::Tool(Tool::Ellipse) => vec![oval(12.0, 12.0, 8.5, 6.0)],
+        Glyph::Tool(Tool::Marker) => vec![
+            poly(&[(9.0, 13.0), (15.0, 7.0), (19.0, 11.0), (13.0, 17.0)]),
+            poly(&[(9.0, 13.0), (6.0, 18.0), (8.0, 20.0), (13.0, 17.0)]),
+            line(&[(12.0, 21.0), (20.0, 21.0)]),
+        ],
+        Glyph::Tool(Tool::Blur) => vec![
+            poly(&[(4.0, 6.0), (20.0, 6.0), (20.0, 18.0), (4.0, 18.0)]),
+            line(&[(4.0, 14.0), (12.0, 6.0)]),
+            line(&[(8.0, 18.0), (20.0, 6.0)]),
+            line(&[(16.0, 18.0), (20.0, 14.0)]),
+        ],
+        Glyph::Tool(Tool::Text) => vec![
+            line(&[(5.0, 7.0), (5.0, 5.0), (19.0, 5.0), (19.0, 7.0)]),
+            line(&[(12.0, 5.0), (12.0, 19.0)]),
+            line(&[(9.0, 19.0), (15.0, 19.0)]),
+        ],
+        Glyph::Tool(Tool::Step) => vec![
+            oval(12.0, 12.0, 8.5, 8.5),
+            line(&[(10.0, 9.5), (12.5, 7.5), (12.5, 16.5)]),
+            line(&[(10.0, 16.5), (15.0, 16.5)]),
+        ],
+    }
+}
+
+/// Vẽ biểu tượng `g` bằng nét trong ô `cell`.
+fn glyph(c: Option<&CGContext>, cell: Rect, dpi: u32, g: Glyph, color: Rgb) {
     let size = f64::from(scaled(ICON, dpi));
     let k = size / 24.0;
     let ox = f64::from(cell.x) + (f64::from(cell.w) - size) / 2.0;
     let oy = f64::from(cell.y) + (f64::from(cell.h) - size) / 2.0;
     set_stroke(c, color, 1.0);
     CGContext::set_line_width(c, 1.8 * k);
-    let p = |pts: &[(f64, f64)]| polyline(c, pts, ox, oy, k);
-    match action {
-        Action::Upload => {
-            // Mũi tên lên trên khay.
-            p(&[(12.0, 15.0), (12.0, 3.5)]);
-            p(&[(7.0, 8.5), (12.0, 3.5), (17.0, 8.5)]);
-            p(&[(4.0, 15.0), (4.0, 20.0), (20.0, 20.0), (20.0, 15.0)]);
+    CGContext::set_line_cap(c, CGLineCap::Round);
+    CGContext::set_line_join(c, CGLineJoin::Round);
+    for st in glyph_strokes(g) {
+        let Some((first, rest)) = st.pts.split_first() else {
+            continue;
+        };
+        CGContext::begin_path(c);
+        CGContext::move_to_point(c, ox + first.0 * k, oy + first.1 * k);
+        for p in rest {
+            CGContext::add_line_to_point(c, ox + p.0 * k, oy + p.1 * k);
         }
-        Action::Save => {
-            p(&[(12.0, 3.5), (12.0, 15.0)]);
-            p(&[(7.0, 10.0), (12.0, 15.0), (17.0, 10.0)]);
-            p(&[(4.0, 15.0), (4.0, 20.0), (20.0, 20.0), (20.0, 15.0)]);
+        if st.closed {
+            CGContext::close_path(c);
         }
-        Action::Copy => {
-            p(&[
-                (9.0, 8.0),
-                (9.0, 4.0),
-                (20.0, 4.0),
-                (20.0, 15.0),
-                (16.0, 15.0),
-            ]);
-            p(&[
-                (4.0, 9.0),
-                (15.0, 9.0),
-                (15.0, 20.0),
-                (4.0, 20.0),
-                (4.0, 9.0),
-            ]);
+        CGContext::stroke_path(c);
+    }
+}
+
+/// Chấm tô của nút Cỡ/ô mức cỡ, đường kính `diam` (pixel), tâm giữa ô `cell`.
+fn dot(c: Option<&CGContext>, cell: Rect, diam: f64, color: Rgb) {
+    set_fill(c, color, 1.0);
+    let (cx, cy) = (
+        f64::from(cell.x) + f64::from(cell.w) / 2.0,
+        f64::from(cell.y) + f64::from(cell.h) / 2.0,
+    );
+    CGContext::fill_ellipse_in_rect(
+        c,
+        CGRect::new(
+            CGPoint::new(cx - diam / 2.0, cy - diam / 2.0),
+            CGSize::new(diam, diam),
+        ),
+    );
+}
+
+/// Tam giác đặc nhỏ ở góc dưới phải ô của nút Hình (nút có bảng bật ra).
+fn corner_triangle(c: Option<&CGContext>, cell: Rect, dpi: u32, color: Rgb) {
+    let k = f64::from(scaled(ICON, dpi)) / 24.0;
+    let inset = f64::from(scaled(4, dpi));
+    let (x1, y1) = (
+        f64::from(cell.right()) - inset,
+        f64::from(cell.bottom()) - inset,
+    );
+    let t = 5.0 * k;
+    set_fill(c, color, 1.0);
+    CGContext::begin_path(c);
+    CGContext::move_to_point(c, x1, y1 - t);
+    CGContext::add_line_to_point(c, x1, y1);
+    CGContext::add_line_to_point(c, x1 - t, y1);
+    CGContext::close_path(c);
+    CGContext::fill_path(c);
+}
+
+/// Viền `t` pixel bên trong ô `r`.
+fn inner_frame(c: Option<&CGContext>, r: Rect, t: i32, color: Rgb) {
+    set_fill(c, color, 1.0);
+    for e in [
+        Rect { h: t, ..r },
+        Rect {
+            y: r.bottom() - t,
+            h: t,
+            ..r
+        },
+        Rect { w: t, ..r },
+        Rect {
+            x: r.right() - t,
+            w: t,
+            ..r
+        },
+    ] {
+        CGContext::fill_rect(c, cg_rect(e));
+    }
+}
+
+fn fill(c: Option<&CGContext>, r: Rect, color: Rgb) {
+    set_fill(c, color, 1.0);
+    CGContext::fill_rect(c, cg_rect(r));
+}
+
+/// Nền và viền 1 px của một bảng/thanh.
+fn panel(c: Option<&CGContext>, r: Rect, dpi: u32) {
+    fill(c, r, SURFACE);
+    set_stroke(c, OVERLAY_BORDER, 1.0);
+    CGContext::stroke_rect_with_width(c, cg_rect(r), f64::from(scaled(1, dpi)));
+}
+
+/// Khung nét đứt quanh ô chữ (chỉ trên màn hình, không bao giờ vào ảnh).
+fn dashed_frame(c: Option<&CGContext>, r: Rect, dpi: u32) {
+    let (dash, gap, t) = (
+        scaled(TEXT_DASH, dpi),
+        scaled(TEXT_DASH_GAP, dpi),
+        scaled(1, dpi),
+    );
+    set_fill(c, ACCENT, 1.0);
+    let mut x = r.x;
+    while x < r.right() {
+        let w = dash.min(r.right() - x);
+        for y in [r.y, r.bottom() - t] {
+            CGContext::fill_rect(c, cg_rect(Rect { x, y, w, h: t }));
         }
-        _ => {
-            p(&[(6.0, 6.0), (18.0, 18.0)]);
-            p(&[(18.0, 6.0), (6.0, 18.0)]);
+        x += dash + gap;
+    }
+    let mut y = r.y;
+    while y < r.bottom() {
+        let h = dash.min(r.bottom() - y);
+        for x in [r.x, r.right() - t] {
+            CGContext::fill_rect(c, cg_rect(Rect { x, y, w: t, h }));
+        }
+        y += dash + gap;
+    }
+}
+
+/// Tay nắm vuông cạnh `hs` tâm (`cx`, `cy`), trắng viền `ACCENT`.
+fn handle_square(c: Option<&CGContext>, cx: i32, cy: i32, hs: i32, lw: f64) {
+    let hr = Rect {
+        x: cx - hs / 2,
+        y: cy - hs / 2,
+        w: hs,
+        h: hs,
+    };
+    set_fill(c, WHITE, 1.0);
+    CGContext::fill_rect(c, cg_rect(hr));
+    set_stroke(c, ACCENT, 1.0);
+    CGContext::stroke_rect_with_width(c, cg_rect(hr), lw);
+}
+
+/// Vẽ hình đánh dấu, từ dưới lên trên: hình vẽ SAU nằm PHÍA TRƯỚC. Hình đang kéo vẽ thay hình đó
+/// ở đúng vị trí của nó trong thứ tự; nét đang vẽ dở rồi chữ đang gõ vẽ SAU CÙNG (trên cùng).
+fn draw_marks(cg: &CGContext, a: &Annot, clip: Rect) {
+    for layer in a.layers() {
+        match layer {
+            Layer::Run(run) => {
+                annotate_draw::draw_shapes(cg, run, 0, 0, clip);
+            }
+            Layer::Preview(s) | Layer::Stroke(s) => {
+                annotate_draw::draw_shapes(cg, std::slice::from_ref(s), 0, 0, clip);
+            }
+            Layer::Typing(s) => {
+                annotate_draw::draw_shapes(cg, std::slice::from_ref(&s), 0, 0, clip);
+            }
         }
     }
 }
@@ -367,7 +774,7 @@ fn draw(f: &Frame) {
     CGContext::translate_ctm(c, 0.0, f64::from(h));
     CGContext::scale_ctm(c, 1.0, -1.0);
     CGContext::set_interpolation_quality(c, CGInterpolationQuality::None);
-    CGContext::draw_image(c, cg_rect(full), Some(&f.image));
+    CGContext::draw_image(c, cg_rect(full), Some(f.image));
     CGContext::restore_g_state(c);
 
     // Lớp mờ, khoét vùng chọn (chẵn-lẻ).
@@ -379,9 +786,28 @@ fn draw(f: &Frame) {
     }
     CGContext::eo_fill_path(c);
 
-    // Hình đánh dấu: chỉ trong vùng chọn, trên ảnh đã khoét mờ; hình sau nằm trước hình trước.
-    if let (Some(r), false) = (f.state.rect, f.shapes.is_empty()) {
-        annotate_draw::draw_shapes(&cg, &f.shapes, 0, 0, r);
+    // Hình đánh dấu: chỉ trong vùng chọn, trên ảnh đã khoét mờ.
+    if let (Some(r), Some(a)) = (f.state.rect, f.annot) {
+        draw_marks(&cg, a, r);
+        // Khung và tay nắm của hình đang chọn: chỉ trên màn hình, không qua `burn`.
+        if let Some((shape, b)) = a.shown_selection() {
+            let lw = f64::from(scaled(1, dpi));
+            if let Some(fr) = frame(shape, b) {
+                set_stroke(c, ACCENT, 1.0);
+                CGContext::stroke_rect_with_width(c, cg_rect(inflate(fr, -1)), lw);
+            }
+            let hs = scaled(HANDLE_SIZE, dpi);
+            for (_, p) in handles(shape, b) {
+                handle_square(c, p.x.round() as i32, p.y.round() as i32, hs, lw);
+            }
+        }
+        // Khung nét đứt và con trỏ nháy của ô đang gõ.
+        if let Some(t) = a.text() {
+            dashed_frame(c, t.frame, dpi);
+            if a.caret_on() {
+                fill(c, t.caret, ACCENT);
+            }
+        }
     }
 
     let attrs = text_attrs(FONT_PT * f.scale);
@@ -405,16 +831,7 @@ fn draw(f: &Frame) {
                 if i == 1 && j == 1 {
                     continue;
                 }
-                let hr = Rect {
-                    x: x - hs / 2,
-                    y: y - hs / 2,
-                    w: hs,
-                    h: hs,
-                };
-                set_fill(c, WHITE, 1.0);
-                CGContext::fill_rect(c, cg_rect(hr));
-                set_stroke(c, ACCENT, 1.0);
-                CGContext::stroke_rect_with_width(c, cg_rect(hr), lw);
+                handle_square(c, x, y, hs, lw);
             }
         }
         // Nhãn kích thước pixel thật.
@@ -424,32 +841,20 @@ fn draw(f: &Frame) {
         bubble(c, lr, OVERLAY_LABEL, &text, &attrs, size);
     }
 
+    let mut tip: Option<(Msg, Rect)> = None;
     if let Some(bar) = f.state.bar {
-        set_fill(c, SURFACE, 1.0);
-        CGContext::fill_rect(c, cg_rect(bar));
-        for (i, a) in MAC_BAR.iter().enumerate() {
-            let cell = bar_button_rect(bar, dpi, i);
-            let hot = f.state.pressed == Some(*a) || f.state.hover == Some(*a);
-            if hot {
-                set_fill(c, OVERLAY_HOVER, 1.0);
-                CGContext::fill_rect(c, cg_rect(cell));
-            }
-            icon(c, cell, dpi, *a, if hot { ACCENT } else { OVERLAY_ICON });
+        draw_bar(c, f, bar, &mut tip);
+    }
+    if let (Some(a), Some(lay)) = (f.annot, f.env) {
+        if let Some(side) = lay.side {
+            draw_side(c, f, a, side, lay.sel, lay.mon);
         }
-        set_stroke(c, OVERLAY_BORDER, 1.0);
-        CGContext::stroke_rect_with_width(c, cg_rect(bar), f64::from(scaled(1, dpi)));
-        if let Some(a) = f.state.hover {
-            let text = NSString::from_str(lang::tr(bar_tip(a)));
-            let size = text_size(&text, &attrs);
-            bubble(
-                c,
-                tip_rect(bar, size, dpi, full),
-                OVERLAY_TIP,
-                &text,
-                &attrs,
-                size,
-            );
-        }
+    }
+    if let Some((msg, anchor)) = tip {
+        let text = NSString::from_str(lang::tr(msg));
+        let size = text_size(&text, &attrs);
+        let r = tip_rect(anchor, size, dpi, full);
+        bubble(c, r, OVERLAY_TIP, &text, &attrs, size);
     }
 
     if f.state.hint {
@@ -465,4 +870,314 @@ fn draw(f: &Frame) {
         );
     }
     CGContext::restore_g_state(c);
+}
+
+/// Thanh ngang: Hoàn tác, Làm lại | Tải lên, Lưu, Chép, Hủy.
+fn draw_bar(c: Option<&CGContext>, f: &Frame, bar: Rect, tip: &mut Option<(Msg, Rect)>) {
+    let dpi = f.dpi;
+    let (can_undo, can_redo) = f
+        .annot
+        .map_or((false, false), |a| (a.can_undo(), a.can_redo()));
+    let enabled = |it: BarItem| match it {
+        BarItem::Undo => can_undo,
+        BarItem::Redo => can_redo,
+        BarItem::Act(_) => true,
+    };
+    fill(c, bar, SURFACE);
+    let margin = scaled(GAP, dpi);
+    let mut prev: Option<BarItem> = None;
+    for (item, r) in bar_layout(dpi).cells {
+        let cell = Rect {
+            x: bar.x + r.x,
+            y: bar.y + r.y,
+            ..r
+        };
+        match item {
+            Some(it) => {
+                let hot = (f.state.pressed == Some(it) || f.state.hover == Some(it)) && enabled(it);
+                if hot {
+                    fill(c, inflate(cell, -1), OVERLAY_HOVER);
+                }
+                // Vạch 1 px giữa hai nút hành động liền nhau.
+                if matches!((prev, it), (Some(BarItem::Act(_)), BarItem::Act(_))) {
+                    set_fill(c, OVERLAY_BORDER, 1.0);
+                    CGContext::fill_rect(
+                        c,
+                        cg_rect(Rect {
+                            x: cell.x,
+                            y: cell.y + 1,
+                            w: 1,
+                            h: cell.h - 2,
+                        }),
+                    );
+                }
+                let color = if !enabled(it) {
+                    TEXT_DISABLED
+                } else if hot {
+                    ACCENT
+                } else {
+                    OVERLAY_ICON
+                };
+                let g = match it {
+                    BarItem::Undo => Glyph::Undo,
+                    BarItem::Redo => Glyph::Redo,
+                    BarItem::Act(a) => Glyph::Act(a),
+                };
+                glyph(c, cell, dpi, g, color);
+            }
+            None => fill(
+                c,
+                Rect {
+                    x: cell.x + cell.w / 2,
+                    y: cell.y + margin,
+                    w: 1,
+                    h: cell.h - 2 * margin,
+                },
+                OVERLAY_BORDER,
+            ),
+        }
+        prev = item;
+    }
+    set_stroke(c, OVERLAY_BORDER, 1.0);
+    CGContext::stroke_rect_with_width(c, cg_rect(bar), f64::from(scaled(1, dpi)));
+    if let Some(it) = f.state.hover {
+        if let Some(cell) = bar_button_rect(bar, dpi, it) {
+            *tip = Some((bar_tip(it), cell));
+        }
+    }
+}
+
+/// Thanh dọc công cụ cùng bảng Cỡ/Hình/màu đang mở; gợi ý của mục đang trỏ (đặt cạnh thanh dọc
+/// hoặc bảng) vẽ ngay ở đây.
+fn draw_side(c: Option<&CGContext>, f: &Frame, a: &Annot, side: Rect, sel: Rect, mon: Rect) {
+    let dpi = f.dpi;
+    let l = side_layout_for(mon, dpi);
+    panel(c, side, dpi);
+    let mark = scaled(MARK, dpi);
+    let mark_inset = scaled(6, dpi);
+    let icon_px = f64::from(scaled(ICON, dpi));
+    let attrs = text_attrs(FONT_PT * f.scale);
+    for (i, item) in SIDE_ITEMS.iter().enumerate() {
+        let Some(r) = side_item_rect(side, &l, i) else {
+            continue;
+        };
+        let selected = a.side_selected(*item);
+        let hot = selected || a.side_hover() == Some(*item);
+        if hot {
+            fill(c, inflate(r, -1), OVERLAY_HOVER);
+        }
+        if selected {
+            fill(
+                c,
+                Rect {
+                    x: r.x + 1,
+                    y: r.y + mark_inset,
+                    w: mark,
+                    h: r.h - 2 * mark_inset,
+                },
+                ACCENT,
+            );
+        }
+        let color = if hot { ACCENT } else { OVERLAY_ICON };
+        match item {
+            SideItem::Tool(t) => glyph(c, r, dpi, Glyph::Tool(*t), color),
+            SideItem::Shapes => {
+                glyph(c, r, dpi, Glyph::Tool(a.shape_tool()), color);
+                corner_triangle(c, r, dpi, color);
+            }
+            SideItem::Size => dot(c, r, f64::from(size_dot(a.size())) * icon_px / 24.0, color),
+            SideItem::Color => {
+                // Ô vuông tô màu hiện tại, viền `OVERLAY_BORDER`.
+                let sw = scaled(SWATCH, dpi);
+                let sq = Rect {
+                    x: r.x + (r.w - sw) / 2,
+                    y: r.y + (r.h - sw) / 2,
+                    w: sw,
+                    h: sw,
+                };
+                fill(c, sq, a.color());
+                set_stroke(c, OVERLAY_BORDER, 1.0);
+                CGContext::stroke_rect_with_width(c, cg_rect(sq), f64::from(scaled(1, dpi)));
+            }
+        }
+        if a.side_hover() == Some(*item) && a.flyout() == Flyout::None {
+            let text = NSString::from_str(lang::tr(item.tip()));
+            let size = text_size(&text, &attrs);
+            let r = side_tip_rect(side, r, sel, mon, dpi, size);
+            bubble(c, r, OVERLAY_TIP, &text, &attrs, size);
+        }
+    }
+    // Vạch ngăn 1 px giữa ô vạch ngăn, có lề hai bên.
+    let margin = scaled(GAP, dpi);
+    for s in &l.seps {
+        fill(
+            c,
+            Rect {
+                x: side.x + s.x + margin,
+                y: side.y + s.y + s.h / 2,
+                w: s.w - 2 * margin,
+                h: 1,
+            },
+            OVERLAY_BORDER,
+        );
+    }
+    // Bảng đang mở.
+    let Some(fly) = flyout_rect_for(a.flyout(), side, sel, mon, dpi) else {
+        return;
+    };
+    panel(c, fly, dpi);
+    let t = scaled(MARK, dpi);
+    match a.flyout() {
+        Flyout::None => {}
+        Flyout::Sizes => {
+            for (i, level) in SizeLevel::ALL.iter().enumerate() {
+                let cell = size_cell_rect(fly, dpi, i);
+                let on = *level == a.size();
+                let hot = a.size_hover() == Some(*level);
+                if hot {
+                    fill(c, inflate(cell, -1), OVERLAY_HOVER);
+                }
+                if on {
+                    inner_frame(c, cell, t, ACCENT);
+                }
+                dot(
+                    c,
+                    cell,
+                    f64::from(size_dot(*level)) * icon_px / 24.0,
+                    if on || hot { ACCENT } else { OVERLAY_ICON },
+                );
+                if hot {
+                    flyout_tip(c, &attrs, cell, fly, mon, dpi, size_tip(*level));
+                }
+            }
+        }
+        Flyout::Shapes => {
+            for (i, tool) in SHAPE_TOOLS.iter().enumerate() {
+                let cell = shape_cell_rect(fly, dpi, i);
+                let on = a.tool() == Some(*tool);
+                let hot = a.shape_hover() == Some(*tool);
+                if hot {
+                    fill(c, inflate(cell, -1), OVERLAY_HOVER);
+                }
+                if on {
+                    inner_frame(c, cell, t, ACCENT);
+                }
+                glyph(
+                    c,
+                    cell,
+                    dpi,
+                    Glyph::Tool(*tool),
+                    if on || hot { ACCENT } else { OVERLAY_ICON },
+                );
+                if hot {
+                    flyout_tip(c, &attrs, cell, fly, mon, dpi, shape_tip(*tool));
+                }
+            }
+        }
+        Flyout::Palette => {
+            for (i, color) in PALETTE.iter().enumerate() {
+                let cell = palette_cell_rect(fly, dpi, i);
+                fill(c, cell, *color);
+                if *color == a.color() {
+                    // Ô màu đang dùng: viền trắng (nổi trên mọi màu) rồi viền `ACCENT` trong.
+                    inner_frame(c, cell, t, WHITE);
+                    inner_frame(c, inflate(cell, -t), t.max(1), ACCENT);
+                } else if a.color_hover() == Some(i) {
+                    inner_frame(c, cell, t, WHITE);
+                }
+            }
+        }
+    }
+}
+
+/// Gợi ý của một ô trong bảng, đặt trên (hoặc dưới) bảng.
+fn flyout_tip(
+    c: Option<&CGContext>,
+    attrs: &NSDictionary<NSAttributedStringKey, AnyObject>,
+    cell: Rect,
+    fly: Rect,
+    mon: Rect,
+    dpi: u32,
+    msg: Msg,
+) {
+    let text = NSString::from_str(lang::tr(msg));
+    let size = text_size(&text, attrs);
+    let r = flyout_tip_rect(cell, fly, mon, dpi, size);
+    bubble(c, r, OVERLAY_TIP, &text, attrs, size);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Mọi nét của mọi biểu tượng nằm trong lưới 24×24 (không tràn ô nút).
+    #[test]
+    fn glyph_strokes_stay_inside_the_24_grid() {
+        let mut glyphs = vec![Glyph::Undo, Glyph::Redo];
+        glyphs.extend(Tool::ALL.iter().map(|t| Glyph::Tool(*t)));
+        glyphs.extend(
+            [Action::Upload, Action::Save, Action::Copy, Action::Cancel]
+                .iter()
+                .map(|a| Glyph::Act(*a)),
+        );
+        for g in glyphs {
+            let strokes = glyph_strokes(g);
+            assert!(!strokes.is_empty(), "{g:?}");
+            for st in strokes {
+                assert!(st.pts.len() >= 2, "{g:?}");
+                for (x, y) in st.pts {
+                    assert!(
+                        (0.0..=24.0).contains(&x) && (0.0..=24.0).contains(&y),
+                        "{g:?}: ({x}, {y})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn arc_runs_clockwise_on_a_y_down_screen() {
+        // 270° là đỉnh (y nhỏ), quét +180° qua bên phải xuống đáy.
+        let p = arc_pts(10.0, 10.0, 5.0, 270.0, 180.0);
+        let first = p[0];
+        let last = p[p.len() - 1];
+        assert!((first.0 - 10.0).abs() < 1e-9 && (first.1 - 5.0).abs() < 1e-9);
+        assert!((last.0 - 10.0).abs() < 1e-9 && (last.1 - 15.0).abs() < 1e-9);
+        assert!(p.iter().any(|(x, _)| *x > 14.9));
+        // Quét âm đi qua bên trái.
+        let q = arc_pts(10.0, 10.0, 5.0, 270.0, -180.0);
+        assert!(q.iter().any(|(x, _)| *x < 5.1));
+    }
+
+    #[test]
+    fn oval_has_the_requested_half_axes() {
+        let o = oval(12.0, 12.0, 8.5, 6.0);
+        assert!(o.closed);
+        let xs = o.pts.iter().map(|p| p.0);
+        let ys = o.pts.iter().map(|p| p.1);
+        assert!((xs.clone().fold(f64::MIN, f64::max) - 20.5).abs() < 1e-6);
+        assert!((xs.fold(f64::MAX, f64::min) - 3.5).abs() < 1e-6);
+        assert!((ys.clone().fold(f64::MIN, f64::max) - 18.0).abs() < 1e-6);
+        assert!((ys.fold(f64::MAX, f64::min) - 6.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn text_commands_map_from_selectors() {
+        assert_eq!(command_for(sel!(deleteBackward:)), Some(TextCmd::Backspace));
+        assert_eq!(command_for(sel!(deleteForward:)), Some(TextCmd::Delete));
+        assert_eq!(command_for(sel!(moveLeft:)), Some(TextCmd::Left));
+        assert_eq!(command_for(sel!(moveRight:)), Some(TextCmd::Right));
+        assert_eq!(command_for(sel!(moveUp:)), Some(TextCmd::Up));
+        assert_eq!(command_for(sel!(moveDown:)), Some(TextCmd::Down));
+        assert_eq!(
+            command_for(sel!(moveToBeginningOfLine:)),
+            Some(TextCmd::Home)
+        );
+        assert_eq!(command_for(sel!(moveToEndOfLine:)), Some(TextCmd::End));
+        assert_eq!(command_for(sel!(insertNewline:)), Some(TextCmd::Newline));
+        // Tab, Esc và lệnh lạ không làm gì.
+        assert_eq!(command_for(sel!(insertTab:)), None);
+        assert_eq!(command_for(sel!(cancelOperation:)), None);
+        assert_eq!(command_for(sel!(noop:)), None);
+    }
 }
