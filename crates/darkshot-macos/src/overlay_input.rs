@@ -65,33 +65,42 @@ pub fn handle_radius(scale: f64) -> i32 {
     pt_to_px(f64::from(HANDLE_HIT), scale).max(1)
 }
 
-/// Với mỗi ảnh chụp (khung gốc trên trái, điểm), chỉ số `NSScreen` có cùng khung. `screens` là
-/// khung Cocoa theo thứ tự `NSScreen.screens` (phần tử đầu là màn hình chính). Thiếu, thừa hay
-/// trùng thì `None` (cấu hình màn hình đã đổi sau khi chụp).
-pub fn match_screens(shots: &[RectF], screens: &[RectF]) -> Option<Vec<usize>> {
-    if shots.is_empty() || shots.len() != screens.len() {
-        return None;
-    }
-    let primary_h = screens[0].h;
-    let tl: Vec<RectF> = screens
-        .iter()
-        .map(|s| cocoa_to_top_left(*s, primary_h))
-        .collect();
+/// Ghép ảnh chụp với `NSScreen`. `shots` là (khung gốc trên trái theo điểm, số pixel của ảnh);
+/// `screens` là khung Cocoa theo thứ tự `NSScreen.screens` (phần tử đầu là màn hình chính).
+/// Trả các cặp (chỉ số ảnh, chỉ số màn hình), mỗi màn hình đúng một cặp, theo thứ tự ảnh.
+///
+/// Khi phản chiếu màn hình (Mirror Displays, AirPlay, Sidecar gương) ScreenCaptureKit có thể liệt
+/// kê nhiều display hơn `NSScreen`, có display cùng khung: mỗi màn hình giữ ảnh khớp có nhiều
+/// pixel nhất (bằng nhau thì ảnh đầu), ảnh dư hay ảnh không khớp màn hình nào bị bỏ. Một màn hình
+/// không có ảnh nào thì `None` (cấu hình màn hình đã đổi sau khi chụp).
+pub fn match_screens(shots: &[(RectF, u64)], screens: &[RectF]) -> Option<Vec<(usize, usize)>> {
+    let primary_h = screens.first()?.h;
     let same = |a: &RectF, b: &RectF| {
         (a.x - b.x).abs() <= FRAME_EPS
             && (a.y - b.y).abs() <= FRAME_EPS
             && (a.w - b.w).abs() <= FRAME_EPS
             && (a.h - b.h).abs() <= FRAME_EPS
     };
-    let mut out = Vec::with_capacity(shots.len());
-    for shot in shots {
-        let i = tl.iter().position(|s| same(s, shot))?;
-        if out.contains(&i) {
-            return None;
-        }
-        out.push(i);
+    let mut pairs = Vec::with_capacity(screens.len());
+    for (si, screen) in screens.iter().enumerate() {
+        let tl = cocoa_to_top_left(*screen, primary_h);
+        let best = shots
+            .iter()
+            .enumerate()
+            .filter(|(_, (frame, _))| same(frame, &tl))
+            // `max_by_key` giữ phần tử cuối khi bằng nhau; duyệt ngược để giữ ảnh đầu.
+            .rev()
+            .max_by_key(|(_, (_, px))| *px)
+            .map(|(i, _)| i)?;
+        pairs.push((best, si));
     }
-    Some(out)
+    pairs.sort_unstable();
+    // Hai màn hình không thể cùng một ảnh (khung màn hình khác nhau, trừ khi chính `NSScreen`
+    // trùng khung): coi như cấu hình lạ.
+    if pairs.windows(2).any(|w| w[0].0 == w[1].0) {
+        return None;
+    }
+    Some(pairs)
 }
 
 /// Chữ của nhãn kích thước (pixel thật của ảnh sẽ lưu).

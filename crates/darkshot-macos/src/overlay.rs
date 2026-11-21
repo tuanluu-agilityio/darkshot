@@ -202,24 +202,43 @@ pub fn open(
         .iter()
         .map(|s| rect_f(s.frame()))
         .collect();
-    let shot_frames: Vec<RectF> = shots.iter().map(|s| s.frame_pt).collect();
-    let map = match_screens(&shot_frames, &screens).ok_or(OpenError::ScreensChanged)?;
-    let mut images = Vec::with_capacity(shots.len());
-    for shot in &shots {
+    let shot_keys: Vec<(RectF, u64)> = shots
+        .iter()
+        .map(|s| {
+            (
+                s.frame_pt,
+                u64::from(s.image.width) * u64::from(s.image.height),
+            )
+        })
+        .collect();
+    let pairs = match_screens(&shot_keys, &screens).ok_or(OpenError::ScreensChanged)?;
+    // Chỉ giữ ảnh đã ghép (bỏ ảnh dư của display phản chiếu); `focus` theo chỉ số mới.
+    let focus = focus.and_then(|f| pairs.iter().position(|(si, _)| *si == f));
+    let mut by_index: Vec<Option<DisplayShot>> = shots.into_iter().map(Some).collect();
+    let mut kept: Vec<(DisplayShot, RectF)> = Vec::with_capacity(pairs.len());
+    for &(si, screen) in &pairs {
+        let shot = by_index
+            .get_mut(si)
+            .and_then(Option::take)
+            .ok_or(OpenError::ScreensChanged)?;
+        kept.push((shot, screens[screen]));
+    }
+    let mut images = Vec::with_capacity(kept.len());
+    for (shot, _) in &kept {
         images.push(cg_image(&shot.image).ok_or(OpenError::Image)?);
     }
-    let mut slots = Vec::with_capacity(shots.len());
-    for (i, ((image, &screen), shot)) in images.into_iter().zip(&map).zip(&shots).enumerate() {
-        let frame = screens[screen];
-        let (window, view) = make_window(mtm, cg_rect(frame), i);
+    let mut slots = Vec::with_capacity(kept.len());
+    for (i, (image, (shot, frame))) in images.into_iter().zip(&kept).enumerate() {
+        let (window, view) = make_window(mtm, cg_rect(*frame), i);
         slots.push(Slot {
             window,
             view,
             image,
-            frame,
+            frame: *frame,
             scale: shot.scale,
         });
     }
+    let shots: Vec<DisplayShot> = kept.into_iter().map(|(s, _)| s).collect();
     let model = Model::new(
         shots
             .iter()
