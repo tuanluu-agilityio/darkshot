@@ -109,8 +109,10 @@ thread_local! {
 
 /// Vai trò ứng với `EventHotKeyID` của một sự kiện; phím không mang chữ ký darkshot là `None`.
 fn role_from_id(signature: OSType, id: u32) -> Option<HotkeyRole> {
-    let _ = (signature, id);
-    None
+    if signature != SIGNATURE {
+        return None;
+    }
+    i32::try_from(id).ok().and_then(role_of)
 }
 
 /// Đặt hàm nhận phím (chạy trên luồng chính, bên trong bộ xử lý sự kiện Carbon: nên làm ít và
