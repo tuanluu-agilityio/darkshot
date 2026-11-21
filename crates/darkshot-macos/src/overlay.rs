@@ -274,7 +274,19 @@ pub fn open(
     // Ứng dụng nền (`accessory`) phải được kích hoạt thì cửa sổ mới nhận phím ngay.
     NSApplication::sharedApplication(mtm).activate();
     NSCursor::crosshairCursor().set();
-    schedule_idle(id);
+    // Nếu phiên đã bị đóng ngay trong các lời gọi trên (thông báo đồng bộ), lời gọi hiện cửa sổ
+    // sau đó có thể đã hiện lại một cửa sổ đã đóng: ẩn hết để không còn cửa sổ mồ côi.
+    let still_open = SESSION.with(|s| {
+        s.try_borrow()
+            .map_or(true, |b| b.as_ref().is_some_and(|s| s.id == id))
+    });
+    if still_open {
+        schedule_idle(id);
+    } else {
+        for (w, _) in &views {
+            w.orderOut(None);
+        }
+    }
     Ok(())
 }
 
