@@ -464,6 +464,28 @@ messages! {
     OverlaySaveMac => ("Lưu vào máy (⌘S)", "Save to disk (⌘S)"),
     OverlayCopyMac => ("Chép ảnh (⌘C)", "Copy image (⌘C)"),
     OverlayCancelMac => ("Hủy (Esc)", "Cancel (Esc)"),
+    // Cửa sổ Tùy chọn bản macOS (Task 107).
+    MacHotkeyStatusTaken => ("Đang bị ứng dụng khác dùng", "In use by another app"),
+    MacHotkeyStatusUnsupported => (
+        "Phím này chưa hỗ trợ trên Mac",
+        "This key is not supported on Mac"
+    ),
+    MacHotkeyStatusWindowsKey => (
+        "Phím này ứng với F13–F15, thường không có trên bàn phím Mac. Hãy đổi phím tắt.",
+        "This key maps to F13–F15, which most Mac keyboards lack. Choose a different shortcut."
+    ),
+    MacHotkeyNeedModifier => (
+        "Phím này cần kèm Control, Option hoặc Command. Thử lại…",
+        "This key needs Control, Option or Command with it. Try again..."
+    ),
+    MacHotkeyUnsupportedKey => (
+        "Phím này chưa hỗ trợ trên Mac. Thử phím khác…",
+        "This key is not supported on Mac. Try another one..."
+    ),
+    MacHotkeyNote => (
+        "Lưu ý: darkshot chỉ phát hiện được phím mà ứng dụng khác đăng ký độc quyền; phím tắt của macOS hoặc của ứng dụng khác vẫn có thể trùng mà không báo.",
+        "Note: darkshot can only detect keys that another app registered exclusively; macOS or other app shortcuts may still overlap without a warning."
+    ),
 }
 
 /// Mọi mục dùng làm tiêu đề thông báo.
@@ -860,6 +882,36 @@ pub fn hotkeys_taken_body(lang: Lang, combos: &[String]) -> String {
         ),
         (Lang::En, many) => format!(
             "The keys {} are in use by other apps. Open Options to choose different keys.",
+            many.join(", ")
+        ),
+    }
+}
+
+/// Phím tắt đăng ký được nhưng bản Mac không có phím đó (Task 107): `combos` đã là tên kiểu Mac.
+pub fn hotkeys_unsupported_body(lang: Lang, combos: &[String]) -> String {
+    match (lang, combos) {
+        (_, []) => String::new(),
+        (Lang::Vi, many) => format!(
+            "Phím {} chưa hỗ trợ trên Mac. Mở Tùy chọn để chọn phím khác.",
+            many.join(", ")
+        ),
+        (Lang::En, many) => format!(
+            "The key {} is not supported on Mac. Open Options to choose a different key.",
+            many.join(", ")
+        ),
+    }
+}
+
+/// Cấu hình mang từ Windows dùng PrintScreen, ScrollLock hoặc Pause: trên Mac là F13–F15.
+pub fn hotkeys_windows_keys_body(lang: Lang, combos: &[String]) -> String {
+    match (lang, combos) {
+        (_, []) => String::new(),
+        (Lang::Vi, many) => format!(
+            "Phím {} ứng với F13–F15, thường không có trên bàn phím Mac. Mở Tùy chọn để đổi phím tắt.",
+            many.join(", ")
+        ),
+        (Lang::En, many) => format!(
+            "The key {} maps to F13–F15, which most Mac keyboards lack. Open Options to change the shortcut.",
             many.join(", ")
         ),
     }
