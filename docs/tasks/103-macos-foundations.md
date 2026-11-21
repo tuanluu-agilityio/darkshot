@@ -44,11 +44,11 @@ pub fn px_to_pt(v: i32, scale: f64) -> f64;
 - `paths`: các hàm `*_in` và nhánh `DARKSHOT_PROFILE_DIR` (cách ly) bằng thư mục tạm, dựng bằng `Path::join`, không `\` cứng.
 - `timeutil`: trường trong khoảng hợp lệ (tháng 1–12, ngày 1–31, giờ 0–23…).
 - `secret` (qua `KeyBackend` giả): khứ hồi; `unprotect` từ chối dấu lạ và dữ liệu rỗng; mục bị thiếu trả `Err`; lỗi không chứa nội dung khóa; `protect` ghi đè.
-- Test chạm hệ thống `#[ignore]` (chạy tay: `cargo test -p darkshot-macos -- --ignored --test-threads=1`): `KeychainStore::with_service("darkshot-test-<pid>")` khứ hồi rồi **xóa mục thử**; `PasteboardClipboard` ghi văn bản rồi đọc lại bằng `pbpaste`, ghi ảnh nhỏ rồi kiểm UTI `public.png` có trên pasteboard.
+- Test chạm hệ thống `#[ignore]` (chạy tay: `cargo test -p darkshot-macos --bin darkshot-macos -- --ignored --test-threads=1`): `KeychainStore::with_service("darkshot-test-<pid>")` khứ hồi rồi **xóa mục thử**; `PasteboardClipboard` ghi văn bản rồi đọc lại bằng `pbpaste`, ghi ảnh nhỏ rồi kiểm UTI `public.png` có trên pasteboard.
 
 ## QA tay (chủ dự án)
 
-1. `cargo test -p darkshot-macos -- --ignored --test-threads=1` trên máy thật: có thể có hộp thoại Keychain hỏi quyền; bấm Cho phép. Mọi test phải qua.
+1. `cargo test -p darkshot-macos --bin darkshot-macos -- --ignored --test-threads=1` trên máy thật: có thể có hộp thoại Keychain hỏi quyền; bấm Cho phép. Mọi test phải qua.
 2. Mở Keychain Access, tìm `darkshot-test-…`: phải không còn sót mục thử.
 
 ## Review Focus

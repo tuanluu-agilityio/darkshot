@@ -784,7 +784,7 @@ mod tests {
     // Chạm hệ thống thật: chủ dự án chạy tay (quyền Screen Recording do Terminal giữ khi chạy
     // ngoài gói .app).
     #[test]
-    #[ignore = "chụp màn hình thật; chạy tay: cargo test -p darkshot-macos -- --ignored --test-threads=1"]
+    #[ignore = "chụp màn hình thật; chạy tay: cargo test -p darkshot-macos --bin darkshot-macos -- --ignored --test-threads=1"]
     fn captures_every_display_at_physical_size() {
         let shots = capture_displays(false).expect("cần quyền Screen Recording");
         assert!(!shots.is_empty());
@@ -809,7 +809,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "đọc quyền Screen Recording thật; chạy tay: cargo test -p darkshot-macos -- --ignored --test-threads=1"]
+    #[ignore = "đọc quyền Screen Recording thật; chạy tay: cargo test -p darkshot-macos --bin darkshot-macos -- --ignored --test-threads=1"]
     fn missing_permission_is_an_error_not_an_empty_image() {
         if screen_capture_allowed() {
             assert!(capture_displays(true).is_ok());

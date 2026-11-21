@@ -1,5 +1,6 @@
 //! Kiểm thử chạy tay lớp phủ chọn vùng (Task 105). Hiện cửa sổ thật che mọi màn hình nên luôn
-//! `#[ignore]`; chủ dự án chạy:
+//! `#[ignore]`; chủ dự án chạy riêng (lệnh kiểm thử chạy tay khác dùng `--bin darkshot-macos`
+//! để không chạy tệp này):
 //!
 //!   cargo test -p darkshot-macos --test overlay_gui -- --ignored
 //!

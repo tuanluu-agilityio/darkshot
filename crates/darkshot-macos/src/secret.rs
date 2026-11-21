@@ -332,7 +332,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "chạm Keychain thật; chạy tay: cargo test -p darkshot-macos -- --ignored --test-threads=1"]
+    #[ignore = "chạm Keychain thật; chạy tay: cargo test -p darkshot-macos --bin darkshot-macos -- --ignored --test-threads=1"]
     fn keychain_round_trip_and_cleanup() {
         let service = format!("darkshot-test-{}", std::process::id());
         let store = KeychainStore::with_service(&service);
