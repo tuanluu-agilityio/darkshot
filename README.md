@@ -33,7 +33,8 @@ Bản macOS nằm trên nhánh `feat/macos-port`, **chưa phát hành** (chưa c
 - Build và chạy:
 
 ```sh
-scripts/bundle-macos.sh --release   # ra target/macos/darkshot.app
+scripts/make-icns.sh                # tùy chọn: tạo biểu tượng target/macos/darkshot.icns
+scripts/bundle-macos.sh --release   # ra target/macos/darkshot.app (có biểu tượng nếu đã tạo)
 ```
 
   Nên ký bằng chứng chỉ tự ký cục bộ để macOS không hỏi lại quyền sau mỗi lần build: xem [docs/testing/macos-local-signing.md](docs/testing/macos-local-signing.md). Chạy thử trong hồ sơ cách ly (không dùng cấu hình, ảnh hay khóa thật): `scripts/demo-macos.sh --release`. Danh sách kiểm tay: [docs/testing/macos-manual-checklist.md](docs/testing/macos-manual-checklist.md).

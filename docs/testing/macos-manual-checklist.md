@@ -79,4 +79,4 @@ Việc thử dùng ảnh chụp thử và hồ sơ cách ly. Để có lượt t
 
 ## Task 109C: biểu tượng (CHƯA)
 
-- [ ] Sau `scripts/make-icns.sh` rồi `scripts/bundle-macos.sh`: `target/macos/darkshot.app` có `Contents/Resources/darkshot.icns`; biểu tượng hiện trong Finder và hộp thoại quyền. (Ứng dụng là `LSUIElement`, không có biểu tượng Dock.)
+- [ ] Ảnh nguồn chỉ 256 px nên `.icns` thiếu cỡ 512 và 1024 (macOS tự co giãn). Sau `scripts/make-icns.sh` rồi `scripts/bundle-macos.sh`: `target/macos/darkshot.app` có `Contents/Resources/darkshot.icns`; biểu tượng hiện trong Finder và hộp thoại quyền. (Ứng dụng là `LSUIElement`, không có biểu tượng Dock.)

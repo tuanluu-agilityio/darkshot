@@ -48,6 +48,17 @@ rm -rf "$out_dir/darkshot.app"
 mkdir -p "$app/Contents/MacOS"
 cp "$bin" "$app/Contents/MacOS/darkshot"
 
+# Bieu tuong (scripts/make-icns.sh tao target/macos/darkshot.icns). Khong co thi bo qua, khong loi.
+icon_plist=""
+if [ -f "$out_dir/darkshot.icns" ]; then
+    mkdir -p "$app/Contents/Resources"
+    cp "$out_dir/darkshot.icns" "$app/Contents/Resources/darkshot.icns"
+    icon_plist="    <key>CFBundleIconFile</key>
+    <string>darkshot</string>"
+else
+    echo "bundle-macos: no $out_dir/darkshot.icns (run scripts/make-icns.sh first); building without an icon." >&2
+fi
+
 cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -61,6 +72,7 @@ cat > "$app/Contents/Info.plist" <<PLIST
     <string>$BUNDLE_ID</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
+$icon_plist
     <key>CFBundleName</key>
     <string>darkshot</string>
     <key>CFBundleDisplayName</key>
