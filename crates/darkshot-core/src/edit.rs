@@ -112,6 +112,52 @@ fn tri_contains(p: Pt, t: [Pt; 3]) -> bool {
     !(neg && pos)
 }
 
+fn rect_of(a: Pt, b: Pt) -> Rect {
+    let (x0, y0, x1, y1) = norm_box(a, b);
+    Rect {
+        x: x0.floor() as i32,
+        y: y0.floor() as i32,
+        w: (x1.ceil() - x0.floor()) as i32,
+        h: (y1.ceil() - y0.floor()) as i32,
+    }
+}
+
+/// Gần viền khung a–b: khoảng cách từ `p` tới viền <= width/2 + tol.
+fn rect_edge_hit(a: Pt, b: Pt, width: f32, p: Pt, tol: f32) -> bool {
+    let (x0, y0, x1, y1) = norm_box(a, b);
+    let d = if p.x >= x0 && p.x <= x1 && p.y >= y0 && p.y <= y1 {
+        (p.x - x0).min(x1 - p.x).min(p.y - y0).min(y1 - p.y)
+    } else {
+        let dx = (x0 - p.x).max(0.0).max(p.x - x1);
+        let dy = (y0 - p.y).max(0.0).max(p.y - y1);
+        dx.hypot(dy)
+    };
+    d <= width / 2.0 + tol
+}
+
+/// Gần viền elip nội tiếp khung a–b.
+fn ellipse_edge_hit(a: Pt, b: Pt, width: f32, p: Pt, tol: f32) -> bool {
+    let (x0, y0, x1, y1) = norm_box(a, b);
+    let (rx, ry) = ((x1 - x0) / 2.0, (y1 - y0) / 2.0);
+    let lim = width / 2.0 + tol;
+    if rx < 1.0 || ry < 1.0 {
+        return seg_dist(p, a, b) <= lim;
+    }
+    let (cx, cy) = (x0 + rx, y0 + ry);
+    let k = (((p.x - cx) / rx).powi(2) + ((p.y - cy) / ry).powi(2)).sqrt();
+    (k - 1.0).abs() * rx.min(ry) <= lim
+}
+
+/// `p` nằm trong elip nội tiếp khung a–b.
+fn inside_ellipse(a: Pt, b: Pt, p: Pt) -> bool {
+    let (x0, y0, x1, y1) = norm_box(a, b);
+    let (rx, ry) = ((x1 - x0) / 2.0, (y1 - y0) / 2.0);
+    if rx < 1.0 || ry < 1.0 {
+        return false;
+    }
+    ((p.x - x0 - rx) / rx).powi(2) + ((p.y - y0 - ry) / ry).powi(2) <= 1.0
+}
+
 /// `p` trúng hình. `bounds`: hộp bao đo của hình (dùng cho Text). `tol` px.
 pub fn hit_shape(shape: &Shape, bounds: Rect, p: Pt, tol: f32) -> bool {
     match shape {
@@ -126,31 +172,25 @@ pub fn hit_shape(shape: &Shape, bounds: Rect, p: Pt, tol: f32) -> bool {
             let g = arrow_geometry(*a, *b, *width, arrow_min_head(*width));
             tri_contains(p, g.head)
         }
-        Shape::Rect { a, b, width, .. } => {
-            let (x0, y0, x1, y1) = norm_box(*a, *b);
-            let d = if p.x >= x0 && p.x <= x1 && p.y >= y0 && p.y <= y1 {
-                (p.x - x0).min(x1 - p.x).min(p.y - y0).min(y1 - p.y)
+        Shape::Rect { a, b, width, .. } => rect_edge_hit(*a, *b, *width, p, tol),
+        Shape::Ellipse { a, b, width, .. } => ellipse_edge_hit(*a, *b, *width, p, tol),
+        Shape::Box {
+            a,
+            b,
+            oval,
+            style,
+        } => {
+            let filled = style.fill.is_some() && style.opacity > 0.0;
+            let w = style.stroke_width.max(0.0);
+            if *oval {
+                (filled && inside_ellipse(*a, *b, p)) || ellipse_edge_hit(*a, *b, w, p, tol)
             } else {
-                let dx = (x0 - p.x).max(0.0).max(p.x - x1);
-                let dy = (y0 - p.y).max(0.0).max(p.y - y1);
-                dx.hypot(dy)
-            };
-            d <= width / 2.0 + tol
-        }
-        Shape::Ellipse { a, b, width, .. } => {
-            let (x0, y0, x1, y1) = norm_box(*a, *b);
-            let (rx, ry) = ((x1 - x0) / 2.0, (y1 - y0) / 2.0);
-            let lim = width / 2.0 + tol;
-            if rx < 1.0 || ry < 1.0 {
-                return seg_dist(p, *a, *b) <= lim;
+                (filled && in_rect(rect_of(*a, *b), p, 0.0)) || rect_edge_hit(*a, *b, w, p, tol)
             }
-            let (cx, cy) = (x0 + rx, y0 + ry);
-            let k = (((p.x - cx) / rx).powi(2) + ((p.y - cy) / ry).powi(2)).sqrt();
-            (k - 1.0).abs() * rx.min(ry) <= lim
         }
         Shape::Blur { a, b, .. } => in_rect(blur_pixel_rect(*a, *b), p, tol),
         Shape::Step { center, radius, .. } => dist(p, *center) <= radius + tol,
-        Shape::Text { .. } => in_rect(bounds, p, tol),
+        Shape::Text { .. } | Shape::Label { .. } => in_rect(bounds, p, tol),
     }
 }
 
@@ -195,7 +235,10 @@ pub fn handles(shape: &Shape, bounds: Rect) -> Vec<(Grip, Pt)> {
         Shape::Line { a, b, .. } | Shape::Arrow { a, b, .. } => {
             vec![(Grip::End(0), *a), (Grip::End(1), *b)]
         }
-        Shape::Rect { a, b, .. } | Shape::Ellipse { a, b, .. } | Shape::Blur { a, b, .. } => {
+        Shape::Rect { a, b, .. }
+        | Shape::Ellipse { a, b, .. }
+        | Shape::Blur { a, b, .. }
+        | Shape::Box { a, b, .. } => {
             let (x0, y0, x1, y1) = norm_box(*a, *b);
             box_handles(x0, y0, x1, y1)
         }
@@ -203,7 +246,7 @@ pub fn handles(shape: &Shape, bounds: Rect) -> Vec<(Grip, Pt)> {
             Some((x0, y0, x1, y1)) => corner_handles(x0, y0, x1, y1),
             None => Vec::new(),
         },
-        Shape::Text { .. } => {
+        Shape::Text { .. } | Shape::Label { .. } => {
             let (x0, y0, x1, y1) = rect_f(bounds);
             corner_handles(x0, y0, x1, y1)
         }
@@ -272,9 +315,10 @@ fn transform_box(
     img: &Image,
 ) -> Shape {
     let (a, b) = match &g.original {
-        Shape::Rect { a, b, .. } | Shape::Ellipse { a, b, .. } | Shape::Blur { a, b, .. } => {
-            (*a, *b)
-        }
+        Shape::Rect { a, b, .. }
+        | Shape::Ellipse { a, b, .. }
+        | Shape::Blur { a, b, .. }
+        | Shape::Box { a, b, .. } => (*a, *b),
         _ => return g.original.clone(),
     };
     let (x0, y0, x1, y1) = norm_box(a, b);
@@ -335,6 +379,12 @@ fn transform_box(
             a: na,
             b: nb,
             color: recolor(img, na, nb, *color),
+        },
+        Shape::Box { oval, style, .. } => Shape::Box {
+            a: na,
+            b: nb,
+            oval: *oval,
+            style: *style,
         },
         other => other.clone(),
     }
@@ -419,7 +469,7 @@ fn transform_points(g: &Gesture, h: Handle, to: Pt, shift: bool, min_extent: f32
 
 fn transform_scaled(g: &Gesture, h: Handle, to: Pt) -> Shape {
     let (bx, lo, hi) = match &g.original {
-        Shape::Text { size, .. } => {
+        Shape::Text { size, .. } | Shape::Label { size, .. } => {
             let (x0, y0, x1, y1) = rect_f(g.original_bounds);
             (
                 (x0, y0, x1, y1),
@@ -472,6 +522,21 @@ fn transform_scaled(g: &Gesture, h: Handle, to: Pt) -> Shape {
             text: text.clone(),
             size: size * k,
             color: *color,
+        },
+        Shape::Label {
+            origin,
+            text,
+            size,
+            color,
+            align,
+            style,
+        } => Shape::Label {
+            origin: scale(*origin),
+            text: text.clone(),
+            size: size * k,
+            color: *color,
+            align: *align,
+            style: *style,
         },
         Shape::Step {
             center,
@@ -588,6 +653,32 @@ fn transform_move(g: &Gesture, to: Pt, img: &Image) -> Shape {
             size: *size,
             color: *color,
         },
+        Shape::Box {
+            a,
+            b,
+            oval,
+            style,
+        } => Shape::Box {
+            a: mv(a),
+            b: mv(b),
+            oval: *oval,
+            style: *style,
+        },
+        Shape::Label {
+            origin,
+            text,
+            size,
+            color,
+            align,
+            style,
+        } => Shape::Label {
+            origin: mv(origin),
+            text: text.clone(),
+            size: *size,
+            color: *color,
+            align: *align,
+            style: *style,
+        },
         Shape::Step {
             center,
             radius,
@@ -608,13 +699,16 @@ pub fn transform(g: &Gesture, to: Pt, shift: bool, min_extent: f32, img: &Image)
         Grip::Move => transform_move(g, to, img),
         Grip::End(i) => transform_end(g, i, to, shift),
         Grip::Box(h) => match &g.original {
-            Shape::Rect { .. } | Shape::Ellipse { .. } | Shape::Blur { .. } => {
-                transform_box(g, h, to, shift, min_extent, img)
-            }
+            Shape::Rect { .. }
+            | Shape::Ellipse { .. }
+            | Shape::Blur { .. }
+            | Shape::Box { .. } => transform_box(g, h, to, shift, min_extent, img),
             Shape::Pen { .. } | Shape::Marker { .. } => {
                 transform_points(g, h, to, shift, min_extent)
             }
-            Shape::Text { .. } | Shape::Step { .. } => transform_scaled(g, h, to),
+            Shape::Text { .. } | Shape::Label { .. } | Shape::Step { .. } => {
+                transform_scaled(g, h, to)
+            }
             _ => g.original.clone(),
         },
     }
@@ -657,7 +751,15 @@ pub fn restyle(shape: &Shape, level: Option<SizeLevel>, color: Option<Rgb>, dpi:
                 *c = n;
             }
         }
-        Shape::Text { size, color: c, .. } => {
+        Shape::Box { style, .. } => {
+            if let Some(l) = level {
+                style.stroke_width = dip_to_px(l.stroke_dip(), dpi);
+            }
+            if let Some(n) = color {
+                style.stroke = n;
+            }
+        }
+        Shape::Text { size, color: c, .. } | Shape::Label { size, color: c, .. } => {
             if let Some(l) = level {
                 *size = dip_to_px(l.text_dip(), dpi);
             }
@@ -1278,5 +1380,175 @@ mod tests {
             true,
             2.0,
         );
+    }
+
+    // ---- Task 112: Box và Label
+
+    fn styled_box(oval: bool, fill: Option<Rgb>) -> Shape {
+        Shape::Box {
+            a: p(10.0, 10.0),
+            b: p(60.0, 40.0),
+            oval,
+            style: crate::annotate::Style {
+                fill,
+                ..crate::annotate::Style::new(RED, 4.0)
+            },
+        }
+    }
+
+    #[test]
+    fn box_hit_tests_border_and_only_a_filled_inside() {
+        let hollow = styled_box(false, None);
+        let filled = styled_box(false, Some(BLUE));
+        let centre = p(35.0, 25.0);
+        assert!(!hit_shape(&hollow, Z, centre, 2.0));
+        assert!(hit_shape(&filled, Z, centre, 2.0));
+        assert!(hit_shape(&hollow, Z, p(10.0, 25.0), 2.0));
+        assert!(!hit_shape(&filled, Z, p(200.0, 200.0), 2.0));
+        let oval_hollow = styled_box(true, None);
+        let oval_filled = styled_box(true, Some(BLUE));
+        assert!(!hit_shape(&oval_hollow, Z, centre, 2.0));
+        assert!(hit_shape(&oval_filled, Z, centre, 2.0));
+        // Góc khung nằm ngoài elip: nền không trúng.
+        assert!(!hit_shape(&oval_filled, Z, p(12.0, 12.0), 0.5));
+        // Nền trong suốt hoàn toàn không bắt chuột.
+        let ghost = Shape::Box {
+            a: p(10.0, 10.0),
+            b: p(60.0, 40.0),
+            oval: false,
+            style: crate::annotate::Style {
+                fill: Some(BLUE),
+                opacity: 0.0,
+                ..crate::annotate::Style::new(RED, 0.0)
+            },
+        };
+        assert!(!hit_shape(&ghost, Z, centre, 0.0));
+    }
+
+    #[test]
+    fn box_handles_move_and_resize_keep_the_style() {
+        let b = styled_box(true, Some(BLUE));
+        assert_eq!(handles(&b, Z).len(), 8);
+        let g = Gesture {
+            index: 0,
+            grip: Grip::Box(Handle::SE),
+            start: p(60.0, 40.0),
+            original: b.clone(),
+            original_bounds: Z,
+        };
+        let img = Image {
+            width: 1,
+            height: 1,
+            bgra: vec![0; 4],
+        };
+        match transform(&g, p(90.0, 70.0), false, 6.0, &img) {
+            Shape::Box {
+                a,
+                b: bb,
+                oval,
+                style,
+            } => {
+                assert_eq!((a, bb, oval), (p(10.0, 10.0), p(90.0, 70.0), true));
+                assert_eq!(Some(style), b.style());
+            }
+            other => panic!("{other:?}"),
+        }
+        let mv = Gesture {
+            grip: Grip::Move,
+            start: p(0.0, 0.0),
+            ..g
+        };
+        match transform(&mv, p(5.0, 7.0), false, 6.0, &img) {
+            Shape::Box { a, style, .. } => {
+                assert_eq!(a, p(15.0, 17.0));
+                assert_eq!(Some(style), b.style());
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn label() -> Shape {
+        Shape::Label {
+            origin: p(10.0, 10.0),
+            text: "ab".into(),
+            size: 20.0,
+            color: RED,
+            align: crate::annotate::Align::Center,
+            style: crate::annotate::Style {
+                fill: Some(BLUE),
+                ..crate::annotate::Style::new(RED, 2.0)
+            },
+        }
+    }
+
+    #[test]
+    fn label_behaves_like_text_for_hit_handles_move_and_scale() {
+        let l = label();
+        let bounds = Rect {
+            x: 10,
+            y: 10,
+            w: 60,
+            h: 30,
+        };
+        assert!(hit_shape(&l, bounds, p(30.0, 20.0), 2.0));
+        assert!(!hit_shape(&l, bounds, p(300.0, 20.0), 2.0));
+        assert_eq!(handles(&l, bounds).len(), 4);
+        let img = Image {
+            width: 1,
+            height: 1,
+            bgra: vec![0; 4],
+        };
+        let g = Gesture {
+            index: 0,
+            grip: Grip::Box(Handle::SE),
+            start: p(70.0, 40.0),
+            original: l.clone(),
+            original_bounds: bounds,
+        };
+        match transform(&g, p(130.0, 70.0), false, 6.0, &img) {
+            Shape::Label {
+                size, align, style, ..
+            } => {
+                assert!(near_f(size, 40.0), "{size}");
+                assert_eq!(align, crate::annotate::Align::Center);
+                assert_eq!(Some(style), l.style());
+            }
+            other => panic!("{other:?}"),
+        }
+        let mv = Gesture {
+            grip: Grip::Move,
+            start: p(0.0, 0.0),
+            ..g
+        };
+        match transform(&mv, p(3.0, 4.0), false, 6.0, &img) {
+            Shape::Label { origin, .. } => assert_eq!(origin, p(13.0, 14.0)),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn near_f(a: f32, b: f32) -> bool {
+        (a - b).abs() < 0.01
+    }
+
+    #[test]
+    fn restyle_sets_box_stroke_and_label_text() {
+        let b = styled_box(false, Some(BLUE));
+        match restyle(&b, Some(SizeLevel::Huge), Some(BLUE), 96) {
+            Shape::Box { style, .. } => {
+                assert_eq!(style.stroke_width, 8.0);
+                assert_eq!(style.stroke, BLUE);
+                assert_eq!(style.fill, Some(BLUE));
+            }
+            other => panic!("{other:?}"),
+        }
+        match restyle(&label(), Some(SizeLevel::Small), Some(BLUE), 96) {
+            Shape::Label {
+                size, color, style, ..
+            } => {
+                assert_eq!((size, color), (14.0, BLUE));
+                assert_eq!(style.stroke, RED);
+            }
+            other => panic!("{other:?}"),
+        }
     }
 }

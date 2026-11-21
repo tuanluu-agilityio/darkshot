@@ -203,6 +203,81 @@ pub struct Pt {
     pub y: f32,
 }
 
+/// Căn lề chữ nhiều dòng trong khối chữ.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Align {
+    #[default]
+    Left,
+    Center,
+    Right,
+}
+
+impl Align {
+    pub const ALL: [Align; 3] = [Align::Left, Align::Center, Align::Right];
+}
+
+/// Độ dày viền tối đa (dip) của bảng thuộc tính.
+pub const STYLE_WIDTH_MAX_DIP: f32 = 16.0;
+/// Đệm quanh chữ trong khối chữ (hệ số nhân cỡ chữ).
+pub const LABEL_PAD_EM: f32 = 0.3;
+
+/// Kiểu của Hình (khung, elip) và khối Chữ: nền, viền, độ trong suốt.
+/// `opacity` (0..=1) áp cho cả nền lẫn viền; chữ trong khối Chữ luôn đặc.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Style {
+    /// `None`: không nền.
+    pub fill: Option<Rgb>,
+    /// Màu viền.
+    pub stroke: Rgb,
+    /// Độ dày viền (px); 0 là không viền.
+    pub stroke_width: f32,
+    pub opacity: f32,
+}
+
+impl Style {
+    /// Không nền, đặc, viền `stroke_width` px màu `stroke`.
+    pub fn new(stroke: Rgb, stroke_width: f32) -> Style {
+        Style {
+            fill: None,
+            stroke,
+            stroke_width,
+            opacity: 1.0,
+        }
+    }
+
+    /// Kẹp độ trong suốt vào 0..=1 (không phải số thì 1) và độ dày vào >= 0 (không phải số thì 0).
+    pub fn sanitized(self) -> Style {
+        Style {
+            opacity: if self.opacity.is_nan() {
+                1.0
+            } else {
+                self.opacity.clamp(0.0, 1.0)
+            },
+            stroke_width: if self.stroke_width.is_nan() {
+                0.0
+            } else {
+                self.stroke_width.max(0.0)
+            },
+            ..self
+        }
+    }
+}
+
+/// Căn dòng trong khối chữ: trả (bề rộng khối chữ = dòng dài nhất, độ lệch x bắt đầu từng dòng
+/// tính từ mép trái của khối).
+pub fn align_offsets(align: Align, widths: &[f32]) -> (f32, Vec<f32>) {
+    let w = widths.iter().copied().fold(0.0f32, f32::max);
+    let offs = widths
+        .iter()
+        .map(|l| match align {
+            Align::Left => 0.0,
+            Align::Center => (w - l) / 2.0,
+            Align::Right => w - l,
+        })
+        .collect();
+    (w, offs)
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Shape {
     Pen {
@@ -254,6 +329,23 @@ pub enum Shape {
         radius: f32,
         n: u32,
         color: Rgb,
+    },
+    /// Khung (hoặc elip khi `oval`) có kiểu: nền, viền, độ trong suốt. Chỉ bản macOS tạo ra.
+    Box {
+        a: Pt,
+        b: Pt,
+        oval: bool,
+        style: Style,
+    },
+    /// Khối chữ có kiểu. `origin`: góc trên trái của KHỐI (gồm đệm `LABEL_PAD_EM * size`); chữ màu
+    /// `color`, viền/nền theo `style`. Chỉ bản macOS tạo ra.
+    Label {
+        origin: Pt,
+        text: String,
+        size: f32,
+        color: Rgb,
+        align: Align,
+        style: Style,
     },
 }
 
@@ -313,12 +405,74 @@ impl Shape {
                     h: r.h.saturating_add(2),
                 })
             }
-            Shape::Text { .. } => None,
+            Shape::Text { .. } | Shape::Label { .. } => None,
+            Shape::Box { a, b, style, .. } => bounds_of(
+                &[*a, *b],
+                style.stroke_width.max(0.0) / 2.0 * std::f32::consts::SQRT_2 + 1.0,
+            ),
             Shape::Ellipse { a, b, width, .. } => bounds_of(&[*a, *b], width / 2.0 + 1.0),
             Shape::Step { center, radius, .. } => {
                 bounds_of(&[*center], radius + radius * STEP_RING / 2.0 + 1.0)
             }
         }
+    }
+}
+
+impl Shape {
+    /// Kiểu của Hình/Chữ có kiểu; `None` với các hình khác.
+    pub fn style(&self) -> Option<Style> {
+        match self {
+            Shape::Box { style, .. } | Shape::Label { style, .. } => Some(*style),
+            _ => None,
+        }
+    }
+
+    /// Căn lề của khối chữ; `None` với hình khác.
+    pub fn align(&self) -> Option<Align> {
+        match self {
+            Shape::Label { align, .. } => Some(*align),
+            _ => None,
+        }
+    }
+
+    /// Bản sao với kiểu mới (đã `sanitized`); hình không có kiểu giữ nguyên.
+    pub fn with_style(&self, new: Style) -> Shape {
+        let mut s = self.clone();
+        if let Shape::Box { style, .. } | Shape::Label { style, .. } = &mut s {
+            *style = new.sanitized();
+        }
+        s
+    }
+
+    /// Bản sao với căn lề mới; hình không phải khối chữ giữ nguyên.
+    pub fn with_align(&self, new: Align) -> Shape {
+        let mut s = self.clone();
+        if let Shape::Label { align, .. } = &mut s {
+            *align = new;
+        }
+        s
+    }
+}
+
+/// Đổi hình kéo thô (`Rect`, `Ellipse` từ `begin_stroke`) thành `Box` có kiểu: viền theo hình gốc,
+/// nền `fill`, độ trong suốt `opacity`. Hình khác giữ nguyên.
+pub fn styled_from_stroke(shape: &Shape, fill: Option<Rgb>, opacity: f32) -> Shape {
+    let (a, b, width, color, oval) = match shape {
+        Shape::Rect { a, b, width, color } => (*a, *b, *width, *color, false),
+        Shape::Ellipse { a, b, width, color } => (*a, *b, *width, *color, true),
+        other => return other.clone(),
+    };
+    Shape::Box {
+        a,
+        b,
+        oval,
+        style: Style {
+            fill,
+            stroke: color,
+            stroke_width: width,
+            opacity,
+        }
+        .sanitized(),
     }
 }
 
@@ -783,6 +937,15 @@ impl TextEdit {
         self.chars.iter().collect()
     }
 
+    /// Điểm đặt (góc trên trái) và cỡ chữ (px).
+    pub fn origin(&self) -> Pt {
+        self.origin
+    }
+
+    pub fn size(&self) -> f32 {
+        self.size
+    }
+
     pub fn caret(&self) -> usize {
         self.caret
     }
@@ -894,6 +1057,28 @@ impl TextEdit {
             size: self.size,
             color: self.color,
         })
+    }
+}
+
+impl TextEdit {
+    /// Như `to_shape` nhưng thành `Shape::Label` có kiểu và căn lề; `None` khi chỉ có khoảng trắng.
+    pub fn to_label(&self, align: Align, style: Style) -> Option<Shape> {
+        match self.to_shape()? {
+            Shape::Text {
+                origin,
+                text,
+                size,
+                color,
+            } => Some(Shape::Label {
+                origin,
+                text,
+                size,
+                color,
+                align,
+                style: style.sanitized(),
+            }),
+            other => Some(other),
+        }
     }
 }
 
@@ -1656,5 +1841,231 @@ mod tests {
             assert!(a.undo().is_some());
         }
         assert_eq!(a.shapes()[0], first);
+    }
+
+    // ---- Task 112: kiểu cho Hình và Chữ
+
+    fn boxed(a: Pt, b: Pt, oval: bool, style: Style) -> Shape {
+        Shape::Box { a, b, oval, style }
+    }
+
+    #[test]
+    fn style_defaults_and_clamping() {
+        let st = Style::new(DEFAULT_COLOR, 3.0);
+        assert_eq!(st.fill, None);
+        assert_eq!(st.opacity, 1.0);
+        assert_eq!(st.stroke, DEFAULT_COLOR);
+        let hi = Style {
+            opacity: 7.0,
+            stroke_width: -2.0,
+            ..st
+        }
+        .sanitized();
+        assert_eq!((hi.opacity, hi.stroke_width), (1.0, 0.0));
+        let lo = Style {
+            opacity: -0.5,
+            ..st
+        }
+        .sanitized();
+        assert_eq!(lo.opacity, 0.0);
+        let nan = Style {
+            opacity: f32::NAN,
+            stroke_width: f32::NAN,
+            ..st
+        }
+        .sanitized();
+        assert_eq!((nan.opacity, nan.stroke_width), (1.0, 0.0));
+    }
+
+    #[test]
+    fn with_style_clamps_and_only_touches_styled_shapes() {
+        let st = Style::new(DEFAULT_COLOR, 3.0);
+        let b = boxed(p(0.0, 0.0), p(10.0, 10.0), false, st);
+        let out = b.with_style(Style {
+            opacity: 9.0,
+            fill: Some(PALETTE[4]),
+            ..st
+        });
+        assert_eq!(out.style().map(|s| s.opacity), Some(1.0));
+        assert_eq!(out.style().and_then(|s| s.fill), Some(PALETTE[4]));
+        let line = Shape::Line {
+            a: p(0.0, 0.0),
+            b: p(1.0, 1.0),
+            width: 3.0,
+            color: DEFAULT_COLOR,
+        };
+        assert_eq!(line.with_style(st), line);
+        assert_eq!(line.style(), None);
+        assert_eq!(line.with_align(Align::Right), line);
+    }
+
+    #[test]
+    fn box_bounds_grow_with_thick_border() {
+        let thin = boxed(
+            p(10.0, 10.0),
+            p(50.0, 40.0),
+            false,
+            Style::new(DEFAULT_COLOR, 2.0),
+        );
+        let thick = boxed(
+            p(10.0, 10.0),
+            p(50.0, 40.0),
+            false,
+            Style::new(DEFAULT_COLOR, 16.0),
+        );
+        let (t, k) = (thin.bounds().unwrap(), thick.bounds().unwrap());
+        assert!(k.w > t.w && k.h > t.h);
+        // Góc nhọn của viền dày nằm trong hộp bao.
+        assert!(contains(k, 10.0 - 8.0, 10.0 - 8.0) && contains(k, 50.0 + 8.0, 40.0 + 8.0));
+        let oval = boxed(
+            p(10.0, 10.0),
+            p(50.0, 40.0),
+            true,
+            Style::new(DEFAULT_COLOR, 16.0),
+        );
+        assert_eq!(oval.bounds(), thick.bounds());
+        // Không viền: hộp sát nét (cộng 1 px khử răng cưa).
+        let none = boxed(
+            p(10.0, 10.0),
+            p(50.0, 40.0),
+            false,
+            Style::new(DEFAULT_COLOR, 0.0),
+        );
+        let n = none.bounds().unwrap();
+        assert_eq!((n.x, n.y, n.w, n.h), (9, 9, 42, 32));
+    }
+
+    #[test]
+    fn label_bounds_need_measuring_like_text() {
+        let l = Shape::Label {
+            origin: p(1.0, 1.0),
+            text: "x".into(),
+            size: 18.0,
+            color: DEFAULT_COLOR,
+            align: Align::Center,
+            style: Style::new(DEFAULT_COLOR, 0.0),
+        };
+        assert_eq!(l.bounds(), None);
+        assert_eq!(l.align(), Some(Align::Center));
+        assert_eq!(l.with_align(Align::Right).align(), Some(Align::Right));
+    }
+
+    #[test]
+    fn align_offsets_start_x_of_each_line() {
+        let widths = [10.0, 40.0, 25.0];
+        let (w, left) = align_offsets(Align::Left, &widths);
+        assert_eq!(w, 40.0);
+        assert_eq!(left, vec![0.0, 0.0, 0.0]);
+        let (_, center) = align_offsets(Align::Center, &widths);
+        assert_eq!(center, vec![15.0, 0.0, 7.5]);
+        let (_, right) = align_offsets(Align::Right, &widths);
+        assert_eq!(right, vec![30.0, 0.0, 15.0]);
+        let (w, none) = align_offsets(Align::Center, &[]);
+        assert_eq!((w, none.len()), (0.0, 0));
+        assert_eq!(Align::default(), Align::Left);
+    }
+
+    #[test]
+    fn styled_from_stroke_converts_rect_and_ellipse_only() {
+        let r = Shape::Rect {
+            a: p(1.0, 2.0),
+            b: p(30.0, 40.0),
+            width: 5.0,
+            color: PALETTE[3],
+        };
+        match styled_from_stroke(&r, Some(PALETTE[5]), 0.5) {
+            Shape::Box {
+                a,
+                b,
+                oval,
+                style,
+            } => {
+                assert_eq!((a, b, oval), (p(1.0, 2.0), p(30.0, 40.0), false));
+                assert_eq!(style.stroke, PALETTE[3]);
+                assert_eq!(style.stroke_width, 5.0);
+                assert_eq!(style.fill, Some(PALETTE[5]));
+                assert_eq!(style.opacity, 0.5);
+            }
+            other => panic!("{other:?}"),
+        }
+        let e = Shape::Ellipse {
+            a: p(0.0, 0.0),
+            b: p(9.0, 9.0),
+            width: 2.0,
+            color: PALETTE[0],
+        };
+        assert!(matches!(
+            styled_from_stroke(&e, None, 2.0),
+            Shape::Box { oval: true, style, .. } if style.opacity == 1.0 && style.fill.is_none()
+        ));
+        let line = Shape::Line {
+            a: p(0.0, 0.0),
+            b: p(1.0, 0.0),
+            width: 2.0,
+            color: PALETTE[0],
+        };
+        assert_eq!(styled_from_stroke(&line, None, 1.0), line);
+    }
+
+    #[test]
+    fn style_change_is_one_undo_step_and_keeps_z_order() {
+        let st = Style::new(DEFAULT_COLOR, 3.0);
+        let mut an = Annotations::default();
+        an.add(boxed(p(0.0, 0.0), p(10.0, 10.0), false, st));
+        an.add(boxed(p(20.0, 0.0), p(30.0, 10.0), true, st));
+        an.add(Shape::Line {
+            a: p(0.0, 0.0),
+            b: p(5.0, 5.0),
+            width: 2.0,
+            color: DEFAULT_COLOR,
+        });
+        let before = an.shapes().to_vec();
+        let new = before[0].with_style(Style {
+            fill: Some(PALETTE[2]),
+            opacity: 0.4,
+            ..st
+        });
+        let ap = an.replace(0, new.clone()).expect("changed");
+        assert!(matches!(ap.change, Change::Replaced { index: 0, .. }));
+        assert_eq!(an.shapes()[0], new);
+        // Thứ tự lớp không đổi.
+        assert!(matches!(an.shapes()[1], Shape::Box { oval: true, .. }));
+        assert!(matches!(an.shapes()[2], Shape::Line { .. }));
+        // Đổi y hệt không ghi sổ.
+        assert!(an.replace(0, new.clone()).is_none());
+        // Một lần hoàn tác khôi phục đúng kiểu cũ; làm lại đưa kiểu mới về.
+        an.undo().expect("undo");
+        assert_eq!(an.shapes(), before.as_slice());
+        an.redo().expect("redo");
+        assert_eq!(an.shapes()[0], new);
+    }
+
+    #[test]
+    fn to_label_keeps_text_origin_size_and_adds_style() {
+        let mut e = TextEdit::new(p(3.0, 4.0), 24.0, DEFAULT_COLOR);
+        assert_eq!(e.to_label(Align::Left, Style::new(DEFAULT_COLOR, 0.0)), None);
+        e.insert("a\nbb");
+        assert_eq!((e.origin(), e.size()), (p(3.0, 4.0), 24.0));
+        let st = Style {
+            fill: Some(PALETTE[1]),
+            opacity: 3.0,
+            ..Style::new(PALETTE[2], 2.0)
+        };
+        match e.to_label(Align::Right, st) {
+            Some(Shape::Label {
+                origin,
+                text,
+                size,
+                color,
+                align,
+                style,
+            }) => {
+                assert_eq!((origin, text.as_str(), size), (p(3.0, 4.0), "a\nbb", 24.0));
+                assert_eq!((color, align), (DEFAULT_COLOR, Align::Right));
+                assert_eq!(style.opacity, 1.0);
+                assert_eq!(style.fill, Some(PALETTE[1]));
+            }
+            other => panic!("{other:?}"),
+        }
     }
 }
