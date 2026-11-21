@@ -8,3 +8,13 @@ publish = false
 [[bin]]
 name = "darkshot-macos"
 path = "src/main.rs"
+
+# Mọi phụ thuộc chỉ dành cho macOS: job `windows` của CI biên dịch crate này ở dạng khung.
+# Phiên bản ghim chính xác (`=`); feature của objc2-* bật theo từng lớp dùng tới.
+[target.'cfg(target_os = "macos")'.dependencies]
+darkshot-core = { version = "0.4.0", path = "../darkshot-core" }
+libc = "=0.2.191"
+objc2 = "=0.6.5"
+objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std", "NSPasteboard"] }
+objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSArray", "NSData", "NSString"] }
+security-framework = { version = "=3.7.0", default-features = false }

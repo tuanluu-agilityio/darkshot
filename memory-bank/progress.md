@@ -118,6 +118,7 @@ Trạng thái: `chờ`, `đang làm`, `rà soát`, `xong`. Token là số do age
 | 102d Bản macOS (đợt M, M2c 4/5): chuyển logic menu khay và trạng thái ứng dụng (`tray.rs`, `app.rs`) sang core (`tray_logic`, `app_state`, gồm `PendingUploads`, `save_pending` có tham số `lang`) | task/102d-tray-app-logic | builder | sonnet | xong | 107.999 | 54.932 (reviewer opus, DUYỆT, không lỗi) | 0 | 162.931 |
 | 102e Bản macOS (đợt M, M2c 5/5): chuyển hàm thuần còn lại của `windows_main.rs` sang core (`notices`, `app_flow`, kèm `StepError`/`PinError`/`EXIT_BUDGET`) | task/102e-main-residual-logic | builder | sonnet | xong | 101.805 | 49.266 (reviewer opus, DUYỆT, không lỗi) | 0 | 151.071 |
 | Tổng M2 (Task 100–102e: khung cfg, crate macOS, check.sh, CI, chuyển logic sang core), không tính phiên điều phối | | | | xong | | | | 1.023.070 (riêng 101–102e) |
+| 103 Bản macOS (đợt M, M3a): nền móng lớp Mac (`coords`, `paths`, `timeutil`, Keychain `secret`, `clipboard`); QA tay Keychain + pasteboard ĐẠT (chủ dự án, 2026-11-21) | task/103-macos-foundations | builder | opus | xong | 142.528 | 60.789 (reviewer opus, DUYỆT; lần chạy reviewer fable bị dừng vì hết credits, không đo được token) | 0 | 203.317 |
 
 Task 15–19 là đợt 1 (kế hoạch `docs/superpowers/plans/2026-11-16-options-tabs-i18n.md`). Cộng Task 15–19: 1.326.884 (làm 847.114; rà soát 448.567; sửa 31.203). Theo model: opus (Task 17) 413.406; sonnet (15, 16, 18 và rà soát 19) 724.702; haiku (làm và sửa 19) 188.776. Chủ dự án đã nghiệm thu đợt 1 qua thử tay (2026-11-16).
 
