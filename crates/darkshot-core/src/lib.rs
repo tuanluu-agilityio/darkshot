@@ -10,6 +10,7 @@ pub mod edit;
 pub mod geometry;
 pub mod history;
 pub mod history_store;
+pub mod hotkey_keys;
 pub mod i18n;
 pub mod image;
 pub mod last_capture;
