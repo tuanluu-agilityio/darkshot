@@ -291,7 +291,7 @@ mod tests {
     /// Chạy tay (đăng ký phím toàn cục thật, không bấm phím):
     /// `cargo test -p darkshot-macos --bin darkshot-macos -- --ignored --test-threads=1`.
     #[test]
-    #[ignore]
+    #[ignore = "đăng ký phím tắt toàn cục thật; chạy tay"]
     fn register_and_unregister_a_test_hotkey() {
         // Tổ hợp hiếm: Control+Option+Shift+Command+F19, để không đụng phím của ai.
         let mut keys = mac_default_hotkeys();

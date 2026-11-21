@@ -165,8 +165,9 @@ fn show(mtm: MainThreadMarker, i: &Inner) {
 }
 
 /// Đóng phiên: gỡ bộ nhận thông báo, xóa ô khóa, ẩn và đóng cửa sổ, báo `on_close`. Hàm duy nhất
-/// đóng cửa sổ; gọi nhiều lần vô hại.
-fn finish(saved: bool) {
+/// đóng cửa sổ; gọi nhiều lần vô hại. `close_window` sai khi chính hệ thống đang đóng cửa sổ
+/// (nút đỏ): không gọi `close` lồng trong thông báo `willClose`.
+fn finish(saved: bool, close_window: bool) {
     let Some(i) = SESSION.with(|s| s.try_borrow_mut().ok().and_then(|mut b| b.take())) else {
         return;
     };
@@ -177,8 +178,10 @@ fn finish(saved: bool) {
     let observer: &AnyObject = &i.target;
     // SAFETY: gỡ đúng đối tượng đã đăng ký ở `open`.
     unsafe { NSNotificationCenter::defaultCenter().removeObserver(observer) };
-    i.controls.window.orderOut(None);
-    i.controls.window.close();
+    if close_window {
+        i.controls.window.orderOut(None);
+        i.controls.window.close();
+    }
     *i.alert.borrow_mut() = None;
     *i.panel.borrow_mut() = None;
     let on_close = i.on_close;
@@ -282,7 +285,7 @@ pub fn on_ok() {
         }
     };
     match (i.on_save)(&cfg) {
-        Ok(()) => finish(true),
+        Ok(()) => finish(true, true),
         Err(why) => {
             // Không ghi được: giữ cửa sổ mở, cấu hình cũ vẫn dùng.
             let lang = lang::current();
@@ -297,12 +300,12 @@ pub fn on_ok() {
 
 /// Nút Hủy: bỏ thay đổi, không ghi tệp.
 pub fn on_cancel() {
-    finish(false);
+    finish(false, true);
 }
 
 /// Cửa sổ vừa bị đóng bằng nút đỏ (hệ thống đóng, ta không gọi `close` nữa).
 pub fn on_window_closed() {
-    finish(false);
+    finish(false, false);
 }
 
 /// Nút "Chọn…": hộp chọn thư mục dạng tấm, không chặn vòng lặp.

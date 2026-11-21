@@ -250,7 +250,7 @@ pub mod layout {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use darkshot_core::config::{UploadFormat, JPEG_QUALITY_MAX};
+    use darkshot_core::config::UploadFormat;
     use darkshot_core::i18n::t;
     use darkshot_core::settings_form::apply_form;
     use std::path::PathBuf;
@@ -721,6 +721,6 @@ mod tests {
                 .sum();
             assert!(total <= WINDOW_W, "{l:?} {total}");
         }
-        assert!(WINDOW_W >= CONTENT_W && JPEG_QUALITY_MAX > 0);
+        const { assert!(WINDOW_W >= CONTENT_W) };
     }
 }
