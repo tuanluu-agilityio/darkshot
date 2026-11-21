@@ -26,6 +26,13 @@ Tạo `crates/darkshot-macos/src/{options,options_view,hotkey_field}.rs` (tách 
 6. **Không chặn luồng chính**: kiểm tra kết nối ở luồng nền; thư mục chọn bằng `NSOpenPanel` bất đồng bộ (`beginSheetModal`/`begin`), không `runModal` làm treo vòng lặp.
 7. **Bố cục**: dùng Auto Layout (`NSStackView`/ràng buộc) hoặc tính khung từ hằng; chữ không bị cắt ở cả hai ngôn ngữ (dùng chuỗi dài nhất English/Việt để kiểm); cửa sổ không đổi kích thước được hoặc co giãn hợp lý; hoạt động với tăng cỡ chữ hệ thống.
 
+## Việc kế thừa từ rà soát Task 106 (phải làm trong gói này)
+
+1. **Phân biệt hai lý do phím không chạy**: hiện `hotkey::apply`/`mac_taken_notice` báo "phím bị chiếm" cả khi phím không được hỗ trợ trên Mac (`keymap::vk_to_mac` trả `None`, ví dụ Insert 0x2D hay phím số bàn phụ trong cấu hình mang từ Windows). Tách thành hai kết quả (bị chiếm / chưa hỗ trợ trên Mac), thêm chuỗi i18n đủ hai bản cho lý do "chưa hỗ trợ", và hiển thị rõ trong cửa sổ Tùy chọn (dòng phím tắt báo trạng thái).
+2. **Giới hạn của Carbon**: `eventHotKeyExistsErr` chỉ có khi ứng dụng kia cũng đăng ký độc quyền; phím tắt hệ thống hay ứng dụng đăng ký không độc quyền không làm đăng ký thất bại. Ghi điều này thành chú thích trong mã và ghi chú ngắn ở cửa sổ Tùy chọn/tài liệu (không hứa phát hiện mọi xung đột).
+3. **Cấu hình mang từ Windows (PrintScreen bật)** đăng ký thành F13 và Mac không có phím F13: người dùng không dùng được phím mà không có cảnh báo. Khi nạp cấu hình có vai trò dùng PrintScreen/ScrollLock/Pause, cửa sổ Tùy chọn phải nêu rõ (gợi ý đổi phím), và xem xét thông báo một lần lúc khởi động.
+4. Gỡ `#[allow(dead_code)]` của module `keymap` (`mac_to_vk`, `from_carbon` nay được dùng bởi ô bắt phím) và thêm chuỗi lý do `#[ignore]` thiếu ở `hotkey.rs` nếu còn.
+
 ## Chuỗi i18n
 
 Chuỗi core đã đủ cho phần lớn (nhãn tab, trường, lỗi, nút); thêm chỉ những gì thiếu cho Mac (ví dụ nhãn nút Chọn thư mục kiểu Mac nếu khác), đủ hai bản.
