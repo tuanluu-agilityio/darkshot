@@ -68,3 +68,12 @@ Dùng bản mới nhất tại thời điểm thêm. Phiên bản thực tế n�
 - Nạp cargo vào shell: `. "$HOME/.cargo/env"`.
 - Kiểm nhanh lớp Windows từ Mac: `./scripts/check-windows-cross.sh` (clippy `-D warnings` gồm test cho đích `x86_64-pc-windows-msvc`, dùng trình biên dịch C giả trong thư mục tạm). Chỉ biên dịch và clippy, KHÔNG liên kết, KHÔNG chạy test; không thay cổng thật là job `windows` của CI (quyết định 130). Chạy trước khi đẩy nhánh task chạm `crates/darkshot-windows` (~1 phút).
 
+
+### Bản macOS: lệnh, ghim crate, ký (Task 109)
+
+- Yêu cầu chạy: macOS 14 trở lên (quyết định 134: `SCScreenshotManager`). Đích `aarch64-apple-darwin`. Cargo: `. "$HOME/.cargo/env"`.
+- Cổng: `./scripts/check.sh` (fmt, test, clippy, cây phụ thuộc core, chuỗi Việt cứng, tên cũ; in `ALL CHECKS PASSED`). Giữ cùng danh sách kiểm với `check.ps1`. `./scripts/check-windows-cross.sh` chỉ biên dịch và clippy lớp Windows từ Mac. Cổng Windows thật là CI `windows-latest`.
+- Đóng gói: `scripts/bundle-macos.sh [--release]` dựng `target/macos/darkshot.app` (Info.plist, `InfoPlist.strings` vi/en, ký bằng `DARKSHOT_SIGN_IDENTITY`, không đặt thì ad-hoc kèm cảnh báo). Biểu tượng: `scripts/make-icns.sh` tạo `target/macos/darkshot.icns`, bundle tự chép nếu có. Ký cục bộ: `docs/testing/macos-local-signing.md` (quyết định 137). Chạy thử cách ly: `scripts/demo-macos.sh --release` (quyết định 138).
+- Crate ghim `=` của `darkshot-macos` (chỉ dưới `cfg(target_os = "macos")`): `objc2` 0.6.5; `objc2-app-kit`, `objc2-foundation`, `objc2-core-foundation`, `objc2-core-graphics`, `objc2-screen-capture-kit`, `objc2-user-notifications` 0.3.2 (feature bật theo từng lớp dùng); `block2` 0.6.2; `dispatch2` 0.3.1; `libc` 0.2.191; `security-framework` 3.7.0. Phím tắt dùng Carbon qua FFI mỏng tự viết (không crate). Job `windows` biên dịch crate này ở dạng khung.
+- Hồ sơ cách ly `DARKSHOT_PROFILE_DIR`: thư mục `Roaming`/`Local`/`Pictures` bên trong, Keychain service `darkshot-sandbox-<băm>` (quyết định 138).
+- Hiệu năng: chạy bản `--release` (số đo ở quyết định 141). Chưa phát hành, chưa notarize (quyết định 129).

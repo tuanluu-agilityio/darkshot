@@ -23,6 +23,23 @@ File chạy nằm tại `target\release\darkshot.exe`. Kích thước bản buil
 
 Biểu tượng ứng dụng nằm ở `crates\darkshot-windows\res\darkshot.ico`, sinh bằng `python crates\darkshot-windows\res\make_icon.py` (cần Pillow). Script ghi đè `darkshot.ico` cạnh nó.
 
+## macOS (Apple silicon)
+
+Bản macOS nằm trên nhánh `feat/macos-port`, **chưa phát hành** (chưa có bản tải về). Chỉ build từ mã nguồn được.
+
+- Yêu cầu: macOS 14 trở lên, Apple silicon (`aarch64-apple-darwin`), Rust (rustup) và Command Line Tools.
+- Hiện có: biểu tượng trên thanh menu (không có biểu tượng Dock), chụp vùng bằng lớp phủ chọn trên mọi màn hình (mỗi màn hình một ảnh, vùng chọn không vắt qua màn hình), phím tắt toàn cục, lưu PNG, chép ảnh vào clipboard, tải lên Cloudflare R2 và chép link có hạn, cửa sổ Tùy chọn (R2, phím tắt, ngôn ngữ Việt/English), khóa R2 lưu trong Keychain. Thoát từ menu, đăng xuất, tắt máy hoặc `SIGTERM` đều lưu ảnh của lượt tải lên còn dở vào thư mục lưu thay vì làm mất.
+- Phím mặc định trên Mac: `Control+Shift+4` chụp vùng. Phím chụp toàn màn hình và lặp lại tắt sẵn, bật trong Tùy chọn.
+- Build và chạy:
+
+```sh
+scripts/bundle-macos.sh --release   # ra target/macos/darkshot.app
+```
+
+  Nên ký bằng chứng chỉ tự ký cục bộ để macOS không hỏi lại quyền sau mỗi lần build: xem [docs/testing/macos-local-signing.md](docs/testing/macos-local-signing.md). Chạy thử trong hồ sơ cách ly (không dùng cấu hình, ảnh hay khóa thật): `scripts/demo-macos.sh --release`. Danh sách kiểm tay: [docs/testing/macos-manual-checklist.md](docs/testing/macos-manual-checklist.md).
+- Quyền cần cấp: **Ghi màn hình** (Screen Recording; hệ thống hỏi lần chụp đầu, có thể phải mở lại ứng dụng sau khi cấp) và **Thông báo**.
+- Chưa có trên Mac: ghim ảnh, lịch sử, nhận dạng chữ, bắt cửa sổ khi chọn vùng, chụp từng bước, công cụ đánh dấu, lặp lại lần chụp trước, tự khởi động cùng máy, kiểm tra cập nhật. Chưa ký bằng chứng chỉ Apple và chưa notarize.
+
 ## Trang giới thiệu
 
 `website/` chứa trang giới thiệu darkshot (static site Vite + TypeScript, hai ngôn ngữ EN/VI, tự lấy bản phát hành mới nhất từ GitHub). Tách khỏi ứng dụng, không ảnh hưởng `cargo build`. Cách chạy, build và triển khai: [website/README.md](website/README.md).
