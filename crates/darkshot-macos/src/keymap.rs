@@ -104,41 +104,78 @@ const ALIASES: &[(u32, u32)] = &[(0x7C, 0x69), (0x7D, 0x6B), (0x7E, 0x71)];
 
 /// Mã phím macOS của một mã VK; `None` khi bản Mac chưa hỗ trợ phím đó.
 pub fn vk_to_mac(vk: u32) -> Option<u32> {
-    let _ = ();
-    None
+    PAIRS
+        .iter()
+        .chain(ALIASES)
+        .find(|(v, _)| *v == vk)
+        .map(|(_, m)| *m)
 }
 
 /// Mã VK (dạng chuẩn trong cấu hình) của một mã phím macOS; `None` khi chưa hỗ trợ.
 pub fn mac_to_vk(code: u32) -> Option<u32> {
-    let _ = ();
-    None
+    PAIRS.iter().find(|(_, m)| *m == code).map(|(v, _)| *v)
 }
 
 /// Mặt nạ phím bổ trợ Carbon của tổ hợp: `ctrl`→Control, `alt`→Option, `shift`→Shift,
 /// `win`→Command.
 pub fn carbon_modifiers(hk: &Hotkey) -> u32 {
-    let _ = ();
-    0
+    [
+        (hk.ctrl, MOD_CONTROL),
+        (hk.alt, MOD_OPTION),
+        (hk.shift, MOD_SHIFT),
+        (hk.win, MOD_COMMAND),
+    ]
+    .into_iter()
+    .filter(|(on, _)| *on)
+    .fold(0, |acc, (_, bit)| acc | bit)
 }
 
 /// (mã phím macOS, mặt nạ Carbon) để đăng ký `hk`; `None` khi phím chưa hỗ trợ trên Mac.
 pub fn to_carbon(hk: &Hotkey) -> Option<(u32, u32)> {
-    let _ = ();
-    None
+    vk_to_mac(hk.vk).map(|code| (code, carbon_modifiers(hk)))
 }
 
 /// Tổ hợp (dạng cấu hình) từ mã phím macOS và mặt nạ Carbon; bit khác (Caps Lock…) bị bỏ qua.
 pub fn from_carbon(code: u32, mods: u32) -> Option<Hotkey> {
-    let _ = ();
-    None
+    mac_to_vk(code).map(|vk| Hotkey {
+        ctrl: mods & MOD_CONTROL != 0,
+        alt: mods & MOD_OPTION != 0,
+        shift: mods & MOD_SHIFT != 0,
+        win: mods & MOD_COMMAND != 0,
+        vk,
+    })
 }
 
 /// Tên tổ hợp theo cách gọi của Mac, thứ tự Control, Option, Shift, Command (như menu macOS):
 /// "Control+Shift+4". PrintScreen/ScrollLock/Pause hiện là F13/F14/F15 (phím thật trên Mac).
 /// Tên phím không dịch (như `hotkey_keys::describe` của core).
 pub fn mac_describe(hk: &Hotkey) -> String {
-    let _ = ();
-    String::new()
+    let mut s = String::new();
+    for (on, name) in [
+        (hk.ctrl, "Control"),
+        (hk.alt, "Option"),
+        (hk.shift, "Shift"),
+        (hk.win, "Command"),
+    ] {
+        if on {
+            s.push_str(name);
+            s.push('+');
+        }
+    }
+    let key = match hk.vk {
+        0x2C | 0x7C => "F13".to_string(),
+        0x91 | 0x7D => "F14".to_string(),
+        0x13 | 0x7E => "F15".to_string(),
+        vk => describe(&Hotkey {
+            ctrl: false,
+            alt: false,
+            shift: false,
+            win: false,
+            vk,
+        }),
+    };
+    s.push_str(&key);
+    s
 }
 
 /// Thông báo "Phím tắt chưa hoạt động" như `notices::hotkeys_taken_notice` của core, nhưng tên
@@ -149,8 +186,18 @@ pub fn mac_taken_notice(
     keys: &Hotkeys,
     failed: &[HotkeyRole],
 ) -> Option<(&'static str, String)> {
-    let _ = ();
-    None
+    if failed.is_empty() {
+        return None;
+    }
+    let combos: Vec<String> = HotkeyRole::ALL
+        .into_iter()
+        .filter(|r| failed.contains(r))
+        .map(|r| mac_describe(&keys.get(r).key))
+        .collect();
+    Some((
+        i18n::t(lang, Msg::HotkeysNotWorkingTitle),
+        i18n::hotkeys_taken_body(lang, &combos),
+    ))
 }
 
 /// Bộ phím tắt mặc định của bản Mac (quyết định 139), dùng khi chưa có tệp cấu hình. Không đụng
@@ -165,23 +212,50 @@ pub fn mac_taken_notice(
 /// | Tải lên toàn màn hình | Control+Option+3 | không |
 /// | Lặp lại lần chụp trước | Control+Option+4 | không (chưa có trên Mac) |
 pub fn mac_default_hotkeys() -> Hotkeys {
-    let _ = ();
-    Hotkeys::default()
+    let key = |alt: bool, shift: bool, vk: u32| Hotkey {
+        ctrl: true,
+        alt,
+        shift,
+        win: false,
+        vk,
+    };
+    Hotkeys {
+        region: HotkeySlot {
+            enabled: true,
+            key: key(false, true, 0x34),
+        },
+        save_full: HotkeySlot {
+            enabled: false,
+            key: key(false, true, 0x33),
+        },
+        upload_full: HotkeySlot {
+            enabled: false,
+            key: key(true, false, 0x33),
+        },
+        repeat_last: HotkeySlot {
+            enabled: false,
+            key: key(true, false, 0x34),
+        },
+    }
 }
 
 /// Loại chụp bản Mac làm cho một dòng phím tắt. `RepeatLast` là `None`: chưa làm trên Mac vì
 /// "lần chụp trước" của Windows là toạ độ trên một canvas ảo chung, còn Mac chụp mỗi màn hình một
 /// ảnh (quyết định 135), nên cần thiết kế lại; dòng này không được đăng ký và không hiện ra.
 pub fn mac_kind(role: HotkeyRole) -> Option<CaptureKind> {
-    let _ = ();
-    None
+    match role {
+        HotkeyRole::RepeatLast => None,
+        r => Some(kind_of(r)),
+    }
 }
 
 /// Các dòng sẽ đăng ký với hệ thống: đang bật và bản Mac có làm (`mac_kind`), theo thứ tự
 /// `HotkeyRole::ALL`.
 pub fn roles_to_register(keys: &Hotkeys) -> Vec<HotkeyRole> {
-    let _ = ();
-    Vec::new()
+    HotkeyRole::ALL
+        .into_iter()
+        .filter(|r| keys.get(*r).enabled && mac_kind(*r).is_some())
+        .collect()
 }
 
 #[cfg(test)]
