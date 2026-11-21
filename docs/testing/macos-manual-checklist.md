@@ -9,12 +9,13 @@ Trạng thái: Task 103 đến 106 ĐÃ đạt (chủ dự án, 2026-11-21). Tas
 - Chạy thử cách ly: `scripts/demo-macos.sh --release`. Script dựng gói, đặt `DARKSHOT_PROFILE_DIR` ra thư mục tạm, mở bản dựng và dọn mục Keychain `darkshot-sandbox-…` khi kết thúc. Không bao giờ dùng service `darkshot` thật.
 - Hồ sơ cố định để thử nhiều lần: `mkdir -p /tmp/ds-qa` rồi `open -n --env "DARKSHOT_PROFILE_DIR=/tmp/ds-qa" target/macos/darkshot.app`. Cấu hình nằm ở `/tmp/ds-qa/Roaming/darkshot/config.json`, ảnh ở `/tmp/ds-qa/Pictures/darkshot`.
 - Ký ổn định (để khỏi bị hỏi lại quyền sau mỗi lần build): `export DARKSHOT_SIGN_IDENTITY="<tên chứng chỉ>"`, xem `macos-local-signing.md`.
-- Bật phím tắt chụp toàn màn hình khi cần thử: mở Tùy chọn (tab phím tắt), hoặc sửa `config.json` của hồ sơ cách ly khi ứng dụng đã tắt. Ví dụ đoạn JSON (mã phím theo VK của Windows, `0x33` = `3`, `0x34` = `4`):
+- Bật phím tắt chụp toàn màn hình khi cần thử: cách dễ nhất là mở Tùy chọn (tab Phím tắt). Hoặc tạo `config.json` của hồ sơ cách ly khi ứng dụng đã tắt, với ĐÚNG nội dung dưới đây (đã kiểm bằng `config::load` ở Task 106; mã phím theo VK của Windows: `51` = `3`, `52` = `4`; ghi đủ mọi trường, vì trường thiếu âm thầm rơi về mặc định PrintScreen). Chụp vùng `Control+Shift+4`, lưu toàn màn hình `Control+Shift+3`:
 
 ```json
-"hotkey_save_full": { "enabled": true, "ctrl": true, "alt": false, "shift": true, "win": false, "vk": 51 },
-"hotkey_upload_full": { "enabled": true, "ctrl": true, "alt": true, "shift": false, "win": false, "vk": 51 }
+{"language":"vi","hotkey":{"ctrl":true,"alt":false,"shift":true,"win":false,"vk":52},"hotkey_enabled":true,"hotkey_save_full":{"enabled":true,"ctrl":true,"alt":false,"shift":true,"win":false,"vk":51}}
 ```
+
+  Để bật thêm tải lên toàn màn hình (`Control+Option+3`), thêm vào trước dấu `}` cuối: `,"hotkey_upload_full":{"enabled":true,"ctrl":true,"alt":true,"shift":false,"win":false,"vk":51}`. Thêm `"language":"en"` thay `"vi"` nếu muốn tiếng Anh.
 
 - Dọn Keychain sau khi thử hồ sơ cố định: `security delete-generic-password -s <service> -a r2-secret-access-key`, với `<service>` lấy bằng `DARKSHOT_PROFILE_DIR=/tmp/ds-qa target/macos/darkshot.app/Contents/MacOS/darkshot --keychain-service` (chỉ in tên, không chạm Keychain). Rồi `rm -r /tmp/ds-qa`.
 
