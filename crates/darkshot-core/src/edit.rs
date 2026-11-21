@@ -183,6 +183,9 @@ pub fn hit_shape(shape: &Shape, bounds: Rect, p: Pt, tol: f32) -> bool {
                 (filled && in_rect(rect_of(*a, *b), p, 0.0)) || rect_edge_hit(*a, *b, w, p, tol)
             }
         }
+        Shape::Highlight { a, b, opacity, .. } => {
+            *opacity > 0.0 && in_rect(rect_of(*a, *b), p, tol)
+        }
         Shape::Blur { a, b, .. } => in_rect(blur_pixel_rect(*a, *b), p, tol),
         Shape::Step { center, radius, .. } => dist(p, *center) <= radius + tol,
         Shape::Text { .. } | Shape::Label { .. } => in_rect(bounds, p, tol),
@@ -233,7 +236,8 @@ pub fn handles(shape: &Shape, bounds: Rect) -> Vec<(Grip, Pt)> {
         Shape::Rect { a, b, .. }
         | Shape::Ellipse { a, b, .. }
         | Shape::Blur { a, b, .. }
-        | Shape::Box { a, b, .. } => {
+        | Shape::Box { a, b, .. }
+        | Shape::Highlight { a, b, .. } => {
             let (x0, y0, x1, y1) = norm_box(*a, *b);
             box_handles(x0, y0, x1, y1)
         }
@@ -313,7 +317,8 @@ fn transform_box(
         Shape::Rect { a, b, .. }
         | Shape::Ellipse { a, b, .. }
         | Shape::Blur { a, b, .. }
-        | Shape::Box { a, b, .. } => (*a, *b),
+        | Shape::Box { a, b, .. }
+        | Shape::Highlight { a, b, .. } => (*a, *b),
         _ => return g.original.clone(),
     };
     let (x0, y0, x1, y1) = norm_box(a, b);
@@ -380,6 +385,12 @@ fn transform_box(
             b: nb,
             oval: *oval,
             style: *style,
+        },
+        Shape::Highlight { color, opacity, .. } => Shape::Highlight {
+            a: na,
+            b: nb,
+            color: *color,
+            opacity: *opacity,
         },
         other => other.clone(),
     }
@@ -654,6 +665,17 @@ fn transform_move(g: &Gesture, to: Pt, img: &Image) -> Shape {
             oval: *oval,
             style: *style,
         },
+        Shape::Highlight {
+            a,
+            b,
+            color,
+            opacity,
+        } => Shape::Highlight {
+            a: mv(a),
+            b: mv(b),
+            color: *color,
+            opacity: *opacity,
+        },
         Shape::Label {
             origin,
             text,
@@ -689,9 +711,11 @@ pub fn transform(g: &Gesture, to: Pt, shift: bool, min_extent: f32, img: &Image)
         Grip::Move => transform_move(g, to, img),
         Grip::End(i) => transform_end(g, i, to, shift),
         Grip::Box(h) => match &g.original {
-            Shape::Rect { .. } | Shape::Ellipse { .. } | Shape::Blur { .. } | Shape::Box { .. } => {
-                transform_box(g, h, to, shift, min_extent, img)
-            }
+            Shape::Rect { .. }
+            | Shape::Ellipse { .. }
+            | Shape::Blur { .. }
+            | Shape::Box { .. }
+            | Shape::Highlight { .. } => transform_box(g, h, to, shift, min_extent, img),
             Shape::Pen { .. } | Shape::Marker { .. } => {
                 transform_points(g, h, to, shift, min_extent)
             }
@@ -740,6 +764,11 @@ pub fn restyle(shape: &Shape, level: Option<SizeLevel>, color: Option<Rgb>, dpi:
                 *c = n;
             }
         }
+        Shape::Highlight { color: c, .. } => {
+            if let Some(n) = color {
+                *c = n;
+            }
+        }
         Shape::Box { style, .. } => {
             if let Some(l) = level {
                 style.stroke_width = dip_to_px(l.stroke_dip(), dpi);
@@ -767,6 +796,43 @@ pub fn restyle(shape: &Shape, level: Option<SizeLevel>, color: Option<Rgb>, dpi:
             }
         }
         Shape::Blur { .. } => {}
+    }
+    s
+}
+
+/// Đổi riêng cho Highlight (Task 113): Bút dạ quang nhận độ dày `width_px` và màu; Highlight hình
+/// chữ nhật nhận độ trong suốt (kẹp 0..=1, không phải số thì giữ) và màu. Hình khác giữ nguyên.
+pub fn highlight_restyle(
+    shape: &Shape,
+    width_px: Option<f32>,
+    opacity: Option<f32>,
+    color: Option<Rgb>,
+) -> Shape {
+    let mut s = shape.clone();
+    match &mut s {
+        Shape::Marker {
+            width, color: c, ..
+        } => {
+            if let Some(w) = width_px.filter(|w| w.is_finite() && *w > 0.0) {
+                *width = w;
+            }
+            if let Some(n) = color {
+                *c = n;
+            }
+        }
+        Shape::Highlight {
+            opacity: o,
+            color: c,
+            ..
+        } => {
+            if let Some(v) = opacity.filter(|v| !v.is_nan()) {
+                *o = v.clamp(0.0, 1.0);
+            }
+            if let Some(n) = color {
+                *c = n;
+            }
+        }
+        _ => {}
     }
     s
 }
@@ -1506,7 +1572,10 @@ mod tests {
                 b,
                 color,
                 opacity,
-            } => assert_eq!((a, b, color, opacity), (p(10.0, 10.0), p(90.0, 70.0), BLUE, 0.5)),
+            } => assert_eq!(
+                (a, b, color, opacity),
+                (p(10.0, 10.0), p(90.0, 70.0), BLUE, 0.5)
+            ),
             other => panic!("{other:?}"),
         }
         let mv = Gesture {

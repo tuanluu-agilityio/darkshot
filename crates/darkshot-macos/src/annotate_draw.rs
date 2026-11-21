@@ -348,6 +348,24 @@ fn draw_marker(c: &CGContext, points: &[Pt], width: f32, color: Rgb) -> bool {
     true
 }
 
+/// Highlight hình chữ nhật: tô đặc `color` một lần với độ trong suốt `opacity`, không viền.
+fn draw_highlight(c: &CGContext, a: Pt, b: Pt, color: Rgb, opacity: f32) -> bool {
+    if !(sane_pt(a) && sane_pt(b)) || !opacity.is_finite() {
+        return false;
+    }
+    set_fill(c, color, opacity.clamp(0.0, 1.0));
+    CGContext::fill_rect(
+        Some(c),
+        cg_rect(
+            a.x.min(b.x),
+            a.y.min(b.y),
+            (b.x - a.x).abs(),
+            (b.y - a.y).abs(),
+        ),
+    );
+    true
+}
+
 /// Vùng che: tô đặc `blur_pixel_rect(a, b)` bằng `color`, alpha 1, không khử răng cưa.
 fn draw_blur(c: &CGContext, a: Pt, b: Pt, color: Rgb) -> bool {
     if !(sane_pt(a) && sane_pt(b)) {
@@ -611,6 +629,12 @@ fn draw_one(c: &CGContext, s: &Shape) -> bool {
             color,
         } => draw_step(c, *center, *radius, *n, *color),
         Shape::Box { a, b, oval, style } => draw_box(c, *a, *b, *oval, style),
+        Shape::Highlight {
+            a,
+            b,
+            color,
+            opacity,
+        } => draw_highlight(c, *a, *b, *color, *opacity),
         Shape::Label {
             origin,
             text,
@@ -1766,17 +1790,31 @@ mod tests {
             60,
             50,
             40,
-            &[highlight(pt(50.0, 40.0), pt(10.0, 10.0), RED, HIGHLIGHT_OPACITY)],
+            &[highlight(
+                pt(50.0, 40.0),
+                pt(10.0, 10.0),
+                RED,
+                darkshot_core::annotate::HIGHLIGHT_OPACITY,
+            )],
         );
         let b = render(
             60,
             50,
             40,
-            &[highlight(pt(10.0, 10.0), pt(50.0, 40.0), RED, HIGHLIGHT_OPACITY)],
+            &[highlight(
+                pt(10.0, 10.0),
+                pt(50.0, 40.0),
+                RED,
+                darkshot_core::annotate::HIGHLIGHT_OPACITY,
+            )],
         );
         assert_eq!(a, b);
         // 0,4 đỏ + 0,6 xám 40: R = 102 + 24 = 126.
-        assert!(near(px(&a, 30, 25), [24, 24, 126, 255], 3), "{:?}", px(&a, 30, 25));
+        assert!(
+            near(px(&a, 30, 25), [24, 24, 126, 255], 3),
+            "{:?}",
+            px(&a, 30, 25)
+        );
     }
 
     #[test]
@@ -1787,7 +1825,10 @@ mod tests {
         let p = px(&img, 30, 20);
         assert!(near(p, [153, 0, 102, 255], 3), "{p:?}");
         let bad = highlight(pt(f32::NAN, 0.0), pt(5.0, 5.0), RED, 0.4);
-        assert_eq!(render(60, 40, 7, &[bad]), solid(60, 40, 7));
+        let mut img = solid(60, 40, 7);
+        let crop = full(&img);
+        assert!(burn(&mut img, &[bad], crop).is_err());
+        assert_eq!(img, solid(60, 40, 7), "không vẽ gì khi số không hợp lệ");
     }
 
     #[test]

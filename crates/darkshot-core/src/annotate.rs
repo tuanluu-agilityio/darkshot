@@ -108,6 +108,8 @@ pub const DEFAULT_COLOR: Rgb = PALETTE[8];
 pub const STROKE_DIP: f32 = 3.0;
 pub const MARKER_DIP: f32 = 16.0;
 pub const MARKER_ALPHA: u8 = 102;
+/// Độ trong suốt mặc định của Highlight hình chữ nhật: đúng độ pha của nét Bút dạ quang.
+pub const HIGHLIGHT_OPACITY: f32 = MARKER_ALPHA as f32 / 255.0;
 pub const TEXT_DIP: f32 = 18.0;
 pub const TEXT_OUTLINE_DIP: f32 = 2.0;
 pub const ARROW_HEAD_FACTOR: f32 = 4.0;
@@ -278,6 +280,18 @@ pub fn align_offsets(align: Align, widths: &[f32]) -> (f32, Vec<f32>) {
     (w, offs)
 }
 
+/// Hai chế độ của công cụ Highlight (Task 113): nét tự do hoặc hình chữ nhật tô màu.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HighlightMode {
+    #[default]
+    Freehand,
+    Rect,
+}
+
+impl HighlightMode {
+    pub const ALL: [HighlightMode; 2] = [HighlightMode::Freehand, HighlightMode::Rect];
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Shape {
     Pen {
@@ -336,6 +350,14 @@ pub enum Shape {
         b: Pt,
         oval: bool,
         style: Style,
+    },
+    /// Highlight hình chữ nhật: tô đặc `color` với độ trong suốt `opacity` (0..=1), không viền.
+    /// Chỉ bản macOS tạo ra.
+    Highlight {
+        a: Pt,
+        b: Pt,
+        color: Rgb,
+        opacity: f32,
     },
     /// Khối chữ có kiểu. `origin`: góc trên trái của KHỐI (gồm đệm `LABEL_PAD_EM * size`); chữ màu
     /// `color`, viền/nền theo `style`. Chỉ bản macOS tạo ra.
@@ -411,6 +433,7 @@ impl Shape {
                 style.stroke_width.max(0.0) / 2.0 * std::f32::consts::SQRT_2 + 1.0,
             ),
             Shape::Ellipse { a, b, width, .. } => bounds_of(&[*a, *b], width / 2.0 + 1.0),
+            Shape::Highlight { a, b, .. } => bounds_of(&[*a, *b], 1.0),
             Shape::Step { center, radius, .. } => {
                 bounds_of(&[*center], radius + radius * STEP_RING / 2.0 + 1.0)
             }
@@ -423,6 +446,14 @@ impl Shape {
     pub fn style(&self) -> Option<Style> {
         match self {
             Shape::Box { style, .. } | Shape::Label { style, .. } => Some(*style),
+            _ => None,
+        }
+    }
+
+    /// Độ trong suốt của Highlight hình chữ nhật; `None` với hình khác.
+    pub fn highlight_opacity(&self) -> Option<f32> {
+        match self {
+            Shape::Highlight { opacity, .. } => Some(*opacity),
             _ => None,
         }
     }
@@ -451,6 +482,32 @@ impl Shape {
             *align = new;
         }
         s
+    }
+}
+
+/// Đổi hình chữ nhật kéo thô (`Rect` từ `begin_stroke`) thành `Highlight` với độ trong suốt
+/// `opacity` (kẹp 0..=1; không phải số thì mặc định); hai góc được chuẩn hóa (trên trái, dưới
+/// phải) nên kéo ngược chiều cho cùng kết quả. Hình khác giữ nguyên.
+pub fn highlight_from_stroke(shape: &Shape, opacity: f32) -> Shape {
+    let Shape::Rect { a, b, color, .. } = shape else {
+        return shape.clone();
+    };
+    let opacity = if opacity.is_nan() {
+        HIGHLIGHT_OPACITY
+    } else {
+        opacity.clamp(0.0, 1.0)
+    };
+    Shape::Highlight {
+        a: Pt {
+            x: a.x.min(b.x),
+            y: a.y.min(b.y),
+        },
+        b: Pt {
+            x: a.x.max(b.x),
+            y: a.y.max(b.y),
+        },
+        color: *color,
+        opacity,
     }
 }
 
@@ -1617,7 +1674,10 @@ mod tests {
 
     #[test]
     fn highlight_mode_defaults_and_opacity_constant() {
-        assert_eq!(HighlightMode::ALL, [HighlightMode::Freehand, HighlightMode::Rect]);
+        assert_eq!(
+            HighlightMode::ALL,
+            [HighlightMode::Freehand, HighlightMode::Rect]
+        );
         assert_eq!(HighlightMode::default(), HighlightMode::Freehand);
         assert_eq!(HIGHLIGHT_OPACITY, f32::from(MARKER_ALPHA) / 255.0);
     }
