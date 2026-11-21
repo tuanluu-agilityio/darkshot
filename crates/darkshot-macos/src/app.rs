@@ -33,11 +33,12 @@ use crate::options::{self, Env};
 use crate::options_model::persist;
 use crate::overlay::{self, Outcome};
 use crate::secret::{self, KeychainStore};
+use crate::shutdown::{self, ExitOnce, ExitSteps};
 use crate::tray::Tray;
 use crate::upload;
 use crate::{hotkey, lang, paths, timeutil};
 use darkshot_core::actions::{run_action, Action, Ctx, NoticeKind, Notifier};
-use darkshot_core::app_flow::{OpenReason, EXIT_BUDGET};
+use darkshot_core::app_flow::OpenReason;
 use darkshot_core::app_state::{self, AppState, ConfigNotice};
 use darkshot_core::capture_gate::{
     gate_step, next_kind, CaptureGate, CaptureKind, GateAction, GateEvent,
@@ -226,6 +227,8 @@ pub fn run(args: &[String]) -> i32 {
 
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+    // Thoát ngoài menu (đăng xuất, tắt máy, SIGTERM, SIGINT) cũng lưu lượt tải lên dở.
+    shutdown::install(mtm, &app, run_exit_steps, terminate_app);
     notify::init();
 
     let config_path = paths::config_path();
@@ -708,26 +711,54 @@ fn start_upload(config: &Config, image: Image, rect: Rect, lang: Lang) {
     );
 }
 
-/// Thoát sạch, trong một hạn chót chung `EXIT_BUDGET`. Thứ tự: (1) lưu ảnh của mọi lượt tải lên
-/// còn dở vào thư mục lưu (`upload::save_on_exit`: chỉ ghi tệp, KHÔNG mạng, không chờ tải lên);
-/// (2) chờ các lượt lưu/chép đang chạy tới hạn chót; (3) bỏ biểu tượng và kết thúc. Việc (1) chạy
-/// trước và không bị cắt bởi hạn chót: ghi PNG cục bộ là cách duy nhất để không mất ảnh.
+/// Thoát từ menu "Thoát". Chuỗi bước thoát (hủy lớp phủ, gỡ phím tắt, lưu lượt tải lên dở không
+/// mạng, chờ trong hạn chót chung `EXIT_BUDGET`, bỏ biểu tượng) nằm ở `shutdown::run_exit_once` và
+/// dùng chung với delegate `NSApplication` và `SIGTERM`/`SIGINT` (Task 109).
 fn quit() {
-    let deadline = Instant::now() + EXIT_BUDGET;
-    overlay::cancel();
-    hotkey::unregister_all();
-    let saved = upload::save_on_exit(&upload::registry(), timeutil::local_now(), lang::current());
-    if saved > 0 {
-        eprintln!("darkshot: saved {saved} unfinished upload(s) to the save folder");
+    // Chạy chuỗi bước thoát (một lần), rồi yêu cầu kết thúc. `terminate:` gọi delegate
+    // (`applicationShouldTerminate:`), nơi chuỗi bước đã chạy rồi nên không làm lại.
+    terminate_app();
+}
+
+/// Các bước thoát thật, theo đúng thứ tự cũ của `quit` (xem `shutdown`): hủy lớp phủ, gỡ phím tắt,
+/// lưu lượt tải lên dở (không mạng), chờ lượt lưu/chép tới hạn chót, bỏ biểu tượng khay.
+struct RealExit;
+
+impl ExitSteps for RealExit {
+    fn cancel_overlay(&mut self) {
+        overlay::cancel();
     }
-    upload::wait_idle(deadline, || IN_FLIGHT.load(Ordering::SeqCst) > 0);
-    // Không hủy `Tray` ở đây: hàm này chạy bên trong phương thức của đích menu (`MenuTarget`),
-    // hủy đích lúc đó là dùng-sau-giải-phóng. Tiến trình kết thúc ngay sau đó.
-    TRAY.with(|t| {
-        if let Some(tray) = t.borrow().as_ref() {
-            tray.remove();
-        }
-    });
+    fn unregister_hotkeys(&mut self) {
+        hotkey::unregister_all();
+    }
+    fn save_pending(&mut self) -> usize {
+        upload::save_on_exit(&upload::registry(), timeutil::local_now(), lang::current())
+    }
+    fn wait_idle(&mut self, deadline: Instant) {
+        upload::wait_idle(deadline, || IN_FLIGHT.load(Ordering::SeqCst) > 0);
+    }
+    fn remove_tray(&mut self) {
+        // Không hủy `Tray` ở đây: có thể đang chạy bên trong phương thức của đích menu
+        // (`MenuTarget`), hủy đích lúc đó là dùng-sau-giải-phóng. Tiến trình kết thúc ngay sau đó.
+        TRAY.with(|t| {
+            if let Some(tray) = t.borrow().as_ref() {
+                tray.remove();
+            }
+        });
+    }
+}
+
+/// Cờ thoát một lần của tiến trình (menu, delegate, `SIGTERM`/`SIGINT` dùng chung).
+static EXIT_ONCE: ExitOnce = ExitOnce::new();
+
+/// Chạy chuỗi bước thoát nếu chưa chạy. Luồng chính. Mọi đường thoát đều đi qua hàm này.
+fn run_exit_steps() {
+    shutdown::run_exit_once(&EXIT_ONCE, &mut RealExit);
+}
+
+/// Thoát từ menu hoặc tín hiệu: chạy chuỗi bước rồi `terminate:`.
+fn terminate_app() {
+    run_exit_steps();
     if let Some(mtm) = MainThreadMarker::new() {
         NSApplication::sharedApplication(mtm).terminate(None);
     }
