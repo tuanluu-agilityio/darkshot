@@ -3,6 +3,7 @@
 //! (`isFlipped`, gốc trên trái như core). View chỉ đổi sự kiện thành lời gọi tới `overlay` và vẽ bằng Core Graphics trong không
 //! gian pixel của màn hình đó; mọi trạng thái nằm ở `overlay` (mô hình thuần `overlay_input`).
 
+use crate::annotate_draw;
 use crate::lang;
 use crate::overlay::{self, Frame};
 use crate::overlay_input::{
@@ -377,6 +378,11 @@ fn draw(f: &Frame) {
         CGContext::add_rect(c, cg_rect(r));
     }
     CGContext::eo_fill_path(c);
+
+    // Hình đánh dấu: chỉ trong vùng chọn, trên ảnh đã khoét mờ; hình sau nằm trước hình trước.
+    if let (Some(r), false) = (f.state.rect, f.shapes.is_empty()) {
+        annotate_draw::draw_shapes(&cg, &f.shapes, 0, 0, r);
+    }
 
     let attrs = text_attrs(FONT_PT * f.scale);
     if let Some(r) = f.state.rect {

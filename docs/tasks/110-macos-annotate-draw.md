@@ -30,6 +30,13 @@ pub fn burn(img: &mut Image, shapes: &[Shape], crop: Rect) -> Result<(), String>
 ```
 `burn` dựng `CGBitmapContext` trên chính bộ đệm BGRA của `Image` (premultiplied-first, little-endian, sRGB), lật trục để gốc ở trên trái, bật khử răng cưa; không chép toàn ảnh nếu tránh được.
 
+## Quy tắc xếp lớp (z-order) — BẮT BUỘC (yêu cầu của chủ dự án)
+
+Hình hoặc chữ vẽ SAU phải nằm PHÍA TRƯỚC hình vẽ trước. Quy ước: danh sách `shapes` theo chỉ số tăng dần là từ DƯỚI lên TRÊN (chỉ số 0 ở dưới cùng, chỉ số cuối ở trên cùng). Core đã bảo đảm: `Annotations::add` luôn thêm vào CUỐI, `replace` giữ nguyên chỉ số (sửa/di chuyển/đổi màu một hình KHÔNG đổi lớp của nó), `topmost_hit` quét từ cuối về đầu. Lớp vẽ Mac phải:
+1. `draw_shapes` duyệt `shapes` ĐÚNG thứ tự chỉ số tăng dần, mỗi hình vẽ đè lên kết quả của các hình trước; KHÔNG sắp xếp lại, không gom theo loại (chữ không được luôn nằm trên hoặc dưới hình; marker bán trong suốt chỉ pha với những gì đã vẽ trước nó; Blur che bằng màu nên che cả hình vẽ trước nó nhưng không che hình vẽ sau nó).
+2. `burn` dùng đúng `draw_shapes` nên ảnh cuối cùng có cùng thứ tự lớp như trên màn hình.
+3. Test bắt buộc (pixel, chạy ngoài màn hình): hai hình khác màu chồng lên nhau (ví dụ Rect đỏ rồi Rect xanh cùng vùng) → pixel giao là màu của hình thêm SAU; đảo thứ tự danh sách thì đảo kết quả; Text thêm sau Rect thì chữ nằm trên khung (pixel chữ không bị khung che) và Text thêm trước Rect đặc/Blur thì bị che; Marker thêm sau pha màu với hình bên dưới; Step/Arrow/Ellipse tương tự; `burn` khớp `draw_shapes` về thứ tự.
+
 ## Phạm vi
 
 1. **Từng loại hình** giống Windows về hình dạng và quy ước (xem `draw_one` và các `draw_*`): Pen (nét tròn đầu tròn góc, mượt), Line, Arrow (thân + đầu theo `arrow_geometry` của core), Rect (khung rỗng), Ellipse (khung rỗng), Marker (nét dày bán trong suốt `MARKER_ALPHA`, đầu vuông), Blur (che bằng màu `color` trên vùng `blur_pixel_rect`, như Windows: kiểm cách `draw_blur` làm rồi làm tương đương), Text (phông hệ thống, kích thước `size` pixel, viền ngoài `outline_color` dày `TEXT_OUTLINE_DIP` theo tỉ lệ, nhiều dòng theo `\n`), Step (hình tròn có vòng `STEP_RING`, số `n` ở giữa, màu chữ tương phản).
@@ -48,6 +55,7 @@ Trên ảnh tổng hợp (nền trắng hoặc xám phẳng) kiểm pixel: Rect 
 
 ## Review Focus (builder TỰ kiểm và nêu kết quả trong báo cáo)
 
+0. **Z-order** đúng quy tắc xếp lớp ở trên (hình thêm sau luôn ở phía trước, trên màn hình lẫn ảnh cuối), có test.
 1. Mỗi loại hình khớp Windows (đọc `annotate_draw.rs`) về hình dạng, độ dày theo hằng của core, màu, bán trong suốt; không lệch nửa pixel làm mờ khung; hệ tọa độ (gốc trên trái, lật CTM đúng một lần), `ox/oy`, cắt vùng.
 2. `burn`: bộ đệm BGRA đúng bố cục, không đọc/ghi ngoài bộ đệm, alpha 255 sau khi vẽ, không giữ con trỏ đến bộ đệm sau khi trả về, vòng đời `CGContext` đúng.
 3. CoreText: vòng đời đối tượng, không rò, không crash với chuỗi rỗng, rất dài, ký tự Unicode (tiếng Việt có dấu, emoji), `\n`.
