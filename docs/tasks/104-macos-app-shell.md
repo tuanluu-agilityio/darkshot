@@ -34,9 +34,10 @@ pub fn capture_displays(include_cursor: bool) -> Result<Vec<DisplayShot>, Captur
 7. **Quyền**: `CGPreflightScreenCaptureAccess`; chưa có thì `CGRequestScreenCaptureAccess` một lần và hiện thông báo hướng dẫn mở System Settings → Privacy & Security → Screen Recording (chuỗi mới `Msg::…` trong `i18n.rs`, đủ Việt và English). Không chụp ra ảnh rỗng im lặng.
 8. **Thông báo (`notify.rs`)**: `UNUserNotificationCenter` triển khai `darkshot_core::actions::Notifier`; xin quyền gửi thông báo ở lần đầu; chạy ngoài bundle hoặc bị từ chối thì ghi một dòng ra `stderr` và không crash. Luật hiển thị theo `actions::notice_visible` (như Windows).
 9. **Ngôn ngữ (`lang.rs`)**: `pub fn lang_from_locale(tag: &str) -> Lang` (thuần, có test: `vi`, `vi-VN` → Việt; còn lại → English) và hàm đọc `NSLocale.preferredLanguages` khi chưa có tệp cấu hình hoặc tệp hỏng; có `Config` thì dùng ngôn ngữ trong cấu hình.
-10. **Nối cấu hình**: `darkshot_core::config::load(&paths::config_path(), &KeychainStore::new(), &paths::default_save_dir(), os_lang)` với `os_lang` từ `lang.rs` (chữ ký 4 tham số, xem `config.rs`); xử lý `Loaded` như `windows_main` (thiếu R2 → thông báo; chưa có cửa sổ Tùy chọn nên chỉ thông báo, không mở gì).
-11. **Đường chụp tạm (xóa ở Task 105)**: sau khi chụp, lấy màn hình chứa con trỏ, chạy `actions::run_action(ctx, Action::Save, &image)` trên luồng nền rồi báo kết quả bằng thông báo. `Ctx.clipboard` dùng `PasteboardClipboard` (Task 103), `Ctx.uploader` = `None`.
-12. **`scripts/demo-macos.sh`**: build bundle bằng `bundle-macos.sh`, đặt `DARKSHOT_PROFILE_DIR` về một thư mục tạm riêng (cách ly: không đụng cấu hình thật), chạy `open -n` bản dựng, in hướng dẫn thử và cách dọn.
+10. **Keychain theo hồ sơ (quyết định 138, từ rà soát Task 103)**: `KeychainStore::new()` hiện luôn dùng service `darkshot`, bỏ qua `DARKSHOT_PROFILE_DIR`; chạy demo cách ly rồi lưu khóa thử sẽ GHI ĐÈ khóa R2 thật. Thêm `KeychainStore::for_profile(profile: Option<&Path>)`: không có hồ sơ cách ly thì service `darkshot`; có thì service `darkshot-sandbox-<băm FNV-1a 64 bit của đường dẫn, chữ thường>` (hàm băm thuần, có test; cùng đường dẫn cho cùng service, đường dẫn khác cho service khác, không bao giờ trùng `darkshot`). Dùng `for_profile(paths::profile_override().as_deref())` ở mục 11 bên dưới và ở mọi nơi tạo `KeychainStore` trong ứng dụng. `scripts/demo-macos.sh` khi dọn phải xóa mục Keychain của hồ sơ cách ly đó (`security delete-generic-password -s <service> -a r2-secret-access-key`) và in lệnh này; không bao giờ xóa mục `darkshot` thật.
+11. **Nối cấu hình**: `darkshot_core::config::load(&paths::config_path(), &KeychainStore::for_profile(paths::profile_override().as_deref()), &paths::default_save_dir(), os_lang)` với `os_lang` từ `lang.rs` (chữ ký 4 tham số, xem `config.rs`); xử lý `Loaded` như `windows_main` (thiếu R2 → thông báo; chưa có cửa sổ Tùy chọn nên chỉ thông báo, không mở gì).
+12. **Đường chụp tạm (xóa ở Task 105)**: sau khi chụp, lấy màn hình chứa con trỏ, chạy `actions::run_action(ctx, Action::Save, &image)` trên luồng nền rồi báo kết quả bằng thông báo. `Ctx.clipboard` dùng `PasteboardClipboard` (Task 103), `Ctx.uploader` = `None`.
+13. **`scripts/demo-macos.sh`**: build bundle bằng `bundle-macos.sh`, đặt `DARKSHOT_PROFILE_DIR` về một thư mục tạm riêng (cách ly: không đụng cấu hình thật), chạy `open -n` bản dựng, in hướng dẫn thử và cách dọn.
 
 ## Chuỗi i18n mới (đủ Việt / English)
 
@@ -44,7 +45,7 @@ Do builder đề xuất tên `Msg` và nội dung, tối thiểu: tiêu đề v�
 
 ## Kiểm thử (viết trước)
 
-- Thuần (chạy tự động): `implemented`, `lang_from_locale`, chuyển `CGImage`→BGRA trên bộ đệm byte tổng hợp, ánh xạ `MenuCommand` → `Msg`, dựng nội dung `Info.plist` nếu viết bằng hàm (hoặc kiểm bằng `plutil -lint` trong script), `DisplayShot` từ khung màn hình (dùng `coords`).
+- Thuần (chạy tự động): `for_profile`/băm service (cùng đường dẫn → cùng service; khác đường dẫn → khác; `None` → `darkshot`; không bao giờ trùng `darkshot` khi có hồ sơ), `implemented`, `lang_from_locale`, chuyển `CGImage`→BGRA trên bộ đệm byte tổng hợp, ánh xạ `MenuCommand` → `Msg`, dựng nội dung `Info.plist` nếu viết bằng hàm (hoặc kiểm bằng `plutil -lint` trong script), `DisplayShot` từ khung màn hình (dùng `coords`).
 - `#[ignore]` chạy tay: chụp thật từng màn hình (kích thước ảnh = `frame_pt × scale`), kiểm quyền.
 - `scripts/check.sh` phải qua; `bash -n scripts/bundle-macos.sh scripts/demo-macos.sh`; script có `set -eu` và không in danh tính ký.
 
@@ -56,6 +57,7 @@ Do builder đề xuất tên `Msg` và nội dung, tối thiểu: tiêu đề v�
 4. Ảnh lưu có kích thước pixel đúng màn hình (Retina: gấp đôi điểm); con trỏ có/không theo cấu hình mặc định.
 5. Build lại cùng chứng chỉ ký **không** làm hỏi lại quyền; build ad-hoc thì có cảnh báo của script (đã ghi trong tài liệu).
 6. Khởi động lần thứ hai khi đang chạy: không mở bản thứ hai. Thoát từ menu sạch (không treo).
+7. Keychain: build lại bằng cùng chứng chỉ rồi mở, xem có hỏi lại quyền không. Thử bấm **Từ chối** để thấy luồng "mất khóa" hiện ra mà ứng dụng không crash. Chạy demo cách ly, nhập khóa thử và lưu (khi đã có cửa sổ Tùy chọn ở M4b), rồi xác nhận khóa R2 thật (service `darkshot`) KHÔNG đổi và mục `darkshot-sandbox-…` bị dọn khi kết thúc demo.
 
 ## Review Focus
 
@@ -63,7 +65,7 @@ Do builder đề xuất tên `Msg` và nội dung, tối thiểu: tiêu đề v�
 2. Quyền: không chụp ảnh rỗng, thông báo đủ hai ngôn ngữ, không gọi `CGRequestScreenCaptureAccess` lặp lại gây phiền.
 3. `DisplayShot` đúng kích thước và hệ tọa độ; BGRA đúng kênh; con trỏ theo cấu hình.
 4. `bundle-macos.sh`: không rò danh tính hay chứng chỉ, không `rm -rf` ngoài `target/macos`, `plist` hợp lệ, ký đúng.
-5. Khóa R2 chỉ qua Keychain; không lọt vào log hay thông báo.
+5. Khóa R2 chỉ qua Keychain; không lọt vào log hay thông báo; hồ sơ cách ly KHÔNG bao giờ dùng service `darkshot` thật (mục 10).
 6. Job `windows` vẫn xanh (crate Mac ở dạng khung); không dùng `cfg(windows)` trong core.
 
 ## Global Constraints
