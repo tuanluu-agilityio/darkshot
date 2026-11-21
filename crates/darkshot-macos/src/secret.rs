@@ -30,14 +30,24 @@ pub trait KeyBackend: Send + Sync {
 
 /// Ghi `plain` vào `backend` rồi trả dấu `keychain:v1` (không bao giờ chứa khóa).
 pub fn protect_with(backend: &dyn KeyBackend, plain: &[u8]) -> Result<Vec<u8>, String> {
-    let _ = (backend, plain);
-    todo!()
+    if plain.is_empty() {
+        return Err("refusing to store an empty secret".into());
+    }
+    backend.set(plain)?;
+    Ok(MARKER.to_vec())
 }
 
 /// Kiểm dấu `keychain:v1` rồi đọc khóa từ `backend`.
 pub fn unprotect_with(backend: &dyn KeyBackend, cipher: &[u8]) -> Result<Vec<u8>, String> {
-    let _ = (backend, cipher);
-    todo!()
+    // Không lặp lại `cipher` trong lỗi: dữ liệu lạ có thể là khóa rõ dán nhầm.
+    if cipher != MARKER {
+        return Err("stored secret is not a keychain reference".into());
+    }
+    let secret = backend.get()?;
+    if secret.is_empty() {
+        return Err("keychain item is empty".into());
+    }
+    Ok(secret)
 }
 
 /// `SecretStore` dựa trên Keychain. `Debug` chỉ in service và tài khoản, không có khóa.

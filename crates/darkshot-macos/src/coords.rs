@@ -14,27 +14,63 @@ pub struct RectF {
 
 /// Khung màn hình Cocoa (gốc dưới trái) sang toạ độ toàn cục gốc trên trái, đơn vị điểm.
 pub fn cocoa_to_top_left(frame: RectF, primary_height: f64) -> RectF {
-    let _ = (frame, primary_height);
-    todo!()
+    // Cạnh trên của khung trong Cocoa là `y + h`; trục Y lật quanh cạnh trên màn hình chính.
+    RectF {
+        x: frame.x,
+        y: primary_height - (frame.y + frame.h),
+        w: frame.w,
+        h: frame.h,
+    }
 }
 
 /// Điểm trong view (đơn vị điểm, gốc trên trái của màn hình đó) sang pixel của ảnh màn hình đó.
 pub fn pt_to_px(v: f64, scale: f64) -> i32 {
-    let _ = (v, scale);
-    todo!()
+    // `as` bão hòa ở biên i32 và đổi NaN thành 0, không panic.
+    (v * valid_scale(scale)).round() as i32
 }
 
 /// Vùng chọn (điểm) sang vùng pixel của ảnh `img_w`×`img_h`: gốc làm tròn xuống, cạnh xa làm
 /// tròn lên, kẹp vào ảnh; rỗng thì `None`.
 pub fn selection_to_pixels(sel: RectF, scale: f64, img_w: i32, img_h: i32) -> Option<Rect> {
-    let _ = (sel, scale, img_w, img_h);
-    todo!()
+    let finite = [sel.x, sel.y, sel.w, sel.h, scale]
+        .iter()
+        .all(|v| v.is_finite());
+    if !finite || scale <= 0.0 || sel.w <= 0.0 || sel.h <= 0.0 || img_w <= 0 || img_h <= 0 {
+        return None;
+    }
+    // Sai số dấu phẩy động (ví dụ 7.000000000000001) không được thêm hay bớt một pixel.
+    // `as i64` bão hòa nên giá trị rất lớn vẫn an toàn trước khi kẹp.
+    let lo = |v: f64, max: i32| ((v * scale + EDGE_EPS).floor() as i64).clamp(0, i64::from(max));
+    let hi = |v: f64, max: i32| ((v * scale - EDGE_EPS).ceil() as i64).clamp(0, i64::from(max));
+    let (x0, x1) = (lo(sel.x, img_w), hi(sel.x + sel.w, img_w));
+    let (y0, y1) = (lo(sel.y, img_h), hi(sel.y + sel.h, img_h));
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    // Mọi giá trị đã kẹp trong [0, img_w] hoặc [0, img_h] nên vừa i32.
+    Some(Rect {
+        x: x0 as i32,
+        y: y0 as i32,
+        w: (x1 - x0) as i32,
+        h: (y1 - y0) as i32,
+    })
 }
 
 /// Pixel sang điểm.
 pub fn px_to_pt(v: i32, scale: f64) -> f64 {
-    let _ = (v, scale);
-    todo!()
+    f64::from(v) / valid_scale(scale)
+}
+
+/// Dung sai khi làm tròn biên vùng chọn (pixel).
+const EDGE_EPS: f64 = 1e-6;
+
+/// Hệ số hợp lệ (dương, hữu hạn); ngược lại coi như 1x.
+fn valid_scale(scale: f64) -> f64 {
+    if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    }
 }
 
 #[cfg(test)]

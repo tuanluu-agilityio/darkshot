@@ -10,8 +10,9 @@ use std::path::{Path, PathBuf};
 
 /// Thư mục nhà từ giá trị `HOME`: rỗng, thiếu hoặc không tuyệt đối thì dùng thư mục tạm.
 pub fn home_from(v: Option<OsString>) -> PathBuf {
-    let _ = v;
-    todo!()
+    v.map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .unwrap_or_else(std::env::temp_dir)
 }
 
 /// Thư mục nhà của người dùng hiện tại (theo `HOME`).
@@ -22,8 +23,14 @@ pub fn home_dir() -> PathBuf {
 /// Đường dẫn của một thư mục hệ thống với thư mục nhà cho trước: có thư mục cách ly thì
 /// `<dir>/Roaming|Local|Pictures` (không tạo thư mục).
 pub fn resolve_with(override_dir: Option<&Path>, known: Known, home: &Path) -> PathBuf {
-    let _ = (override_dir, known, home, dirs::sandboxed);
-    todo!()
+    if let Some(p) = dirs::sandboxed(override_dir, known) {
+        return p;
+    }
+    match known {
+        // macOS không tách dữ liệu "roaming" và "local": cả hai ở Application Support.
+        Known::Roaming | Known::Local => home.join("Library").join("Application Support"),
+        Known::Pictures => home.join("Pictures"),
+    }
 }
 
 /// Như `resolve_with`, với thư mục nhà thật.

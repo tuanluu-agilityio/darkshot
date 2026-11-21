@@ -22,13 +22,50 @@ pub fn from_tm_fields(
     min: i32,
     sec: i32,
 ) -> LocalTime {
-    let _ = (year_since_1900, month0, mday, hour, min, sec);
-    todo!()
+    let year = year_since_1900
+        .checked_add(1900)
+        .and_then(|y| u16::try_from(y).ok());
+    let month = month0.checked_add(1).filter(|m| (1..=12).contains(m));
+    let fits = |v: i32, lo: i32, hi: i32| (lo..=hi).contains(&v).then_some(v as u8);
+    match (
+        year,
+        month,
+        fits(mday, 1, 31),
+        fits(hour, 0, 23),
+        fits(min, 0, 59),
+        fits(sec, 0, 60),
+    ) {
+        (Some(year), Some(month), Some(day), Some(hour), Some(minute), Some(second)) => LocalTime {
+            year,
+            month: month as u8,
+            day,
+            hour,
+            minute,
+            // Giây nhuận (60) kẹp về 59 để tên tệp luôn hợp lệ.
+            second: second.min(59),
+        },
+        _ => EPOCH,
+    }
 }
 
 /// Giờ địa phương hiện tại.
 pub fn local_now() -> LocalTime {
-    todo!()
+    // SAFETY: `time` với con trỏ rỗng chỉ trả về giá trị, không ghi gì.
+    let now = unsafe { libc::time(std::ptr::null_mut()) };
+    if now == -1 {
+        return EPOCH;
+    }
+    // SAFETY: `libc::tm` là struct C thuần (số nguyên và một con trỏ), toàn số 0 là hợp lệ.
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    // SAFETY: `localtime_r` (bản an toàn luồng) chỉ đọc `now` và ghi vào `tm` do ta sở hữu,
+    // cả hai sống suốt lời gọi; trả NULL khi thất bại.
+    let r = unsafe { libc::localtime_r(&now, &mut tm) };
+    if r.is_null() {
+        return EPOCH;
+    }
+    from_tm_fields(
+        tm.tm_year, tm.tm_mon, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec,
+    )
 }
 
 #[cfg(test)]
