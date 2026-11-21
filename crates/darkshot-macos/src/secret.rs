@@ -93,6 +93,8 @@ impl KeychainStore {
     }
 
     /// Service của mục Keychain.
+    // Dùng trong kiểm thử; cửa sổ Tùy chọn (M4b) sẽ dùng để báo nơi lưu khóa.
+    #[allow(dead_code)]
     pub fn service(&self) -> &str {
         &self.service
     }
@@ -106,6 +108,8 @@ impl KeychainStore {
     }
 
     /// Xóa mục Keychain; không có mục thì coi như đã xóa.
+    // Dùng ở kiểm thử chạy tay; cửa sổ Tùy chọn (M4b) sẽ dùng khi xóa khóa.
+    #[allow(dead_code)]
     pub fn delete(&self) -> Result<(), String> {
         match delete_generic_password(&self.service, self.account) {
             Ok(()) => Ok(()),
