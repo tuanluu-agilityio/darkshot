@@ -176,7 +176,7 @@ pub fn hit_shape(shape: &Shape, bounds: Rect, p: Pt, tol: f32) -> bool {
         Shape::Ellipse { a, b, width, .. } => ellipse_edge_hit(*a, *b, *width, p, tol),
         Shape::Box { a, b, oval, style } => {
             let filled = style.fill.is_some() && style.opacity > 0.0;
-            let w = style.stroke_width.max(0.0);
+            let w = style.border_width();
             if *oval {
                 (filled && inside_ellipse(*a, *b, p)) || ellipse_edge_hit(*a, *b, w, p, tol)
             } else {
@@ -410,17 +410,18 @@ fn corner_pair(h: Handle, bx: (f32, f32, f32, f32)) -> Option<(Pt, Pt)> {
 }
 
 fn transform_points(g: &Gesture, h: Handle, to: Pt, shift: bool, min_extent: f32) -> Shape {
-    let (points, width, color, is_pen) = match &g.original {
+    let (points, width, color, marker_opacity) = match &g.original {
         Shape::Pen {
             points,
             width,
             color,
-        } => (points, *width, *color, true),
+        } => (points, *width, *color, None),
         Shape::Marker {
             points,
             width,
             color,
-        } => (points, *width, *color, false),
+            opacity,
+        } => (points, *width, *color, Some(*opacity)),
         _ => return g.original.clone(),
     };
     let Some(bx) = points_box(points) else {
@@ -458,18 +459,18 @@ fn transform_points(g: &Gesture, h: Handle, to: Pt, shift: bool, min_extent: f32
             y: anchor.y + (q.y - anchor.y) * sy,
         })
         .collect();
-    if is_pen {
-        Shape::Pen {
+    match marker_opacity {
+        None => Shape::Pen {
             points: pts,
             width,
             color,
-        }
-    } else {
-        Shape::Marker {
+        },
+        Some(opacity) => Shape::Marker {
             points: pts,
             width,
             color,
-        }
+            opacity,
+        },
     }
 }
 
@@ -611,10 +612,12 @@ fn transform_move(g: &Gesture, to: Pt, img: &Image) -> Shape {
             points,
             width,
             color,
+            opacity,
         } => Shape::Marker {
             points: points.iter().map(mv).collect(),
             width: *width,
             color: *color,
+            opacity: *opacity,
         },
         Shape::Line { a, b, width, color } => Shape::Line {
             a: mv(a),
@@ -811,10 +814,16 @@ pub fn highlight_restyle(
     let mut s = shape.clone();
     match &mut s {
         Shape::Marker {
-            width, color: c, ..
+            width,
+            color: c,
+            opacity: o,
+            ..
         } => {
             if let Some(w) = width_px.filter(|w| w.is_finite() && *w > 0.0) {
                 *width = w;
+            }
+            if let Some(v) = opacity.filter(|v| !v.is_nan()) {
+                *o = v.clamp(0.0, 1.0);
             }
             if let Some(n) = color {
                 *c = n;
@@ -916,6 +925,7 @@ mod tests {
             points: vec![p(10.0, 10.0)],
             width: 16.0,
             color: RED,
+            opacity: crate::annotate::HIGHLIGHT_OPACITY,
         };
         assert!(hit_shape(&marker, Z, p(15.0, 10.0), 4.0));
         assert!(!hit_shape(&marker, Z, p(40.0, 10.0), 4.0));
@@ -1046,6 +1056,7 @@ mod tests {
             points: vec![p(0.0, 0.0), p(9.0, 5.0)],
             width: 3.0,
             color: RED,
+            opacity: crate::annotate::HIGHLIGHT_OPACITY,
         };
         assert_eq!(handles(&mk, Z).len(), 4);
         let t = Shape::Text {
@@ -1158,11 +1169,13 @@ mod tests {
             points: vec![p(1.0, 1.0)],
             width: 16.0,
             color: BLUE,
+            opacity: crate::annotate::HIGHLIGHT_OPACITY,
         };
         let mk2 = Shape::Marker {
             points: vec![p(8.0, -2.0)],
             width: 16.0,
             color: BLUE,
+            opacity: crate::annotate::HIGHLIGHT_OPACITY,
         };
         let el = Shape::Ellipse {
             a: p(1.0, 1.0),
@@ -1385,6 +1398,7 @@ mod tests {
             points: vec![p(0.0, 0.0)],
             width: 16.0,
             color: RED,
+            opacity: crate::annotate::HIGHLIGHT_OPACITY,
         };
         match restyle(&mk, Some(SizeLevel::Small), Some(BLUE), 96) {
             Shape::Marker { width, color, .. } => assert!(near(width, 10.0) && color == BLUE),
@@ -1610,13 +1624,15 @@ mod tests {
             points: vec![p(1.0, 1.0), p(9.0, 9.0)],
             width: 10.0,
             color: RED,
+            opacity: crate::annotate::HIGHLIGHT_OPACITY,
         };
         match highlight_restyle(&mk, Some(24.0), Some(0.9), Some(BLUE)) {
             Shape::Marker {
                 points,
                 width,
                 color,
-            } => assert_eq!((points.len(), width, color), (2, 24.0, BLUE)),
+                opacity,
+            } => assert_eq!((points.len(), width, color, opacity), (2, 24.0, BLUE, 0.9)),
             other => panic!("{other:?}"),
         }
         // Hình khác giữ nguyên.
@@ -1710,6 +1726,69 @@ mod tests {
                 assert_eq!((size, color), (14.0, BLUE));
                 assert_eq!(style.stroke, RED);
             }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    // ---- Task 114
+
+    #[test]
+    fn hidden_border_is_not_hit_but_the_fill_still_is() {
+        let mk = |no_border, fill| Shape::Box {
+            a: p(10.0, 10.0),
+            b: p(60.0, 40.0),
+            oval: false,
+            style: crate::annotate::Style {
+                fill,
+                no_border,
+                ..crate::annotate::Style::new(RED, 10.0)
+            },
+        };
+        let edge = p(10.0, 25.0);
+        // Có viền, không nền: trúng cạnh. Ẩn viền: cạnh không còn (ngoài dung sai).
+        assert!(hit_shape(&mk(false, None), Z, edge, 1.0));
+        assert!(!hit_shape(&mk(true, None), Z, p(6.0, 25.0), 1.0));
+        // Nền vẫn trúng bên trong.
+        assert!(hit_shape(&mk(true, Some(BLUE)), Z, p(35.0, 25.0), 1.0));
+    }
+
+    #[test]
+    fn marker_opacity_is_kept_by_move_and_scale_and_changed_by_highlight_restyle() {
+        let mk = Shape::Marker {
+            points: vec![p(10.0, 10.0), p(40.0, 30.0)],
+            width: 8.0,
+            color: RED,
+            opacity: 0.7,
+        };
+        let g = Gesture {
+            index: 0,
+            grip: Grip::Move,
+            start: p(0.0, 0.0),
+            original: mk.clone(),
+            original_bounds: Z,
+        };
+        match transform(&g, p(5.0, 5.0), false, 6.0, &img()) {
+            Shape::Marker { opacity, .. } => assert_eq!(opacity, 0.7),
+            other => panic!("{other:?}"),
+        }
+        let g = Gesture {
+            grip: Grip::Box(Handle::SE),
+            ..g
+        };
+        match transform(&g, p(80.0, 60.0), false, 6.0, &img()) {
+            Shape::Marker { opacity, .. } => assert_eq!(opacity, 0.7),
+            other => panic!("{other:?}"),
+        }
+        // Đổi độ trong suốt: kẹp 0..=1, NaN giữ nguyên.
+        for (want, v) in [(0.2, 0.2), (1.0, 7.0), (0.0, -2.0), (0.7, f32::NAN)] {
+            match highlight_restyle(&mk, None, Some(v), None) {
+                Shape::Marker { opacity, .. } => assert_eq!(opacity, want, "{v}"),
+                other => panic!("{other:?}"),
+            }
+        }
+        // Đổi cỡ qua `restyle` không đụng độ trong suốt.
+        match restyle(&mk, Some(SizeLevel::Huge), Some(BLUE), 96) {
+            Shape::Marker { opacity, .. } => assert_eq!(opacity, 0.7),
             other => panic!("{other:?}"),
         }
     }

@@ -515,6 +515,7 @@ impl Model {
                 return;
             };
             let env = lay.env(img);
+            self.annot.register_click(p, now);
             match self.annot.down(&env, p, hit) {
                 Down::Bar(item) => {
                     self.pressed = Some(item);

@@ -10,23 +10,36 @@ use darkshot_core::annotate::{
     dip_to_px, Align, HighlightMode, Style, DEFAULT_COLOR, PALETTE, STROKE_DIP,
 };
 use darkshot_core::geometry::{Point, Rect};
-use darkshot_core::overlay_layout::scaled;
+use darkshot_core::overlay_layout::{clamp_into, intersect, scaled, side_on_right, GAP};
 use darkshot_core::theme::Rgb;
 
 /// Bảng đang sửa loại hình nào.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StyleKind {
-    /// Hình chữ nhật hoặc elip: nền, độ dày viền, độ trong suốt; màu viền là màu của nút Màu.
+    /// Hình chữ nhật: nền, viền (hoặc không viền), bo góc, độ trong suốt; màu viền là màu của nút
+    /// Màu.
     Box,
+    /// Elip: như `Box` nhưng không có bo góc (Task 114).
+    Oval,
     /// Chữ: nền, màu viền, độ dày viền, độ trong suốt, căn lề; màu chữ là màu của nút Màu.
     Label,
-    /// Highlight chế độ tự do (nét Bút dạ quang): màu, độ to nhỏ nét (Task 113).
+    /// Highlight chế độ tự do (nét Bút dạ quang): màu, độ to nhỏ nét, độ trong suốt (Task 113, 114).
     MarkerFree,
     /// Highlight chế độ hình chữ nhật: màu, độ trong suốt, không viền (Task 113).
     MarkerRect,
 }
 
 impl StyleKind {
+    /// Có hàng Bo góc (Hình chữ nhật và Chữ).
+    pub fn has_radius(self) -> bool {
+        matches!(self, StyleKind::Box | StyleKind::Label)
+    }
+
+    /// Có ô tích Không viền (Hình và Chữ).
+    pub fn has_border(self) -> bool {
+        !self.is_highlight()
+    }
+
     /// Bảng Highlight (có hàng chọn chế độ thay hàng Nền/Viền).
     pub fn is_highlight(self) -> bool {
         matches!(self, StyleKind::MarkerFree | StyleKind::MarkerRect)
@@ -53,6 +66,14 @@ pub enum StyleCell {
     Width(i32),
     Opacity(i32),
     Align(Align),
+    /// Ô tích Không viền (Task 114).
+    NoBorder,
+    /// Bo góc: -1 giảm, +1 tăng (px ảnh).
+    Radius(i32),
+    /// Nút thu gọn/mở bảng ở thanh tiêu đề.
+    Collapse,
+    /// Thanh tiêu đề: nhấn giữ để kéo bảng.
+    Header,
 }
 
 /// Một thay đổi kiểu từ bảng.
@@ -64,7 +85,14 @@ pub enum StyleEdit {
     /// 0..=1.
     Opacity(f32),
     Align(Align),
+    NoBorder(bool),
+    /// Bo góc (px ảnh).
+    RadiusPx(f32),
 }
+
+/// Bo góc lớn nhất bảng cho chọn (px ảnh); bước 2 px. Khi vẽ còn kẹp theo nửa cạnh ngắn của hộp.
+pub const RADIUS_MAX_PX: f32 = 100.0;
+pub const RADIUS_STEP_PX: f32 = 2.0;
 
 /// Độ dày viền nhỏ nhất và lớn nhất (dip) bảng cho chọn; bước 1 dip.
 pub const WIDTH_MIN_DIP: f32 = 0.0;
@@ -83,6 +111,10 @@ pub struct StylePrefs {
     pub stroke: Rgb,
     pub width_dip: f32,
     pub opacity: f32,
+    /// Không viền (giữ `width_dip` và màu để khi tắt viền trở lại như cũ).
+    pub no_border: bool,
+    /// Bo góc (px ảnh, không theo DPI).
+    pub radius_px: f32,
 }
 
 /// Hình chữ nhật, elip: không nền, đặc, viền như mức cỡ Vừa.
@@ -91,6 +123,8 @@ pub const BOX_DEFAULT: StylePrefs = StylePrefs {
     stroke: DEFAULT_COLOR,
     width_dip: STROKE_DIP,
     opacity: 1.0,
+    no_border: false,
+    radius_px: 0.0,
 };
 
 /// Chữ: không nền, không viền, đặc (như chữ trước đây).
@@ -99,6 +133,8 @@ pub const LABEL_DEFAULT: StylePrefs = StylePrefs {
     stroke: DEFAULT_COLOR,
     width_dip: 0.0,
     opacity: 1.0,
+    no_border: false,
+    radius_px: 0.0,
 };
 
 impl StylePrefs {
@@ -109,6 +145,8 @@ impl StylePrefs {
             stroke,
             stroke_width: dip_to_px(self.width_dip, dpi),
             opacity: self.opacity,
+            radius: clamp_radius_px(self.radius_px),
+            no_border: self.no_border,
         }
         .sanitized()
     }
@@ -121,7 +159,41 @@ impl StylePrefs {
             StyleEdit::WidthDip(w) => self.width_dip = clamp_width(w),
             StyleEdit::Opacity(o) => self.opacity = clamp_opacity(o),
             StyleEdit::Align(_) => {}
+            StyleEdit::NoBorder(b) => self.no_border = b,
+            StyleEdit::RadiusPx(r) => self.radius_px = clamp_radius_px(r),
         }
+    }
+}
+
+/// Bo góc (px) kẹp vào 0..=[`RADIUS_MAX_PX`]; không phải số thì 0.
+pub fn clamp_radius_px(r: f32) -> f32 {
+    if r.is_nan() {
+        0.0
+    } else {
+        r.clamp(0.0, RADIUS_MAX_PX)
+    }
+}
+
+/// Bước bo góc: `dir` = -1 hoặc +1, mỗi bước [`RADIUS_STEP_PX`] px, kẹp.
+pub fn step_radius(px: f32, dir: i32) -> f32 {
+    clamp_radius_px(px.round() + RADIUS_STEP_PX * dir as f32)
+}
+
+/// Trạng thái ba ô Nền, Viền, Không nền của bảng (Task 114): `Không nền` bật đúng khi chưa có màu
+/// nền, `Nền` bật đúng khi có màu nền, nên đúng MỘT trong hai bật (với mọi ô màu đang áp); `Viền`
+/// bật thêm khi ô màu đang áp cho viền.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChipFocus {
+    pub fill: bool,
+    pub border: bool,
+    pub no_fill: bool,
+}
+
+pub fn chip_focus(target: StyleTarget, fill: Option<Rgb>) -> ChipFocus {
+    ChipFocus {
+        fill: fill.is_some(),
+        border: target == StyleTarget::Border,
+        no_fill: fill.is_none(),
     }
 }
 
@@ -185,6 +257,9 @@ pub struct StyleView {
     pub align: Option<Align>,
     /// Chế độ Highlight sẽ dùng cho lần vẽ tiếp (chỉ bảng Highlight).
     pub mode: Option<HighlightMode>,
+    pub no_border: bool,
+    /// Bo góc (px ảnh).
+    pub radius_px: f32,
 }
 
 // ---------------------------------------------------------------- bố cục (đơn vị 96 DPI)
@@ -199,11 +274,26 @@ const ROW_GAP: i32 = 6;
 const SECTION_GAP: i32 = 8;
 const BTN: i32 = 24;
 const VALUE_W: i32 = 44;
+/// Thanh tiêu đề (kéo bảng, nút thu gọn).
+const HEAD_H: i32 = 20;
+const HEAD_BTN: i32 = 20;
 
-/// Bố cục các ô của bảng đặt ở `panel`.
+const NONE: Rect = Rect {
+    x: 0,
+    y: 0,
+    w: 0,
+    h: 0,
+};
+
+/// Bố cục các ô của bảng đặt ở `panel`. Ô nào bảng không có (hoặc đang thu gọn) là `Rect` rộng 0.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StyleLayout {
     pub panel: Rect,
+    /// Thanh tiêu đề: kéo để dời bảng.
+    pub header: Rect,
+    /// Nút thu gọn/mở nằm trong thanh tiêu đề.
+    pub collapse: Rect,
+    pub collapsed: bool,
     pub fill_chip: Rect,
     pub border_chip: Rect,
     pub no_fill: Rect,
@@ -215,6 +305,13 @@ pub struct StyleLayout {
     pub width_minus: Rect,
     pub width_value: Rect,
     pub width_plus: Rect,
+    /// Ô tích Không viền (Hình, Chữ).
+    pub no_border: Rect,
+    /// Hàng Bo góc (Hình chữ nhật, Chữ).
+    pub radius_label: Rect,
+    pub radius_minus: Rect,
+    pub radius_value: Rect,
+    pub radius_plus: Rect,
     pub opacity_label: Rect,
     pub opacity_minus: Rect,
     pub opacity_value: Rect,
@@ -223,28 +320,68 @@ pub struct StyleLayout {
     pub aligns: Option<[Rect; 3]>,
 }
 
-/// Kích thước (rộng, cao) của bảng ở `dpi`.
-pub fn panel_size(kind: StyleKind, dpi: u32) -> (i32, i32) {
-    let w = 2 * PAD + COLS * CELL + (COLS - 1) * CELL_GAP;
-    let mut h = PAD + ROW_H + SECTION_GAP + ROWS * CELL + (ROWS - 1) * CELL_GAP;
-    h += SECTION_GAP + ROW_H + ROW_GAP + ROW_H;
+/// Chiều cao (96 DPI) của bảng `kind` khi mở rộng hoặc `collapsed` (chỉ thanh tiêu đề).
+fn panel_h(kind: StyleKind, collapsed: bool) -> i32 {
+    if collapsed {
+        return HEAD_H;
+    }
+    let mut h = HEAD_H + SECTION_GAP;
+    h += ROW_H + SECTION_GAP + ROWS * CELL + (ROWS - 1) * CELL_GAP;
+    h += SECTION_GAP;
+    // Độ dày viền (hoặc độ to nét), rồi độ trong suốt.
+    h += ROW_H + ROW_GAP + ROW_H;
+    if kind.has_border() {
+        h += ROW_GAP + ROW_H;
+    }
+    if kind.has_radius() {
+        h += ROW_GAP + ROW_H;
+    }
     if kind == StyleKind::Label {
         h += ROW_GAP + ROW_H;
     }
-    h += PAD;
-    (scaled(w, dpi), scaled(h, dpi))
+    h + PAD
+}
+
+fn panel_w() -> i32 {
+    2 * PAD + COLS * CELL + (COLS - 1) * CELL_GAP
+}
+
+/// Kích thước (rộng, cao) của bảng mở rộng ở `dpi`.
+#[cfg(test)]
+pub fn panel_size(kind: StyleKind, dpi: u32) -> (i32, i32) {
+    panel_size_ex(kind, false, dpi)
+}
+
+/// Kích thước của bảng, thu gọn (chỉ thanh tiêu đề) hoặc mở rộng.
+pub fn panel_size_ex(kind: StyleKind, collapsed: bool, dpi: u32) -> (i32, i32) {
+    (
+        scaled(panel_w(), dpi),
+        scaled(panel_h(kind, collapsed), dpi),
+    )
+}
+
+/// Như `scaled` nhưng 0 vẫn là 0 (`scaled` không trả dưới 1).
+fn sc(v: i32, dpi: u32) -> i32 {
+    if v == 0 {
+        0
+    } else {
+        scaled(v, dpi)
+    }
 }
 
 fn rect(x: i32, y: i32, w: i32, h: i32, dpi: u32) -> Rect {
     Rect {
-        x: scaled(x, dpi),
-        y: scaled(y, dpi),
-        w: scaled(w, dpi),
-        h: scaled(h, dpi),
+        x: sc(x, dpi),
+        y: sc(y, dpi),
+        w: sc(w, dpi),
+        h: sc(h, dpi),
     }
 }
 
 fn shift(r: Rect, o: Rect) -> Rect {
+    if r.w == 0 && r.h == 0 {
+        return NONE;
+    }
     Rect {
         x: r.x + o.x,
         y: r.y + o.y,
@@ -252,81 +389,120 @@ fn shift(r: Rect, o: Rect) -> Rect {
     }
 }
 
-/// Bố cục của bảng `kind` có góc trên trái ở `panel` (cỡ `panel_size`).
+/// Bố cục của bảng `kind` mở rộng có góc trên trái ở `panel` (cỡ `panel_size`).
+#[cfg(test)]
 pub fn layout(panel: Rect, kind: StyleKind, dpi: u32) -> StyleLayout {
+    layout_ex(panel, kind, false, dpi)
+}
+
+/// Bố cục của bảng `kind`; `collapsed` thì chỉ có thanh tiêu đề và nút thu gọn.
+pub fn layout_ex(panel: Rect, kind: StyleKind, collapsed: bool, dpi: u32) -> StyleLayout {
     let inner = COLS * CELL + (COLS - 1) * CELL_GAP;
+    let at = |r: Rect| shift(r, panel);
+    let header = rect(0, 0, panel_w(), HEAD_H, dpi);
+    let collapse = rect(panel_w() - HEAD_BTN, 0, HEAD_BTN, HEAD_H, dpi);
+    let mut l = StyleLayout {
+        panel,
+        header: at(header),
+        collapse: at(collapse),
+        collapsed,
+        fill_chip: NONE,
+        border_chip: NONE,
+        no_fill: NONE,
+        modes: None,
+        kind,
+        cells: Vec::new(),
+        width_label: NONE,
+        width_minus: NONE,
+        width_value: NONE,
+        width_plus: NONE,
+        no_border: NONE,
+        radius_label: NONE,
+        radius_minus: NONE,
+        radius_value: NONE,
+        radius_plus: NONE,
+        opacity_label: NONE,
+        opacity_minus: NONE,
+        opacity_value: NONE,
+        opacity_plus: NONE,
+        aligns: None,
+    };
+    if collapsed {
+        return l;
+    }
+    let mut y = HEAD_H + SECTION_GAP;
     let chip_w = (inner - 2 * 4) / 3;
-    let mut y = PAD;
-    let chip = |i: i32| rect(PAD + i * (chip_w + 4), y, chip_w, ROW_H, dpi);
-    let (mut fill_chip, mut border_chip, mut no_fill) = (chip(0), chip(1), chip(2));
-    let mode_w = (inner - 4) / 2;
-    let modes = kind
-        .is_highlight()
-        .then(|| [0, 1].map(|i| rect(PAD + i * (mode_w + 4), y, mode_w, ROW_H, dpi)));
-    if modes.is_some() {
-        let none = Rect {
-            x: 0,
-            y: 0,
-            w: 0,
-            h: 0,
-        };
-        (fill_chip, border_chip, no_fill) = (none, none, none);
+    if kind.is_highlight() {
+        let mode_w = (inner - 4) / 2;
+        l.modes = Some([0, 1].map(|i| at(rect(PAD + i * (mode_w + 4), y, mode_w, ROW_H, dpi))));
+    } else {
+        let chip = |i: i32| at(rect(PAD + i * (chip_w + 4), y, chip_w, ROW_H, dpi));
+        (l.fill_chip, l.border_chip, l.no_fill) = (chip(0), chip(1), chip(2));
     }
     y += ROW_H + SECTION_GAP;
-    let cells: Vec<Rect> = (0..PALETTE.len() as i32)
+    l.cells = (0..PALETTE.len() as i32)
         .map(|i| {
             let (c, r) = (i % COLS, i / COLS);
-            rect(
+            at(rect(
                 PAD + c * (CELL + CELL_GAP),
                 y + r * (CELL + CELL_GAP),
                 CELL,
                 CELL,
                 dpi,
-            )
+            ))
         })
         .collect();
     y += ROWS * CELL + (ROWS - 1) * CELL_GAP + SECTION_GAP;
     let label_w = inner - 2 * BTN - VALUE_W;
     let stepper = |y: i32| {
         (
-            rect(PAD, y, label_w, ROW_H, dpi),
-            rect(PAD + label_w, y, BTN, ROW_H, dpi),
-            rect(PAD + label_w + BTN, y, VALUE_W, ROW_H, dpi),
-            rect(PAD + label_w + BTN + VALUE_W, y, BTN, ROW_H, dpi),
+            at(rect(PAD, y, label_w, ROW_H, dpi)),
+            at(rect(PAD + label_w, y, BTN, ROW_H, dpi)),
+            at(rect(PAD + label_w + BTN, y, VALUE_W, ROW_H, dpi)),
+            at(rect(PAD + label_w + BTN + VALUE_W, y, BTN, ROW_H, dpi)),
         )
     };
-    let (width_label, width_minus, width_value, width_plus) = stepper(y);
+    (l.width_label, l.width_minus, l.width_value, l.width_plus) = stepper(y);
     y += ROW_H + ROW_GAP;
-    let (opacity_label, opacity_minus, opacity_value, opacity_plus) = stepper(y);
-    y += ROW_H + ROW_GAP;
-    let aligns = (kind == StyleKind::Label).then(|| {
-        let w = (inner - 2 * 4) / 3;
-        [0, 1, 2].map(|i| rect(PAD + i * (w + 4), y, w, ROW_H, dpi))
-    });
-    let at = |r: Rect| shift(r, panel);
-    StyleLayout {
-        panel,
-        fill_chip: at(fill_chip),
-        border_chip: at(border_chip),
-        no_fill: at(no_fill),
-        modes: modes.map(|m| m.map(at)),
-        kind,
-        cells: cells.into_iter().map(at).collect(),
-        width_label: at(width_label),
-        width_minus: at(width_minus),
-        width_value: at(width_value),
-        width_plus: at(width_plus),
-        opacity_label: at(opacity_label),
-        opacity_minus: at(opacity_minus),
-        opacity_value: at(opacity_value),
-        opacity_plus: at(opacity_plus),
-        aligns: aligns.map(|a| a.map(at)),
+    if kind.has_border() {
+        l.no_border = at(rect(PAD, y, inner, ROW_H, dpi));
+        y += ROW_H + ROW_GAP;
     }
+    if kind.has_radius() {
+        (
+            l.radius_label,
+            l.radius_minus,
+            l.radius_value,
+            l.radius_plus,
+        ) = stepper(y);
+        y += ROW_H + ROW_GAP;
+    }
+    (
+        l.opacity_label,
+        l.opacity_minus,
+        l.opacity_value,
+        l.opacity_plus,
+    ) = stepper(y);
+    y += ROW_H + ROW_GAP;
+    if kind == StyleKind::Label {
+        let w = (inner - 2 * 4) / 3;
+        l.aligns = Some([0, 1, 2].map(|i| at(rect(PAD + i * (w + 4), y, w, ROW_H, dpi))));
+    }
+    l
 }
 
 /// Ô dưới điểm `p`; lề, nhãn và giá trị trả `None`.
 pub fn cell_at(l: &StyleLayout, p: Point) -> Option<StyleCell> {
     if !l.panel.contains(p) {
+        return None;
+    }
+    if l.collapse.contains(p) {
+        return Some(StyleCell::Collapse);
+    }
+    if l.header.contains(p) {
+        return Some(StyleCell::Header);
+    }
+    if l.collapsed {
         return None;
     }
     if let Some(m) = &l.modes {
@@ -346,21 +522,27 @@ pub fn cell_at(l: &StyleLayout, p: Point) -> Option<StyleCell> {
     if let Some(i) = l.cells.iter().position(|c| c.contains(p)) {
         return Some(StyleCell::Color(i));
     }
-    // Bảng Highlight chỉ có một bộ nút tăng giảm, tùy chế độ.
-    let (use_width, use_opacity) = (
-        l.kind != StyleKind::MarkerRect,
-        l.kind != StyleKind::MarkerFree,
-    );
+    // Highlight hình chữ nhật không có độ dày nét.
+    let use_width = l.kind != StyleKind::MarkerRect;
     if use_width && l.width_minus.contains(p) {
         return Some(StyleCell::Width(-1));
     }
     if use_width && l.width_plus.contains(p) {
         return Some(StyleCell::Width(1));
     }
-    if use_opacity && l.opacity_minus.contains(p) {
+    if l.no_border.contains(p) {
+        return Some(StyleCell::NoBorder);
+    }
+    if l.radius_minus.contains(p) {
+        return Some(StyleCell::Radius(-1));
+    }
+    if l.radius_plus.contains(p) {
+        return Some(StyleCell::Radius(1));
+    }
+    if l.opacity_minus.contains(p) {
         return Some(StyleCell::Opacity(-1));
     }
-    if use_opacity && l.opacity_plus.contains(p) {
+    if l.opacity_plus.contains(p) {
         return Some(StyleCell::Opacity(1));
     }
     let aligns = l.aligns.as_ref()?;
@@ -369,6 +551,93 @@ pub fn cell_at(l: &StyleLayout, p: Point) -> Option<StyleCell> {
         .zip(aligns)
         .find(|(_, r)| r.contains(p))
         .map(|(a, _)| StyleCell::Align(*a))
+}
+
+// ---------------------------------------------------------------- vị trí bảng (Task 114)
+
+fn overlaps(a: Rect, b: Rect) -> bool {
+    a.w > 0 && a.h > 0 && b.w > 0 && b.h > 0 && intersect(a, b).is_some()
+}
+
+fn overlap_area(a: Rect, b: Rect) -> i64 {
+    intersect(a, b).map_or(0, |r| i64::from(r.w) * i64::from(r.h))
+}
+
+/// Vị trí ứng viên của bảng cỡ `(w, h)`: cạnh thanh dọc (phía xa vùng chọn) rồi bên phải, bên trái,
+/// dưới, trên vùng chọn; mỗi ứng viên đã kẹp vào màn hình.
+fn candidates(size: (i32, i32), side: Rect, sel: Rect, mon: Rect, dpi: u32) -> Vec<Rect> {
+    let (w, h) = size;
+    let gap = scaled(GAP, dpi);
+    let at = |x: i32, y: i32| clamp_into(Rect { x, y, w, h }, mon);
+    // Canh giữa theo cạnh của vùng chọn để bảng nằm cạnh phần đang làm.
+    let (cy, cx) = (sel.y + sel.h / 2 - h / 2, sel.x + sel.w / 2 - w / 2);
+    let beside_side = if side_on_right(side, sel) {
+        at(side.right().saturating_add(gap), side.y)
+    } else {
+        at(side.x.saturating_sub(gap).saturating_sub(w), side.y)
+    };
+    vec![
+        beside_side,
+        at(sel.right().saturating_add(gap), cy),
+        at(sel.x.saturating_sub(gap).saturating_sub(w), cy),
+        at(cx, sel.bottom().saturating_add(gap)),
+        at(cx, sel.y.saturating_sub(gap).saturating_sub(h)),
+    ]
+}
+
+/// Ứng viên không giao vùng chọn, thanh dọc và thanh ngang (nếu có); `None` khi không có.
+fn free_spot(
+    size: (i32, i32),
+    side: Rect,
+    bar: Option<Rect>,
+    sel: Rect,
+    mon: Rect,
+    dpi: u32,
+) -> Option<Rect> {
+    candidates(size, side, sel, mon, dpi).into_iter().find(|r| {
+        !overlaps(*r, sel) && !overlaps(*r, side) && !bar.is_some_and(|b| overlaps(*r, b))
+    })
+}
+
+/// Bảng có nên tự thu gọn: bảng mở rộng không có chỗ trống ngoài vùng chọn nhưng bảng thu gọn có.
+pub fn auto_collapse(
+    kind: StyleKind,
+    side: Rect,
+    bar: Option<Rect>,
+    sel: Rect,
+    mon: Rect,
+    dpi: u32,
+) -> bool {
+    free_spot(panel_size_ex(kind, false, dpi), side, bar, sel, mon, dpi).is_none()
+        && free_spot(panel_size_ex(kind, true, dpi), side, bar, sel, mon, dpi).is_some()
+}
+
+/// Hình chữ nhật của bảng thuộc tính `kind` (mở rộng hoặc thu gọn). Ưu tiên chỗ không phủ vùng chọn,
+/// thanh dọc và thanh ngang (thứ tự: cạnh thanh dọc, phải, trái, dưới, trên vùng chọn); không còn
+/// chỗ nào thì chọn nơi phủ vùng chọn ít nhất (người dùng kéo bảng đi được). Luôn nằm trong `mon`.
+pub fn style_panel_rect(
+    kind: StyleKind,
+    collapsed: bool,
+    side: Rect,
+    bar: Option<Rect>,
+    sel: Rect,
+    mon: Rect,
+    dpi: u32,
+) -> Rect {
+    let size = panel_size_ex(kind, collapsed, dpi);
+    if let Some(r) = free_spot(size, side, bar, sel, mon, dpi) {
+        return r;
+    }
+    let all = candidates(size, side, sel, mon, dpi);
+    let mut best = all[0];
+    let mut best_area = overlap_area(best, sel);
+    for r in all.into_iter().skip(1) {
+        let a = overlap_area(r, sel);
+        if a < best_area {
+            (best, best_area) = (r, a);
+        }
+    }
+    best
 }
 
 #[cfg(test)]
@@ -559,7 +828,6 @@ mod tests {
         for dpi in [96, 144, 192] {
             for kind in [StyleKind::MarkerFree, StyleKind::MarkerRect] {
                 let l = at(kind, dpi);
-                assert_eq!(panel_size(kind, dpi), panel_size(StyleKind::Box, dpi));
                 let m = l.modes.expect("hàng chọn chế độ");
                 assert_eq!(
                     cell_at(&l, centre(m[0])),
@@ -578,8 +846,12 @@ mod tests {
                     cell_at(&l, centre(l.width_plus)),
                     cell_at(&l, centre(l.opacity_plus)),
                 );
+                // Tự do: độ to nét và độ trong suốt (Task 114); hình chữ nhật: chỉ độ trong suốt.
                 if kind == StyleKind::MarkerFree {
-                    assert_eq!((w, o), (Some(StyleCell::Width(1)), None));
+                    assert_eq!(
+                        (w, o),
+                        (Some(StyleCell::Width(1)), Some(StyleCell::Opacity(1)))
+                    );
                 } else {
                     assert_eq!((w, o), (None, Some(StyleCell::Opacity(1))));
                 }
@@ -619,5 +891,356 @@ mod tests {
         // Bảng Hình, Chữ không có hàng chế độ.
         assert!(at(StyleKind::Box, 96).modes.is_none());
         assert!(at(StyleKind::Label, 96).modes.is_none());
+    }
+
+    // ---- Task 114: sửa bảng kiểu
+
+    #[test]
+    fn fill_and_no_fill_chips_are_mutually_exclusive() {
+        for target in [StyleTarget::Fill, StyleTarget::Border] {
+            for fill in [None, Some(Rgb(1, 2, 3))] {
+                let f = chip_focus(target, fill);
+                assert_ne!(f.fill, f.no_fill, "{target:?} {fill:?}: đúng một bật");
+                assert_eq!(f.no_fill, fill.is_none());
+                assert_eq!(f.border, target == StyleTarget::Border);
+            }
+        }
+    }
+
+    #[test]
+    fn radius_steps_by_two_and_is_clamped() {
+        assert_eq!(step_radius(0.0, 1), RADIUS_STEP_PX);
+        assert_eq!(step_radius(0.0, -1), 0.0);
+        assert_eq!(step_radius(RADIUS_MAX_PX, 1), RADIUS_MAX_PX);
+        assert_eq!(clamp_radius_px(f32::NAN), 0.0);
+        assert_eq!(clamp_radius_px(-5.0), 0.0);
+        assert_eq!(clamp_radius_px(9999.0), RADIUS_MAX_PX);
+    }
+
+    #[test]
+    fn no_border_and_radius_flow_into_the_style_and_keep_the_old_width() {
+        let mut p = BOX_DEFAULT;
+        p.apply(StyleEdit::NoBorder(true));
+        p.apply(StyleEdit::RadiusPx(12.0));
+        let on = p.style(Rgb(9, 9, 9), 96);
+        assert!(on.no_border);
+        assert_eq!(on.radius, 12.0);
+        assert_eq!(on.border_width(), 0.0);
+        // Tắt lại: độ dày và màu cũ còn nguyên.
+        p.apply(StyleEdit::NoBorder(false));
+        let off = p.style(Rgb(9, 9, 9), 96);
+        assert_eq!(off.border_width(), STROKE_DIP);
+        assert_eq!(off.stroke, Rgb(9, 9, 9));
+        p.apply(StyleEdit::RadiusPx(-3.0));
+        assert_eq!(p.radius_px, 0.0);
+        assert_eq!((BOX_DEFAULT.radius_px, BOX_DEFAULT.no_border), (0.0, false));
+        assert_eq!(
+            (LABEL_DEFAULT.radius_px, LABEL_DEFAULT.no_border),
+            (0.0, false)
+        );
+    }
+
+    #[test]
+    fn new_rows_hit_back_to_themselves_and_oval_has_no_radius_row() {
+        for dpi in [96, 144, 192] {
+            for kind in [StyleKind::Box, StyleKind::Label, StyleKind::Oval] {
+                let l = at(kind, dpi);
+                assert_eq!(cell_at(&l, centre(l.no_border)), Some(StyleCell::NoBorder));
+                assert_eq!(cell_at(&l, centre(l.collapse)), Some(StyleCell::Collapse));
+                assert_eq!(
+                    cell_at(&l, pt(l.header.x + 2, l.header.y + 2)),
+                    Some(StyleCell::Header)
+                );
+                if kind == StyleKind::Oval {
+                    assert_eq!((l.radius_minus.w, l.radius_plus.w), (0, 0));
+                    assert_eq!(cell_at(&l, pt(0, 0)), None);
+                    assert!(!StyleKind::Oval.has_radius());
+                } else {
+                    assert_eq!(
+                        cell_at(&l, centre(l.radius_minus)),
+                        Some(StyleCell::Radius(-1))
+                    );
+                    assert_eq!(
+                        cell_at(&l, centre(l.radius_plus)),
+                        Some(StyleCell::Radius(1))
+                    );
+                }
+                // Mọi ô nằm trong bảng và không chồng nhau.
+                let mut rs = vec![
+                    l.header,
+                    l.fill_chip,
+                    l.border_chip,
+                    l.no_fill,
+                    l.no_border,
+                    l.width_minus,
+                    l.width_value,
+                    l.width_plus,
+                    l.opacity_minus,
+                    l.opacity_value,
+                    l.opacity_plus,
+                ];
+                if kind != StyleKind::Oval {
+                    rs.extend([l.radius_minus, l.radius_value, l.radius_plus]);
+                }
+                rs.extend(l.cells.iter().copied());
+                if let Some(a) = l.aligns {
+                    rs.extend(a);
+                }
+                for r in &rs {
+                    assert!(
+                        r.x >= l.panel.x
+                            && r.y >= l.panel.y
+                            && r.right() <= l.panel.right()
+                            && r.bottom() <= l.panel.bottom(),
+                        "{kind:?} {r:?} ngoài {:?}",
+                        l.panel
+                    );
+                }
+                for (i, a) in rs.iter().enumerate() {
+                    for b in &rs[i + 1..] {
+                        assert!(
+                            a.right() <= b.x
+                                || b.right() <= a.x
+                                || a.bottom() <= b.y
+                                || b.bottom() <= a.y,
+                            "{kind:?} {a:?} chồng {b:?}"
+                        );
+                    }
+                }
+            }
+        }
+        assert!(!StyleKind::MarkerFree.has_border() && !StyleKind::MarkerRect.has_border());
+    }
+
+    #[test]
+    fn collapsed_panel_is_only_the_header() {
+        for kind in [StyleKind::Box, StyleKind::Label, StyleKind::MarkerFree] {
+            let (w, h) = panel_size_ex(kind, true, 96);
+            let (fw, fh) = panel_size_ex(kind, false, 96);
+            assert_eq!(w, fw);
+            assert!(h < fh / 4);
+            let l = layout_ex(Rect { x: 10, y: 10, w, h }, kind, true, 96);
+            assert!(l.cells.is_empty() && l.modes.is_none() && l.aligns.is_none());
+            assert_eq!(cell_at(&l, centre(l.collapse)), Some(StyleCell::Collapse));
+            // Dưới thanh tiêu đề không có ô nào.
+            assert_eq!(cell_at(&l, pt(l.panel.x + 5, l.panel.bottom() + 5)), None);
+        }
+    }
+
+    // ---- vị trí bảng
+
+    const SCREEN: Rect = Rect {
+        x: 0,
+        y: 0,
+        w: 1440,
+        h: 900,
+    };
+
+    fn parts(sel: Rect, dpi: u32) -> (Rect, Rect) {
+        // Thanh ngang dưới vùng chọn, thanh dọc bên phải (như `bar_rect`, `side_rect`): giả lập hai
+        // hình chữ nhật cỡ thật gần đúng đủ cho kiểm thử bố cục.
+        let bar = Rect {
+            x: sel.right() - scaled(260, dpi),
+            y: (sel.bottom() + scaled(6, dpi)).min(SCREEN.bottom() - scaled(40, dpi)),
+            w: scaled(260, dpi),
+            h: scaled(40, dpi),
+        };
+        let side = Rect {
+            x: (sel.right() + scaled(6, dpi)).min(SCREEN.right() - scaled(44, dpi)),
+            y: sel.y,
+            w: scaled(44, dpi),
+            h: scaled(330, dpi),
+        };
+        (bar, side)
+    }
+
+    fn inside(r: Rect, m: Rect) -> bool {
+        r.x >= m.x && r.y >= m.y && r.right() <= m.right() && r.bottom() <= m.bottom()
+    }
+
+    #[test]
+    fn panel_avoids_selection_bars_and_screen_edges_whenever_there_is_room() {
+        let sels = [
+            Rect {
+                x: 500,
+                y: 300,
+                w: 400,
+                h: 300,
+            },
+            Rect {
+                x: 0,
+                y: 0,
+                w: 400,
+                h: 300,
+            },
+            Rect {
+                x: 1040,
+                y: 600,
+                w: 400,
+                h: 300,
+            },
+            Rect {
+                x: 100,
+                y: 100,
+                w: 700,
+                h: 500,
+            },
+            Rect {
+                x: 300,
+                y: 0,
+                w: 800,
+                h: 880,
+            },
+        ];
+        for dpi in [96u32, 192] {
+            let mon = Rect {
+                x: 0,
+                y: 0,
+                w: SCREEN.w * dpi as i32 / 96,
+                h: SCREEN.h * dpi as i32 / 96,
+            };
+            for kind in [StyleKind::Box, StyleKind::Label, StyleKind::MarkerFree] {
+                for s in sels {
+                    let sel = Rect {
+                        x: s.x * dpi as i32 / 96,
+                        y: s.y * dpi as i32 / 96,
+                        w: s.w * dpi as i32 / 96,
+                        h: s.h * dpi as i32 / 96,
+                    };
+                    let (bar, side) = parts(sel, dpi);
+                    let r = style_panel_rect(kind, false, side, Some(bar), sel, mon, dpi);
+                    assert!(inside(r, mon), "{kind:?} {sel:?} -> {r:?}");
+                    let (w, h) = panel_size_ex(kind, false, dpi);
+                    assert_eq!((r.w, r.h), (w, h));
+                    // Có chỗ trống ngoài vùng chọn thì không phủ vùng chọn, thanh dọc, thanh ngang.
+                    let has_room = sel.x >= w + scaled(6, dpi) * 2
+                        || mon.right() - sel.right() >= w + scaled(6, dpi) * 2;
+                    if has_room {
+                        assert!(!overlaps(r, sel), "{kind:?} {sel:?} -> {r:?}");
+                        assert!(!overlaps(r, side), "{kind:?} {sel:?} -> {r:?} / {side:?}");
+                        assert!(!overlaps(r, bar), "{kind:?} {sel:?} -> {r:?} / {bar:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn panel_uses_above_or_below_when_the_sides_are_full() {
+        // Vùng chọn gần hết bề rộng nhưng còn dải cao phía dưới.
+        let sel = Rect {
+            x: 20,
+            y: 20,
+            w: 1400,
+            h: 300,
+        };
+        let (bar, side) = parts(sel, 96);
+        let side = Rect { x: 1390, ..side };
+        let bar = Rect { y: 330, ..bar };
+        let r = style_panel_rect(StyleKind::Box, false, side, Some(bar), sel, SCREEN, 96);
+        assert!(inside(r, SCREEN));
+        assert!(!overlaps(r, sel), "{r:?}");
+    }
+
+    #[test]
+    fn full_screen_selection_still_gives_an_on_screen_panel_and_may_collapse() {
+        let (bar, side) = parts(
+            Rect {
+                x: 0,
+                y: 0,
+                w: SCREEN.w - 60,
+                h: SCREEN.h,
+            },
+            96,
+        );
+        let sel = SCREEN;
+        for collapsed in [false, true] {
+            let r = style_panel_rect(
+                StyleKind::Label,
+                collapsed,
+                side,
+                Some(bar),
+                sel,
+                SCREEN,
+                96,
+            );
+            assert!(inside(r, SCREEN), "{r:?}");
+        }
+        // Không chỗ nào cho bảng, kể cả thu gọn: không tự thu gọn (người dùng kéo bảng đi).
+        assert!(!auto_collapse(
+            StyleKind::Label,
+            side,
+            Some(bar),
+            sel,
+            SCREEN,
+            96
+        ));
+    }
+
+    #[test]
+    fn auto_collapse_only_when_the_collapsed_panel_fits_and_the_full_one_does_not() {
+        // Vùng chọn phủ hết bề ngang; chỉ còn dải thấp phía dưới: đủ cho bảng thu gọn, không đủ cho
+        // bảng đầy đủ.
+        let mon = Rect {
+            x: 0,
+            y: 0,
+            w: 1000,
+            h: 500,
+        };
+        let sel = Rect {
+            x: 0,
+            y: 0,
+            w: 1000,
+            h: 440,
+        };
+        let side = Rect {
+            x: 960,
+            y: 10,
+            w: 36,
+            h: 100,
+        };
+        let bar = Rect {
+            x: 700,
+            y: 450,
+            w: 290,
+            h: 40,
+        };
+        let full = style_panel_rect(StyleKind::Label, false, side, Some(bar), sel, mon, 96);
+        assert!(
+            overlaps(full, sel),
+            "không có chỗ cho bảng đầy đủ: {full:?}"
+        );
+        let small = style_panel_rect(StyleKind::Label, true, side, Some(bar), sel, mon, 96);
+        assert!(
+            inside(small, mon) && !overlaps(small, sel) && !overlaps(small, bar),
+            "{small:?}"
+        );
+        assert!(auto_collapse(
+            StyleKind::Label,
+            side,
+            Some(bar),
+            sel,
+            mon,
+            96
+        ));
+        // Vùng chọn nhỏ: bảng đầy đủ có chỗ nên không tự thu gọn.
+        let sel = Rect {
+            x: 300,
+            y: 100,
+            w: 300,
+            h: 200,
+        };
+        assert!(!auto_collapse(
+            StyleKind::Label,
+            side,
+            Some(bar),
+            sel,
+            mon,
+            96
+        ));
+    }
+
+    fn overlaps(a: Rect, b: Rect) -> bool {
+        a.x < b.right() && b.x < a.right() && a.y < b.bottom() && b.y < a.bottom()
     }
 }

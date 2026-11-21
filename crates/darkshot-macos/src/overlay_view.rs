@@ -5,11 +5,12 @@
 
 use crate::annotate_draw;
 use crate::annotate_style::{
-    layout as style_layout, opacity_percent, StyleCell, StyleKind, StyleLayout, StyleTarget,
+    chip_focus, layout_ex as style_layout_ex, opacity_percent, StyleCell, StyleKind, StyleLayout,
+    StyleTarget,
 };
 use crate::annotate_ui::{
-    flyout_rect_for, flyout_tip_rect, palette_cell_rect, side_tip_rect, style_rect_for, Annot,
-    Flyout, Layer, TextCmd,
+    flyout_rect_for, flyout_tip_rect, palette_cell_rect, side_tip_rect, Annot, Flyout, Layer,
+    Layout, TextCmd,
 };
 use crate::coords::px_to_pt;
 use crate::lang;
@@ -850,7 +851,7 @@ fn draw(f: &Frame) {
     }
     if let (Some(a), Some(lay)) = (f.annot, f.env) {
         if let Some(side) = lay.side {
-            draw_side(c, f, a, side, lay.sel, lay.mon);
+            draw_side(c, f, a, side, &lay);
         }
     }
     if let Some((msg, anchor)) = tip {
@@ -952,16 +953,19 @@ fn draw_bar(c: Option<&CGContext>, f: &Frame, bar: Rect, tip: &mut Option<(Msg, 
 
 /// Thanh dọc công cụ cùng bảng Cỡ/Hình/màu đang mở; gợi ý của mục đang trỏ (đặt cạnh thanh dọc
 /// hoặc bảng) vẽ ngay ở đây.
-fn draw_side(c: Option<&CGContext>, f: &Frame, a: &Annot, side: Rect, sel: Rect, mon: Rect) {
+fn draw_side(c: Option<&CGContext>, f: &Frame, a: &Annot, side: Rect, lay: &Layout) {
+    let (sel, mon) = (lay.sel, lay.mon);
     let dpi = f.dpi;
-    let l = side_layout_for(mon, dpi);
+    // Gợi ý gom lại và vẽ SAU CÙNG: không bao giờ bị bảng hay ô khác vẽ đè.
+    let mut tips: Vec<PendingTip> = Vec::new();
+    let sl = side_layout_for(mon, dpi);
     panel(c, side, dpi);
     let mark = scaled(MARK, dpi);
     let mark_inset = scaled(6, dpi);
     let icon_px = f64::from(scaled(ICON, dpi));
     let attrs = text_attrs(FONT_PT * f.scale);
     for (i, item) in SIDE_ITEMS.iter().enumerate() {
-        let Some(r) = side_item_rect(side, &l, i) else {
+        let Some(r) = side_item_rect(side, &sl, i) else {
             continue;
         };
         let selected = a.side_selected(*item);
@@ -1006,13 +1010,17 @@ fn draw_side(c: Option<&CGContext>, f: &Frame, a: &Annot, side: Rect, sel: Rect,
         if a.side_hover() == Some(*item) && a.flyout() == Flyout::None {
             let text = NSString::from_str(lang::tr(item.tip()));
             let size = text_size(&text, &attrs);
-            let r = side_tip_rect(side, r, sel, mon, dpi, size);
-            bubble(c, r, OVERLAY_TIP, &text, &attrs, size);
+            let rect = side_tip_rect(side, r, sel, mon, dpi, size);
+            tips.push(PendingTip {
+                rect,
+                text: lang::tr(item.tip()),
+                size,
+            });
         }
     }
     // Vạch ngăn 1 px giữa ô vạch ngăn, có lề hai bên.
     let margin = scaled(GAP, dpi);
-    for s in &l.seps {
+    for s in &sl.seps {
         fill(
             c,
             Rect {
@@ -1026,10 +1034,11 @@ fn draw_side(c: Option<&CGContext>, f: &Frame, a: &Annot, side: Rect, sel: Rect,
     }
     // Bảng thuộc tính của Hình/Chữ (khi không có bảng Cỡ/Hình/Màu mở).
     if a.style_panel_open() {
-        draw_style_panel(c, f, a, side, sel, mon, &attrs);
+        draw_style_panel(c, f, a, lay, &attrs, &mut tips);
     }
     // Bảng đang mở.
     let Some(fly) = flyout_rect_for(a.flyout(), side, sel, mon, dpi) else {
+        flush_tips(c, &attrs, tips);
         return;
     };
     panel(c, fly, dpi);
@@ -1054,7 +1063,7 @@ fn draw_side(c: Option<&CGContext>, f: &Frame, a: &Annot, side: Rect, sel: Rect,
                     if on || hot { ACCENT } else { OVERLAY_ICON },
                 );
                 if hot {
-                    flyout_tip(c, &attrs, cell, fly, mon, dpi, size_tip(*level));
+                    queue_flyout_tip(&mut tips, &attrs, cell, fly, mon, dpi, size_tip(*level));
                 }
             }
         }
@@ -1077,7 +1086,7 @@ fn draw_side(c: Option<&CGContext>, f: &Frame, a: &Annot, side: Rect, sel: Rect,
                     if on || hot { ACCENT } else { OVERLAY_ICON },
                 );
                 if hot {
-                    flyout_tip(c, &attrs, cell, fly, mon, dpi, shape_tip(*tool));
+                    queue_flyout_tip(&mut tips, &attrs, cell, fly, mon, dpi, shape_tip(*tool));
                 }
             }
         }
@@ -1095,6 +1104,7 @@ fn draw_side(c: Option<&CGContext>, f: &Frame, a: &Annot, side: Rect, sel: Rect,
             }
         }
     }
+    flush_tips(c, &attrs, tips);
 }
 
 /// Chữ `s` trong ô `r`: giữa ô, hoặc sát trái (đệm nhỏ) khi `centered` là false.
@@ -1162,32 +1172,74 @@ fn style_tip(cell: StyleCell) -> Option<Msg> {
     }
 }
 
-/// Bảng thuộc tính của Hình và Chữ: ô Nền/Viền/Không nền, 48 màu, độ dày viền, độ trong suốt và
-/// (Chữ) căn lề.
+/// Bảng thuộc tính của Hình, Chữ và Highlight: thanh tiêu đề (kéo, thu gọn), ô Nền/Viền/Không nền,
+/// 48 màu, độ dày viền, Không viền, bo góc, độ trong suốt và (Chữ) căn lề.
 fn draw_style_panel(
     c: Option<&CGContext>,
     f: &Frame,
     a: &Annot,
-    side: Rect,
-    sel: Rect,
-    mon: Rect,
+    lay: &Layout,
     attrs: &NSDictionary<NSAttributedStringKey, AnyObject>,
+    tips: &mut Vec<PendingTip>,
 ) {
     let dpi = f.dpi;
     let Some(view) = a.style_view(dpi) else {
         return;
     };
-    let Some(rect) = style_rect_for(view.kind, side, sel, mon, dpi) else {
+    let Some((rect, collapsed)) = a.style_panel_in(view.kind, lay) else {
         return;
     };
-    let l: StyleLayout = style_layout(rect, view.kind, dpi);
+    let mon = lay.mon;
+    let l: StyleLayout = style_layout_ex(rect, view.kind, collapsed, dpi);
     panel(c, rect, dpi);
     let small = text_attrs(FONT_PT * f.scale * 0.9);
     let hover = a.style_hover();
     let target = a.style_target();
     let t = scaled(MARK, dpi).max(1);
-    // Hàng ô: Nền, Viền, Không nền.
+    // Thanh tiêu đề: vạch nắm kéo và nút thu gọn/mở.
+    let hot_head = hover == Some(StyleCell::Header);
+    let hot_toggle = hover == Some(StyleCell::Collapse);
+    if hot_head {
+        fill(c, inflate(l.header, -1), OVERLAY_HOVER);
+    }
+    for i in 0..2 {
+        let gy = l.header.y + l.header.h / 2 + (i * 2 - 1) * scaled(2, dpi);
+        fill(
+            c,
+            Rect {
+                x: l.header.x + scaled(8, dpi),
+                y: gy,
+                w: l.header.w - l.collapse.w - scaled(16, dpi),
+                h: 1,
+            },
+            OVERLAY_BORDER,
+        );
+    }
+    style_button(c, l.collapse, false, hot_toggle, dpi);
+    text_in(
+        l.collapse,
+        if collapsed { "\u{25B4}" } else { "\u{25BE}" },
+        &small,
+        true,
+        dpi,
+    );
+    if hot_toggle {
+        queue_flyout_tip(
+            tips,
+            attrs,
+            l.collapse,
+            rect,
+            mon,
+            dpi,
+            Msg::StylePanelToggle,
+        );
+    }
+    if collapsed {
+        return;
+    }
+    // Hàng ô: Nền, Viền, Không nền. Đúng một trong Nền/Không nền bật.
     let highlight = view.kind.is_highlight();
+    let focus = chip_focus(target, view.fill);
     let chips = if highlight {
         Vec::new()
     } else {
@@ -1195,19 +1247,19 @@ fn draw_style_panel(
             (
                 l.fill_chip,
                 Msg::StyleFill,
-                target == StyleTarget::Fill,
+                focus.fill,
                 StyleCell::Target(StyleTarget::Fill),
             ),
             (
                 l.border_chip,
                 Msg::StyleBorder,
-                target == StyleTarget::Border,
+                focus.border,
                 StyleCell::Target(StyleTarget::Border),
             ),
             (
                 l.no_fill,
                 Msg::StyleNoFill,
-                view.fill.is_none(),
+                focus.no_fill,
                 StyleCell::NoFill,
             ),
         ]
@@ -1245,17 +1297,34 @@ fn draw_style_panel(
             inner_frame(c, cell, t, WHITE);
         }
     }
-    // Độ dày viền và độ trong suốt: nhãn, [-], giá trị, [+].
+    // Các hàng tăng giảm: nhãn, [-], giá trị, [+].
     let width = format!("{}", view.width_dip.round() as i32);
+    let radius = format!("{}", view.radius_px.round() as i32);
     let opacity = format!("{}%", opacity_percent(view.opacity));
+    let width_msg = if view.kind == StyleKind::MarkerFree {
+        Msg::HighlightSize
+    } else {
+        Msg::StyleWidth
+    };
     let rows = [
         (
             l.width_label,
-            Msg::StyleWidth,
+            width_msg,
             (l.width_minus, StyleCell::Width(-1)),
             l.width_value,
             width,
             (l.width_plus, StyleCell::Width(1)),
+            // Highlight hình chữ nhật không có độ dày nét.
+            view.kind != StyleKind::MarkerRect,
+        ),
+        (
+            l.radius_label,
+            Msg::StyleRadius,
+            (l.radius_minus, StyleCell::Radius(-1)),
+            l.radius_value,
+            radius,
+            (l.radius_plus, StyleCell::Radius(1)),
+            view.kind.has_radius(),
         ),
         (
             l.opacity_label,
@@ -1264,28 +1333,21 @@ fn draw_style_panel(
             l.opacity_value,
             opacity,
             (l.opacity_plus, StyleCell::Opacity(1)),
+            true,
         ),
     ];
-    for (label, msg, minus, value, text, plus) in rows {
-        // Bảng Highlight chỉ hiện bộ nút tăng giảm của chế độ đang dùng.
-        let own = !matches!(
-            (view.kind, minus.1),
-            (StyleKind::MarkerFree, StyleCell::Opacity(_))
-                | (StyleKind::MarkerRect, StyleCell::Width(_))
-        );
-        if !own {
+    for (label, msg, minus, value, text, plus, shown) in rows {
+        if !shown {
             continue;
         }
-        let msg = if view.kind == StyleKind::MarkerFree {
-            Msg::HighlightSize
-        } else {
-            msg
-        };
         text_in(label, lang::tr(msg), &small, false, dpi);
         for (r, cell) in [minus, plus] {
             style_button(c, r, false, hover == Some(cell), dpi);
             inner_frame(c, r, 1, OVERLAY_BORDER);
-            let sign = if matches!(cell, StyleCell::Width(-1) | StyleCell::Opacity(-1)) {
+            let sign = if matches!(
+                cell,
+                StyleCell::Width(-1) | StyleCell::Opacity(-1) | StyleCell::Radius(-1)
+            ) {
                 "\u{2212}"
             } else {
                 "+"
@@ -1293,6 +1355,48 @@ fn draw_style_panel(
             text_in(r, sign, attrs, true, dpi);
         }
         text_in(value, &text, attrs, true, dpi);
+    }
+    // Ô tích Không viền (Hình, Chữ).
+    if view.kind.has_border() {
+        let r = l.no_border;
+        style_button(c, r, false, hover == Some(StyleCell::NoBorder), dpi);
+        let side = (r.h * 2 / 3).max(8);
+        let bx = Rect {
+            x: r.x + scaled(2, dpi),
+            y: r.y + (r.h - side) / 2,
+            w: side,
+            h: side,
+        };
+        inner_frame(
+            c,
+            bx,
+            1,
+            if view.no_border {
+                ACCENT
+            } else {
+                OVERLAY_BORDER
+            },
+        );
+        if view.no_border {
+            // Dấu tích: hai đoạn.
+            let inner = inflate(bx, -scaled(3, dpi));
+            set_stroke(c, ACCENT, 1.0);
+            CGContext::set_line_width(c, f64::from(scaled(2, dpi)));
+            CGContext::move_to_point(c, f64::from(inner.x), f64::from(inner.y + inner.h / 2));
+            CGContext::add_line_to_point(
+                c,
+                f64::from(inner.x + inner.w / 3),
+                f64::from(inner.bottom()),
+            );
+            CGContext::add_line_to_point(c, f64::from(inner.right()), f64::from(inner.y));
+            CGContext::stroke_path(c);
+        }
+        let label = Rect {
+            x: bx.right() + scaled(6, dpi),
+            w: r.right() - bx.right() - scaled(6, dpi),
+            ..r
+        };
+        text_in(label, lang::tr(Msg::StyleNoBorder), &small, false, dpi);
     }
     // Căn lề (Chữ).
     if let (Some(aligns), Some(cur)) = (l.aligns, view.align) {
@@ -1304,16 +1408,23 @@ fn draw_style_panel(
             align_glyph(c, r, *al, if on || hot { ACCENT } else { OVERLAY_ICON });
             if hot {
                 if let Some(msg) = style_tip(cell) {
-                    flyout_tip(c, attrs, r, rect, mon, dpi, msg);
+                    queue_flyout_tip(tips, attrs, r, rect, mon, dpi, msg);
                 }
             }
         }
     }
 }
 
-/// Gợi ý của một ô trong bảng, đặt trên (hoặc dưới) bảng.
-fn flyout_tip(
-    c: Option<&CGContext>,
+/// Gợi ý chờ vẽ: vị trí đã tính, chữ và cỡ chữ.
+struct PendingTip {
+    rect: Rect,
+    text: &'static str,
+    size: (i32, i32),
+}
+
+/// Xếp gợi ý của ô `cell` trong bảng `fly` (đặt trên hoặc dưới bảng) vào hàng chờ.
+fn queue_flyout_tip(
+    tips: &mut Vec<PendingTip>,
     attrs: &NSDictionary<NSAttributedStringKey, AnyObject>,
     cell: Rect,
     fly: Rect,
@@ -1321,10 +1432,31 @@ fn flyout_tip(
     dpi: u32,
     msg: Msg,
 ) {
-    let text = NSString::from_str(lang::tr(msg));
-    let size = text_size(&text, attrs);
-    let r = flyout_tip_rect(cell, fly, mon, dpi, size);
-    bubble(c, r, OVERLAY_TIP, &text, attrs, size);
+    let text = lang::tr(msg);
+    let size = text_size(&NSString::from_str(text), attrs);
+    tips.push(PendingTip {
+        rect: flyout_tip_rect(cell, fly, mon, dpi, size),
+        text,
+        size,
+    });
+}
+
+/// Vẽ mọi gợi ý đang chờ, sau cùng để nằm trên mọi thanh, bảng và ô.
+fn flush_tips(
+    c: Option<&CGContext>,
+    attrs: &NSDictionary<NSAttributedStringKey, AnyObject>,
+    tips: Vec<PendingTip>,
+) {
+    for t in tips {
+        bubble(
+            c,
+            t.rect,
+            OVERLAY_TIP,
+            &NSString::from_str(t.text),
+            attrs,
+            t.size,
+        );
+    }
 }
 
 #[cfg(test)]
