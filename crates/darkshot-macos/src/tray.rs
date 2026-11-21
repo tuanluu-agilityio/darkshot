@@ -89,7 +89,7 @@ define_class!(
     // luồng chính (đích của mục menu).
     #[unsafe(super(NSObject))]
     #[thread_kind = MainThreadOnly]
-    #[name = "DarkshotMenuTarget"]
+    #[name = "DarkshotTrayTarget"]
     #[ivars = fn(MenuCommand)]
     struct MenuTarget;
 
