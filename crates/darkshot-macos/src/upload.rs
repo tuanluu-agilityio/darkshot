@@ -13,9 +13,11 @@
 //! Khóa R2 chỉ nằm trong `R2Config` của cấu hình đã nạp (đã qua Keychain) và đi thẳng vào
 //! `R2Uploader`; module này không đọc, không ghi log, không đưa nó vào thông báo hay `Debug`.
 
-use darkshot_core::actions::{run_action, Action, Clipboard, Ctx, Notifier, NoticeKind, Outcome};
+use darkshot_core::actions::{run_action, Action, Clipboard, Ctx, NoticeKind, Notifier, Outcome};
+use darkshot_core::app_flow::remaining;
 use darkshot_core::app_state::{save_pending, PendingUploads};
 use darkshot_core::config::{Config, Expiry, UploadFormat};
+use darkshot_core::geometry::Rect;
 use darkshot_core::i18n::{self, t, Lang, Msg};
 use darkshot_core::image::Image;
 use darkshot_core::naming::LocalTime;
@@ -23,6 +25,7 @@ use darkshot_core::upload::{R2Uploader, Uploader};
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 /// Sổ lượt tải lên của cả tiến trình.
 pub fn registry() -> Arc<PendingUploads> {
@@ -191,6 +194,35 @@ pub fn start_with(
     }
 }
 
+/// Ảnh cho một lượt tải lên: cắt theo `rect`; khi `rect` phủ cả ảnh (chụp toàn màn hình) thì dùng
+/// luôn ảnh gốc, không sao chép thêm hàng chục MB trên luồng chính.
+pub fn image_for_upload(image: Image, rect: Rect) -> Image {
+    let whole = rect.x == 0
+        && rect.y == 0
+        && i64::from(rect.w) == i64::from(image.width)
+        && i64::from(rect.h) == i64::from(image.height);
+    if whole {
+        image
+    } else {
+        image.crop(rect)
+    }
+}
+
+/// Chờ tới khi `busy()` hết đúng hoặc hết hạn chót `deadline` (hạn chót chung `EXIT_BUDGET`).
+/// Trả `true` nếu đã rảnh. Không bao giờ chờ quá hạn chót.
+pub fn wait_idle(deadline: Instant, busy: impl Fn() -> bool) -> bool {
+    loop {
+        if !busy() {
+            return true;
+        }
+        let left = remaining(deadline, Instant::now());
+        if left.is_zero() {
+            return false;
+        }
+        std::thread::sleep(left.min(Duration::from_millis(20)));
+    }
+}
+
 /// Lúc thoát: lấy mọi lượt còn dở khỏi sổ và lưu PNG vào thư mục lưu của từng lượt. Chỉ ghi tệp.
 /// Trả số ảnh đã lưu. Gọi lần hai vô hại (sổ rỗng).
 pub fn save_on_exit(reg: &PendingUploads, now: LocalTime, lang: Lang) -> usize {
@@ -203,7 +235,6 @@ mod tests {
     use darkshot_core::upload::UploadError;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Mutex;
-    use std::time::Duration;
 
     static COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -633,6 +664,52 @@ mod tests {
         ] {
             assert_eq!(follow_up(&o), FollowUp::None, "{o:?}");
         }
+    }
+
+    #[test]
+    fn whole_image_is_not_copied_and_a_region_is_cropped() {
+        let big = Image {
+            width: 4,
+            height: 4,
+            bgra: (0..64).collect(),
+        };
+        let ptr = big.bgra.as_ptr();
+        let whole = image_for_upload(
+            big,
+            Rect {
+                x: 0,
+                y: 0,
+                w: 4,
+                h: 4,
+            },
+        );
+        assert_eq!(whole.bgra.as_ptr(), ptr, "dùng luôn ảnh gốc");
+        let part = image_for_upload(
+            whole,
+            Rect {
+                x: 1,
+                y: 1,
+                w: 2,
+                h: 2,
+            },
+        );
+        assert_eq!((part.width, part.height, part.bgra.len()), (2, 2, 16));
+        assert!(part.is_valid());
+    }
+
+    #[test]
+    fn wait_idle_never_outlasts_the_deadline() {
+        let t = Instant::now();
+        assert!(wait_idle(t + Duration::from_secs(1), || false));
+        assert!(t.elapsed() < Duration::from_millis(200));
+        let t = Instant::now();
+        assert!(!wait_idle(t + Duration::from_millis(60), || true));
+        let e = t.elapsed();
+        assert!(e >= Duration::from_millis(60) && e < Duration::from_millis(500));
+        // Hạn chót đã qua: không ngủ.
+        let t = Instant::now();
+        assert!(!wait_idle(t, || true));
+        assert!(t.elapsed() < Duration::from_millis(100));
     }
 
     #[test]
