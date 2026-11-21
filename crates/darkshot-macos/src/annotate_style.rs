@@ -21,7 +21,7 @@ pub enum StyleKind {
     Box,
     /// Elip: như `Box` nhưng không có bo góc (Task 114).
     Oval,
-    /// Chữ: nền, màu viền, độ dày viền, độ trong suốt, căn lề; màu chữ là màu của nút Màu.
+    /// Chữ: màu chữ, nền, màu viền, độ dày viền, độ trong suốt, căn lề; màu chữ đồng bộ với nút Màu.
     Label,
     /// Highlight chế độ tự do (nét Bút dạ quang): màu, độ to nhỏ nét, độ trong suốt (Task 113, 114).
     MarkerFree,
@@ -46,11 +46,24 @@ impl StyleKind {
     }
 }
 
-/// Ô màu của bảng đang áp cho nền hay cho viền.
+/// Ô màu của bảng đang áp cho đích nào: nền, viền, hoặc (chỉ Chữ) màu chữ.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StyleTarget {
     Fill,
     Border,
+    /// Màu chữ của khung chữ (cùng màu với nút Màu của thanh công cụ).
+    Text,
+}
+
+impl StyleTarget {
+    /// Đích thực sự dùng cho bảng `kind`: Hình không có màu chữ nên `Text` thành `Fill`.
+    pub fn for_kind(self, kind: StyleKind) -> StyleTarget {
+        if self == StyleTarget::Text && kind != StyleKind::Label {
+            StyleTarget::Fill
+        } else {
+            self
+        }
+    }
 }
 
 /// Một ô bấm được của bảng.
@@ -179,21 +192,24 @@ pub fn step_radius(px: f32, dir: i32) -> f32 {
     clamp_radius_px(px.round() + RADIUS_STEP_PX * dir as f32)
 }
 
-/// Trạng thái ba ô Nền, Viền, Không nền của bảng (Task 114): `Không nền` bật đúng khi chưa có màu
-/// nền, `Nền` bật đúng khi có màu nền, nên đúng MỘT trong hai bật (với mọi ô màu đang áp); `Viền`
-/// bật thêm khi ô màu đang áp cho viền.
+/// Trạng thái các ô đích màu của bảng (Task 114, mở rộng Task 115): đúng MỘT ô sáng tại một thời
+/// điểm. Chữ có ba đích (Màu chữ, Nền, Viền), Hình có hai (Nền, Viền). Đích Nền sáng khi đang có
+/// màu nền; chưa có màu nền thì `Không nền` sáng thay cho `Nền` (đúng một trong hai).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ChipFocus {
+    pub text: bool,
     pub fill: bool,
     pub border: bool,
     pub no_fill: bool,
 }
 
-pub fn chip_focus(target: StyleTarget, fill: Option<Rgb>) -> ChipFocus {
+pub fn chip_focus(kind: StyleKind, target: StyleTarget, fill: Option<Rgb>) -> ChipFocus {
+    let target = target.for_kind(kind);
     ChipFocus {
-        fill: fill.is_some(),
+        text: target == StyleTarget::Text,
+        fill: target == StyleTarget::Fill && fill.is_some(),
         border: target == StyleTarget::Border,
-        no_fill: fill.is_none(),
+        no_fill: target == StyleTarget::Fill && fill.is_none(),
     }
 }
 
@@ -252,6 +268,8 @@ pub struct StyleView {
     pub kind: StyleKind,
     pub fill: Option<Rgb>,
     pub stroke: Rgb,
+    /// Màu chữ (chỉ Chữ; Hình lấy màu của nút Màu).
+    pub text: Rgb,
     pub width_dip: f32,
     pub opacity: f32,
     pub align: Option<Align>,
@@ -272,6 +290,8 @@ const ROWS: i32 = 6;
 const ROW_H: i32 = 24;
 const ROW_GAP: i32 = 6;
 const SECTION_GAP: i32 = 8;
+/// Khe giữa hàng ô đích màu và lưới màu ngay dưới (gần hơn các khe khác để lưới thuộc về hàng ô).
+const CHIP_GAP: i32 = 4;
 const BTN: i32 = 24;
 const VALUE_W: i32 = 44;
 /// Thanh tiêu đề (kéo bảng, nút thu gọn).
@@ -294,6 +314,8 @@ pub struct StyleLayout {
     /// Nút thu gọn/mở nằm trong thanh tiêu đề.
     pub collapse: Rect,
     pub collapsed: bool,
+    /// Ô đích Màu chữ (chỉ Chữ; Hình: rộng 0).
+    pub text_chip: Rect,
     pub fill_chip: Rect,
     pub border_chip: Rect,
     pub no_fill: Rect,
@@ -326,7 +348,7 @@ fn panel_h(kind: StyleKind, collapsed: bool) -> i32 {
         return HEAD_H;
     }
     let mut h = HEAD_H + SECTION_GAP;
-    h += ROW_H + SECTION_GAP + ROWS * CELL + (ROWS - 1) * CELL_GAP;
+    h += ROW_H + CHIP_GAP + ROWS * CELL + (ROWS - 1) * CELL_GAP;
     h += SECTION_GAP;
     // Độ dày viền (hoặc độ to nét), rồi độ trong suốt.
     h += ROW_H + ROW_GAP + ROW_H;
@@ -389,6 +411,13 @@ fn shift(r: Rect, o: Rect) -> Rect {
     }
 }
 
+/// Bề rộng bốn ô đích của bảng Chữ (96 DPI): Màu chữ, Nền, Viền, Không nền; vừa kín `inner`.
+fn chip_widths(inner: i32) -> [i32; 4] {
+    let avail = inner - 3 * 4;
+    let (text, fill, border) = (avail * 30 / 100, avail * 18 / 100, avail * 20 / 100);
+    [text, fill, border, avail - text - fill - border]
+}
+
 /// Bố cục của bảng `kind` mở rộng có góc trên trái ở `panel` (cỡ `panel_size`).
 #[cfg(test)]
 pub fn layout(panel: Rect, kind: StyleKind, dpi: u32) -> StyleLayout {
@@ -406,6 +435,7 @@ pub fn layout_ex(panel: Rect, kind: StyleKind, collapsed: bool, dpi: u32) -> Sty
         header: at(header),
         collapse: at(collapse),
         collapsed,
+        text_chip: NONE,
         fill_chip: NONE,
         border_chip: NONE,
         no_fill: NONE,
@@ -435,11 +465,24 @@ pub fn layout_ex(panel: Rect, kind: StyleKind, collapsed: bool, dpi: u32) -> Sty
     if kind.is_highlight() {
         let mode_w = (inner - 4) / 2;
         l.modes = Some([0, 1].map(|i| at(rect(PAD + i * (mode_w + 4), y, mode_w, ROW_H, dpi))));
+    } else if kind == StyleKind::Label {
+        // Chữ: Màu chữ, Nền, Viền, Không nền (rộng theo độ dài nhãn), cùng một hàng.
+        let widths = chip_widths(inner);
+        let mut x = PAD;
+        let mut chip = |w: i32| {
+            let r = at(rect(x, y, w, ROW_H, dpi));
+            x += w + 4;
+            r
+        };
+        l.text_chip = chip(widths[0]);
+        l.fill_chip = chip(widths[1]);
+        l.border_chip = chip(widths[2]);
+        l.no_fill = chip(widths[3]);
     } else {
         let chip = |i: i32| at(rect(PAD + i * (chip_w + 4), y, chip_w, ROW_H, dpi));
         (l.fill_chip, l.border_chip, l.no_fill) = (chip(0), chip(1), chip(2));
     }
-    y += ROW_H + SECTION_GAP;
+    y += ROW_H + CHIP_GAP;
     l.cells = (0..PALETTE.len() as i32)
         .map(|i| {
             let (c, r) = (i % COLS, i / COLS);
@@ -509,6 +552,9 @@ pub fn cell_at(l: &StyleLayout, p: Point) -> Option<StyleCell> {
         if let Some(i) = m.iter().position(|r| r.contains(p)) {
             return Some(StyleCell::Mode(HighlightMode::ALL[i]));
         }
+    }
+    if l.text_chip.contains(p) {
+        return Some(StyleCell::Target(StyleTarget::Text));
     }
     if l.fill_chip.contains(p) {
         return Some(StyleCell::Target(StyleTarget::Fill));
@@ -760,6 +806,7 @@ mod tests {
             for kind in [StyleKind::Box, StyleKind::Label] {
                 let l = at(kind, dpi);
                 let mut rs = vec![
+                    l.text_chip,
                     l.fill_chip,
                     l.border_chip,
                     l.no_fill,
@@ -774,7 +821,7 @@ mod tests {
                 if let Some(a) = l.aligns {
                     rs.extend(a);
                 }
-                for r in &rs {
+                for r in rs.iter().filter(|r| r.w > 0) {
                     assert!(
                         r.x >= l.panel.x
                             && r.y >= l.panel.y
@@ -867,7 +914,7 @@ mod tests {
                     l.opacity_value,
                     l.opacity_plus,
                 ]);
-                for r in &rs {
+                for r in rs.iter().filter(|r| r.w > 0) {
                     assert!(
                         r.x >= l.panel.x
                             && r.y >= l.panel.y
@@ -897,13 +944,77 @@ mod tests {
 
     #[test]
     fn fill_and_no_fill_chips_are_mutually_exclusive() {
-        for target in [StyleTarget::Fill, StyleTarget::Border] {
+        for target in [StyleTarget::Fill, StyleTarget::Border, StyleTarget::Text] {
             for fill in [None, Some(Rgb(1, 2, 3))] {
-                let f = chip_focus(target, fill);
-                assert_ne!(f.fill, f.no_fill, "{target:?} {fill:?}: đúng một bật");
-                assert_eq!(f.no_fill, fill.is_none());
+                let f = chip_focus(StyleKind::Box, target, fill);
+                let lit = [f.text, f.fill, f.border, f.no_fill];
+                assert_eq!(lit.iter().filter(|b| **b).count(), 1, "{target:?} {fill:?}");
+                assert!(!f.text, "Hình không có đích Màu chữ");
                 assert_eq!(f.border, target == StyleTarget::Border);
+                let eff = target.for_kind(StyleKind::Box);
+                assert_eq!(f.no_fill, eff == StyleTarget::Fill && fill.is_none());
             }
+        }
+    }
+
+    #[test]
+    fn exactly_one_target_is_lit_for_text_three_targets_and_shapes_two() {
+        let some = Some(Rgb(1, 2, 3));
+        for kind in [StyleKind::Label, StyleKind::Box, StyleKind::Oval] {
+            for target in [StyleTarget::Fill, StyleTarget::Border, StyleTarget::Text] {
+                for fill in [None, some] {
+                    let f = chip_focus(kind, target, fill);
+                    let n = [f.text, f.fill, f.border, f.no_fill]
+                        .iter()
+                        .filter(|b| **b)
+                        .count();
+                    assert_eq!(n, 1, "{kind:?} {target:?} {fill:?}: {f:?}");
+                }
+            }
+        }
+        let f = chip_focus(StyleKind::Label, StyleTarget::Text, some);
+        assert!(f.text && !f.fill && !f.border && !f.no_fill);
+        let f = chip_focus(StyleKind::Label, StyleTarget::Fill, None);
+        assert!(f.no_fill && !f.fill && !f.text);
+        // Hình không có Màu chữ: đích Màu chữ cũ rơi về Nền.
+        let f = chip_focus(StyleKind::Box, StyleTarget::Text, some);
+        assert!(f.fill && !f.text);
+        assert_eq!(
+            StyleTarget::Text.for_kind(StyleKind::Oval),
+            StyleTarget::Fill
+        );
+        assert_eq!(
+            StyleTarget::Text.for_kind(StyleKind::Label),
+            StyleTarget::Text
+        );
+    }
+
+    #[test]
+    fn text_panel_has_four_chips_in_one_row_right_above_the_grid() {
+        for dpi in [96, 144, 192] {
+            let l = at(StyleKind::Label, dpi);
+            let chips = [l.text_chip, l.fill_chip, l.border_chip, l.no_fill];
+            for c in chips {
+                assert!(c.w > 0 && c.y == chips[0].y && c.h == chips[0].h, "{c:?}");
+            }
+            for w in chips.windows(2) {
+                assert!(w[0].right() <= w[1].x, "{w:?}");
+            }
+            assert!(chips[3].right() <= l.panel.right());
+            assert_eq!(
+                cell_at(&l, centre(l.text_chip)),
+                Some(StyleCell::Target(StyleTarget::Text))
+            );
+            // Lưới ngay dưới hàng ô: khe nhỏ hơn khe giữa các nhóm khác.
+            let gap = l.cells[0].y - chips[0].bottom();
+            assert!(gap > 0 && gap <= scaled(CHIP_GAP, dpi) + 1, "khe {gap}");
+            // Hình không có ô Màu chữ.
+            let b = at(StyleKind::Box, dpi);
+            assert_eq!(b.text_chip.w, 0);
+            assert_ne!(
+                cell_at(&b, pt(b.fill_chip.x + 1, b.fill_chip.y + 1)),
+                Some(StyleCell::Target(StyleTarget::Text))
+            );
         }
     }
 
@@ -986,7 +1097,7 @@ mod tests {
                 if let Some(a) = l.aligns {
                     rs.extend(a);
                 }
-                for r in &rs {
+                for r in rs.iter().filter(|r| r.w > 0) {
                     assert!(
                         r.x >= l.panel.x
                             && r.y >= l.panel.y

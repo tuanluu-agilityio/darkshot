@@ -19,9 +19,10 @@ use crate::annotate_style::{
 };
 use crate::overlay_input::bar_item_at;
 use darkshot_core::annotate::{
-    dip_to_px, highlight_from_stroke, press_mode, sanitize_paste, styled_from_stroke, Align,
-    Annotations, Applied, Change, HighlightMode, PressMode, Pt, Shape, SizeLevel, Style, TextEdit,
-    Tool, DEFAULT_COLOR, HIGHLIGHT_OPACITY, HIT_TOL_DIP, MARKER_DIP, MIN_EXTENT_DIP, PALETTE,
+    dip_to_px, highlight_from_stroke, label_default_frame, normalize_frame, press_mode,
+    sanitize_paste, styled_from_stroke, Align, Annotations, Applied, Change, HighlightMode,
+    PressMode, Pt, Shape, SizeLevel, Style, TextEdit, Tool, DEFAULT_COLOR, HIGHLIGHT_OPACITY,
+    HIT_TOL_DIP, MARKER_DIP, MIN_DRAG_PX, MIN_EXTENT_DIP, PALETTE,
 };
 use darkshot_core::color::picker_layout;
 use darkshot_core::color_picker::{VK_OEM_4, VK_OEM_6};
@@ -33,7 +34,7 @@ use darkshot_core::image::Image;
 use darkshot_core::overlay_layout::{
     flyout_rect, inflate, intersect, is_shape, scaled, selection_dirty, shape_cell_at,
     side_item_at, side_layout_for, size_cell_at, text_preview_bounds, to_pt, union, BarItem,
-    SideItem, HANDLE_HIT, HANDLE_SIZE, TEXT_EMPTY_W, TEXT_FRAME_PAD,
+    SideItem, HANDLE_HIT, HANDLE_SIZE,
 };
 use darkshot_core::overlay_stroke::{begin_stroke, end_stroke, extend_stroke, Stroke};
 use darkshot_core::theme::Rgb;
@@ -199,15 +200,16 @@ pub enum TextCmd {
 /// Ô chữ đang gõ cùng hình học đã đo (đo lại mỗi lần ô đổi, không đo khi vẽ hay khi nháy).
 pub struct TextBox {
     pub edit: TextEdit,
-    /// Điểm bấm tạo ô (tọa độ ảnh chụp).
-    pub at: Point,
+    /// Hai góc khung chữ (tọa độ ảnh chụp, đã chuẩn hóa: trên trái, dưới phải).
+    pub a: Pt,
+    pub b: Pt,
     /// DPI của màn hình chứa ô.
     pub dpi: u32,
     /// Cỡ chữ (px).
     pub size: f32,
     /// Con trỏ nháy (tọa độ ảnh chụp).
     pub caret: Rect,
-    /// Khung nét đứt (tọa độ ảnh chụp).
+    /// Khung nét đứt (tọa độ ảnh chụp): hộp bao của khung chữ, gồm viền ngoài.
     pub frame: Rect,
     /// Số ký tự bộ gõ đang soạn (chuỗi "marked"), nằm ngay trước con trỏ trong `edit`.
     pub marked: usize,
@@ -218,7 +220,7 @@ pub struct TextBox {
 
 impl TextBox {
     fn new(
-        at: Point,
+        (a, b): (Pt, Pt),
         dpi: u32,
         level: SizeLevel,
         color: Rgb,
@@ -226,9 +228,11 @@ impl TextBox {
         align: Align,
     ) -> TextBox {
         let size = dip_to_px(level.text_dip(), dpi);
-        let mut b = TextBox {
-            edit: TextEdit::new(Self::origin(at), size, color),
-            at,
+        let (a, b) = normalize_frame(a, b);
+        let mut t = TextBox {
+            edit: TextEdit::new(a, size, color),
+            a,
+            b,
             dpi,
             size,
             caret: NO_RECT,
@@ -237,42 +241,36 @@ impl TextBox {
             style,
             align,
         };
-        b.measure();
-        b
+        t.measure();
+        t
     }
 
-    fn origin(at: Point) -> Pt {
-        Pt {
-            x: at.x as f32,
-            y: at.y as f32,
-        }
+    /// Khung mặc định của một cú nhấp đơn tại `at`.
+    fn default_frame(at: Point, dpi: u32, level: SizeLevel) -> (Pt, Pt) {
+        label_default_frame(to_pt(at), dip_to_px(level.text_dip(), dpi))
     }
 
-    /// Đo lại con trỏ và khung. Khung gồm phần mực của chữ và con trỏ, nới `TEXT_FRAME_PAD`; ô chỉ
-    /// có khoảng trắng thì tính từ điểm đặt ô, cao một dòng, rộng tối thiểu `TEXT_EMPTY_W`.
+    /// Đặt lại khung (hai góc bất kỳ) rồi đo lại.
+    fn set_frame(&mut self, a: Pt, b: Pt) {
+        let (a, b) = normalize_frame(a, b);
+        self.a = a;
+        self.b = b;
+        self.measure();
+    }
+
+    /// Đo lại con trỏ và khung nét đứt.
     fn measure(&mut self) {
-        self.caret = label_caret_rect(&self.edit, self.align);
-        // Hộp khối chữ (gồm đệm, viền) đo cả khi chỉ có khoảng trắng.
+        self.caret = label_caret_rect(&self.edit, self.a, self.b, self.align);
         let label = Shape::Label {
-            origin: Self::origin(self.at),
+            a: self.a,
+            b: self.b,
             text: self.edit.text(),
             size: self.size,
             color: DEFAULT_COLOR,
             align: self.align,
             style: self.style,
         };
-        let min = Rect {
-            x: self.at.x,
-            y: self.at.y,
-            w: scaled(TEXT_EMPTY_W, self.dpi),
-            h: self.caret.h,
-        };
-        let base = union(
-            union(Some(shape_bounds(&label)), Some(min)),
-            Some(self.caret),
-        )
-        .unwrap_or(self.caret);
-        self.frame = inflate(base, scaled(TEXT_FRAME_PAD, self.dpi));
+        self.frame = inflate(shape_bounds(&label), 1);
     }
 
     /// Đổi cỡ chữ theo mức `level` (giữ chữ, màu `color`, vị trí con trỏ) rồi đo lại.
@@ -280,7 +278,7 @@ impl TextBox {
         self.size = dip_to_px(level.text_dip(), self.dpi);
         let text = self.edit.text();
         let caret = self.edit.caret();
-        let mut edit = TextEdit::new(Self::origin(self.at), self.size, color);
+        let mut edit = TextEdit::new(self.a, self.size, color);
         edit.insert(&text);
         // Sau khi chèn, con trỏ ở cuối chữ: lùi về chỗ cũ.
         for _ in caret..edit.caret() {
@@ -537,6 +535,9 @@ pub struct Annot {
     bounds: Vec<Rect>,
     stroke: Option<Stroke>,
     text: Option<TextBox>,
+    /// Điểm bấm đầu khi đang kéo khung chữ vừa mở (kéo thì khung theo chuột; nhấp đơn giữ khung
+    /// mặc định).
+    text_drag: Option<Point>,
     selected: Option<usize>,
     gesture: Option<Drag>,
     flyout: Flyout,
@@ -596,6 +597,7 @@ impl Annot {
             bounds: Vec::new(),
             stroke: None,
             text: None,
+            text_drag: None,
             selected: None,
             gesture: None,
             flyout: Flyout::None,
@@ -727,7 +729,10 @@ impl Annot {
 
     /// Chuột đang được giữ cho một nét hoặc một cử chỉ sửa hình.
     pub fn capturing(&self) -> bool {
-        self.stroke.is_some() || self.gesture.is_some() || self.style_drag.is_some()
+        self.stroke.is_some()
+            || self.gesture.is_some()
+            || self.style_drag.is_some()
+            || self.text_drag.is_some()
     }
 
     /// Có cú nhấn đang chờ nhả (thanh dọc hoặc bảng): `Model` không được kéo vùng chọn lúc này.
@@ -808,8 +813,12 @@ impl Annot {
         self.flyout == Flyout::None && self.style_kind().is_some()
     }
 
+    /// Đích màu đang áp của bảng: `Text` chỉ có với Chữ, Hình rơi về `Fill`.
     pub fn style_target(&self) -> StyleTarget {
-        self.style_target
+        match self.style_kind() {
+            Some(kind) => self.style_target.for_kind(kind),
+            None => self.style_target,
+        }
     }
 
     pub fn style_hover(&self) -> Option<StyleCell> {
@@ -826,10 +835,15 @@ impl Annot {
         }
         if let Some(shape) = self.selected.and_then(|i| self.marks.shapes().get(i)) {
             if let Some(st) = shape.style() {
+                let text = match shape {
+                    Shape::Label { color, .. } => *color,
+                    _ => self.color,
+                };
                 return Some(StyleView {
                     kind,
                     fill: st.fill,
                     stroke: st.stroke,
+                    text,
                     width_dip: px_to_dip(st.stroke_width),
                     opacity: st.opacity,
                     align: shape.align(),
@@ -844,6 +858,7 @@ impl Annot {
                 kind,
                 fill: b.style.fill,
                 stroke: b.style.stroke,
+                text: b.edit.color(),
                 width_dip: px_to_dip(b.style.stroke_width),
                 opacity: b.style.opacity,
                 align: Some(b.align),
@@ -857,6 +872,7 @@ impl Annot {
                 kind,
                 fill: self.box_style.fill,
                 stroke: self.color,
+                text: self.color,
                 width_dip: self.box_style.width_dip,
                 opacity: self.box_style.opacity,
                 align: None,
@@ -868,6 +884,7 @@ impl Annot {
                 kind,
                 fill: self.label_style.fill,
                 stroke: self.label_style.stroke,
+                text: self.color,
                 width_dip: self.label_style.width_dip,
                 opacity: self.label_style.opacity,
                 align: Some(self.align),
@@ -886,6 +903,7 @@ impl Annot {
             kind,
             fill: None,
             stroke: self.color,
+            text: self.color,
             width_dip: self.marker_width_dip,
             opacity: if kind == StyleKind::MarkerFree {
                 self.marker_opacity
@@ -1110,7 +1128,8 @@ impl Annot {
             StyleCell::Radius(d) => {
                 self.apply_style(StyleEdit::RadiusPx(step_radius(view.radius_px, d)), dpi)
             }
-            StyleCell::Target(t) => self.style_target = t,
+            // Màu chữ chỉ có ở bảng Chữ.
+            StyleCell::Target(t) => self.style_target = t.for_kind(view.kind),
             // Không nền: chọn lại một màu sau đó sẽ áp cho nền (Nền bật, Không nền tắt).
             StyleCell::NoFill => {
                 self.style_target = StyleTarget::Fill;
@@ -1118,9 +1137,12 @@ impl Annot {
             }
             StyleCell::Color(i) => {
                 if let Some(c) = PALETTE.get(i) {
-                    match self.style_target {
+                    match self.style_target.for_kind(view.kind) {
                         StyleTarget::Fill => self.apply_style(StyleEdit::Fill(Some(*c)), dpi),
                         StyleTarget::Border => self.apply_style(StyleEdit::Stroke(*c), dpi),
+                        // Màu chữ = màu của nút Màu: cùng đường với bấm màu trên thanh (đồng bộ
+                        // nút Màu, ô đang gõ và hình đang chọn; một bước hoàn tác).
+                        StyleTarget::Text => self.choose_color(*c, dpi),
                     }
                 }
             }
@@ -1189,7 +1211,7 @@ impl Annot {
         if let Some(shape) = self
             .text
             .as_ref()
-            .and_then(|t| t.edit.to_label(t.align, t.style))
+            .and_then(|t| t.edit.to_label(t.a, t.b, t.align, t.style))
         {
             v.push(Layer::Typing(shape));
         }
@@ -1617,7 +1639,8 @@ impl Annot {
     /// Mở ô chữ tại `p` (đã chốt ô cũ).
     pub fn open_text(&mut self, env: &Env, p: Point) {
         let style = self.label_style.style(self.label_style.stroke, env.dpi);
-        let b = TextBox::new(p, env.dpi, self.size, self.color, style, self.align);
+        let frame = TextBox::default_frame(p, env.dpi, self.size);
+        let b = TextBox::new(frame, env.dpi, self.size, self.color, style, self.align);
         self.mark(b.dirty());
         self.text = Some(b);
         self.caret_on = true;
@@ -1630,6 +1653,7 @@ impl Annot {
             return;
         };
         let editing = self.editing.take();
+        self.text_drag = None;
         self.mark(b.dirty());
         if let Some(i) = editing {
             // Sửa hình có sẵn: chốt thì thay tại chỗ (một bước hoàn tác, giữ lớp); hủy hoặc chữ trống
@@ -1642,7 +1666,7 @@ impl Annot {
                 return;
             }
             b.marked = 0;
-            if let Some(shape) = b.edit.to_label(b.align, b.style) {
+            if let Some(shape) = b.edit.to_label(b.a, b.b, b.align, b.style) {
                 if self.marks.shapes().get(i) != Some(&shape) {
                     if let Some(a) = self.marks.replace(i, shape) {
                         self.apply_change(&a);
@@ -1658,7 +1682,7 @@ impl Annot {
             b.drop_marked();
         }
         if commit {
-            if let Some(shape) = b.edit.to_label(b.align, b.style) {
+            if let Some(shape) = b.edit.to_label(b.a, b.b, b.align, b.style) {
                 // Chữ vào CUỐI sổ: nằm trên mọi hình đã vẽ trước đó.
                 self.add_mark(shape);
             }
@@ -1838,7 +1862,8 @@ impl Annot {
     /// ẩn trong lúc sửa. Chốt thay hình tại chỗ (một bước hoàn tác), Esc bỏ thay đổi.
     fn begin_edit_label(&mut self, env: &Env, index: usize) {
         let Some(Shape::Label {
-            origin,
+            a,
+            b: fb,
             text,
             size,
             color,
@@ -1855,13 +1880,9 @@ impl Annot {
         if !matches!(self.marks.shapes().get(index), Some(Shape::Label { .. })) {
             return;
         }
-        let at = Point {
-            x: origin.x.round() as i32,
-            y: origin.y.round() as i32,
-        };
-        let mut b = TextBox::new(at, env.dpi, self.size, color, style, align);
+        let mut b = TextBox::new((a, fb), env.dpi, self.size, color, style, align);
         b.size = size;
-        let mut edit = TextEdit::new(origin, size, color);
+        let mut edit = TextEdit::new(a, size, color);
         edit.insert(&text);
         b.edit = edit;
         b.measure();
@@ -2004,7 +2025,9 @@ impl Annot {
         if tool == Tool::Text {
             self.close_text(true);
             self.open_text(env, p);
-            return Down::Handled;
+            // Kéo thì khung chữ theo chuột; nhả không kéo thì giữ khung mặc định.
+            self.text_drag = Some(p);
+            return Down::Capture;
         }
         let at = Pt {
             x: p.x as f32,
@@ -2060,7 +2083,26 @@ impl Annot {
             if let Some(r) = extend_stroke(st, at, shift, env.img) {
                 self.mark(r);
             }
+        } else if let Some(start) = self.text_drag {
+            self.drag_text_frame(start, p);
         }
+    }
+
+    /// Kéo khung chữ vừa mở từ `start` tới `p` (chỉ khi đã kéo đủ xa; còn không giữ khung mặc định).
+    fn drag_text_frame(&mut self, start: Point, p: Point) {
+        let far = ((p.x - start.x) as f32).hypot((p.y - start.y) as f32) >= MIN_DRAG_PX;
+        let Some(t) = self.text.as_mut() else {
+            return;
+        };
+        if !far {
+            return;
+        }
+        let before = t.dirty();
+        t.set_frame(to_pt(start), to_pt(p));
+        let after = t.dirty();
+        self.caret_on = true;
+        self.mark(before);
+        self.mark(after);
     }
 
     /// Nhả chuột ở `p`: chốt nét hoặc cử chỉ, hoặc kích hoạt mục thanh dọc/bảng đã nhấn.
@@ -2079,6 +2121,10 @@ impl Annot {
         if self.stroke.is_some() {
             self.moved(env, p, shift);
             self.commit_stroke(env);
+            return true;
+        }
+        if let Some(start) = self.text_drag.take() {
+            self.drag_text_frame(start, p);
             return true;
         }
         if let Some(cell) = self.style_pressed.take() {
@@ -2156,6 +2202,7 @@ impl Annot {
         if self.gesture.is_some() {
             self.commit_gesture(env.dpi);
         }
+        self.text_drag = None;
         self.side_pressed = None;
         self.size_pressed = None;
         self.shape_pressed = None;
@@ -2217,7 +2264,7 @@ impl Annot {
 
     /// Con trỏ chuột theo ngữ cảnh ở `p`.
     pub fn cursor_at(&self, env: &Env, p: Point, hit: Hit) -> CursorKind {
-        if self.stroke.is_some() {
+        if self.stroke.is_some() || self.text_drag.is_some() {
             return CursorKind::Cross;
         }
         if self.gesture.is_some() {
@@ -2460,6 +2507,7 @@ mod tests {
         h.down(pt(300, 200));
         h.a.use_tool(Tool::Text, 96);
         h.down(pt(320, 220));
+        h.up(pt(320, 220), false);
         h.a.text_insert("xin");
         h.a.close_text(true);
         let kinds: Vec<&str> =
@@ -2595,6 +2643,7 @@ mod tests {
         // Đang gõ chữ: chữ là lớp trên cùng.
         h.a.use_tool(Tool::Text, 96);
         h.down(pt(300, 250));
+        h.up(pt(300, 250), false);
         h.a.text_insert("abc");
         let layers = h.a.layers();
         assert!(matches!(
@@ -2877,6 +2926,7 @@ mod tests {
         // Đang gõ chữ mà đổi công cụ: chốt chữ vào cuối sổ.
         h.a.use_tool(Tool::Text, 96);
         h.down(pt(300, 250));
+        h.up(pt(300, 250), false);
         h.a.text_insert("hi");
         h.a.toggle_tool(Tool::Line, 96);
         assert!(h.a.text().is_none());
@@ -2936,8 +2986,10 @@ mod tests {
     fn text_is_multiline_and_commits_at_the_end() {
         let mut h = H::new();
         h.a.use_tool(Tool::Text, 96);
-        assert_eq!(h.down(pt(100, 100)), Down::Handled);
+        // Mở khung ngay khi bấm (giữ chuột để kéo khung), nhả thì thôi kéo.
+        assert_eq!(h.down(pt(100, 100)), Down::Capture);
         assert!(h.a.text().is_some());
+        h.up(pt(100, 100), false);
         h.a.text_insert("xin ch\u{e0}o");
         h.a.text_command(TextCmd::Newline);
         h.a.text_insert("vi\u{1ec7}t");
@@ -2971,6 +3023,7 @@ mod tests {
         let mut h = H::new();
         h.a.use_tool(Tool::Text, 96);
         h.down(pt(100, 100));
+        h.up(pt(100, 100), false);
         h.a.close_text(true);
         h.down(pt(100, 100));
         h.a.text_insert("  ");
@@ -2984,6 +3037,7 @@ mod tests {
         let mut h = H::new();
         h.a.use_tool(Tool::Text, 96);
         h.down(pt(100, 100));
+        h.up(pt(100, 100), false);
         // Telex: "a" rồi "aa" -> "â" rồi chốt.
         h.a.text_marked("a");
         assert!(h.a.text_composing());
@@ -3012,6 +3066,7 @@ mod tests {
         h.draw(Tool::Rect, pt(100, 100), pt(180, 160));
         h.a.use_tool(Tool::Text, 96);
         h.down(pt(300, 250));
+        h.up(pt(300, 250), false);
         // Ô rỗng: hoàn tác hủy ô rồi hoàn tác hình cuối.
         h.a.undo(96);
         assert!(h.a.text().is_none());
@@ -3019,12 +3074,14 @@ mod tests {
         // Ô có chữ: chỉ xóa ô.
         h.a.redo(96);
         h.down(pt(300, 250));
+        h.up(pt(300, 250), false);
         h.a.text_insert("x");
         h.a.undo(96);
         assert!(h.a.text().is_none());
         assert_eq!(h.a.shapes().len(), 1);
         // Làm lại khi ô mở: không làm gì.
         h.down(pt(300, 250));
+        h.up(pt(300, 250), false);
         h.a.redo(96);
         assert!(h.a.text().is_some());
     }
@@ -3034,6 +3091,7 @@ mod tests {
         let mut h = H::new();
         h.a.use_tool(Tool::Text, 96);
         h.down(pt(100, 100));
+        h.up(pt(100, 100), false);
         h.a.text_insert("ab");
         let before = h.a.text().unwrap().size;
         h.a.set_size(SizeLevel::Huge, 96);
@@ -3057,6 +3115,7 @@ mod tests {
         assert!(h.a.take_dirty().is_empty());
         h.a.use_tool(Tool::Text, 96);
         h.down(pt(100, 100));
+        h.up(pt(100, 100), false);
         let e = h.a.text_epoch();
         h.a.take_dirty();
         assert!(h.a.caret_on());
@@ -3090,6 +3149,7 @@ mod tests {
         // Ô chữ: một Esc hủy ô (không chốt).
         h.a.use_tool(Tool::Text, 96);
         h.down(pt(300, 250));
+        h.up(pt(300, 250), false);
         h.a.text_insert("zzz");
         assert!(h.a.escape(96));
         assert!(h.a.text().is_none());
@@ -3431,6 +3491,7 @@ mod tests {
         h.draw(Tool::Rect, pt(100, 100), pt(180, 160));
         h.a.use_tool(Tool::Text, 96);
         h.down(pt(300, 250));
+        h.up(pt(300, 250), false);
         h.a.text_insert("cuối");
         let shapes = h.a.take_shapes(96);
         assert_eq!(shapes.len(), 2);
@@ -3504,6 +3565,7 @@ mod tests {
         let l = style_layout_ex(rect, kind, collapsed, h.dpi);
         let r = match cell {
             StyleCell::Color(i) => l.cells[i],
+            StyleCell::Target(StyleTarget::Text) => l.text_chip,
             StyleCell::Target(StyleTarget::Fill) => l.fill_chip,
             StyleCell::Target(StyleTarget::Border) => l.border_chip,
             StyleCell::NoFill => l.no_fill,
@@ -3547,6 +3609,7 @@ mod tests {
         assert!(matches!(h.a.shapes()[1], Shape::Box { oval: true, .. }));
         h.a.use_tool(Tool::Text, 96);
         h.down(pt(100, 200));
+        h.up(pt(100, 200), false);
         h.a.text_insert("ab");
         h.a.close_text(true);
         match &h.a.shapes()[2] {
@@ -3957,6 +4020,7 @@ mod tests {
         let mut h = H::new();
         h.a.use_tool(Tool::Text, 96);
         h.down(pt(100, 100));
+        h.up(pt(100, 100), false);
         h.a.text_insert("ab\ncdef");
         let narrow = h.a.text().unwrap().frame;
         click_style(&mut h, StyleCell::Color(2));
@@ -3997,6 +4061,7 @@ mod tests {
         let mut h = H::new();
         h.a.use_tool(Tool::Text, 96);
         h.down(pt(100, 100));
+        h.up(pt(100, 100), false);
         h.a.text_insert("short\nmuch longer line");
         h.a.close_text(true);
         h.a.use_tool(Tool::Select, 96);
@@ -4038,6 +4103,7 @@ mod tests {
         assert!(!h.a.escape(96));
         h.a.use_tool(Tool::Text, 96);
         h.down(pt(100, 100));
+        h.up(pt(100, 100), false);
         h.a.text_insert("x");
         assert!(h.a.escape(96), "đóng ô chữ");
         assert!(!h.a.escape(96));
@@ -4086,17 +4152,17 @@ mod tests {
             h.a.use_tool(tool, 96);
             click_style(&mut h, StyleCell::Color(3)); // nền theo mục tiêu mặc định (Nền)
             let v = h.a.style_view(96).unwrap();
-            let f = chip_focus(h.a.style_target(), v.fill);
+            let f = chip_focus(v.kind, h.a.style_target(), v.fill);
             assert!(f.fill && !f.no_fill, "{tool:?}");
             click_style(&mut h, StyleCell::Target(StyleTarget::Border));
             click_style(&mut h, StyleCell::NoFill);
             let v = h.a.style_view(96).unwrap();
-            let f = chip_focus(h.a.style_target(), v.fill);
+            let f = chip_focus(v.kind, h.a.style_target(), v.fill);
             assert!(!f.fill && f.no_fill, "{tool:?}: Không nền thì Nền tắt");
             assert_eq!(h.a.style_target(), StyleTarget::Fill);
             click_style(&mut h, StyleCell::Color(5));
             let v = h.a.style_view(96).unwrap();
-            let f = chip_focus(h.a.style_target(), v.fill);
+            let f = chip_focus(v.kind, h.a.style_target(), v.fill);
             assert_eq!(v.fill, Some(PALETTE[5]));
             assert!(f.fill && !f.no_fill, "{tool:?}: chọn màu thì Nền bật");
         }
@@ -4145,6 +4211,7 @@ mod tests {
         assert!(box_style(&h.a, 0).no_border);
         h.a.use_tool(Tool::Text, 96);
         h.down(pt(100, 250));
+        h.up(pt(100, 250), false);
         click_style(&mut h, StyleCell::Width(1));
         click_style(&mut h, StyleCell::NoBorder);
         h.a.text_insert("ab");
@@ -4186,6 +4253,7 @@ mod tests {
         // Chữ có bo góc.
         h.a.use_tool(Tool::Text, 96);
         h.down(pt(100, 250));
+        h.up(pt(100, 250), false);
         click_style(&mut h, StyleCell::Radius(1));
         h.a.text_insert("x");
         h.a.close_text(true);
@@ -4463,6 +4531,7 @@ mod tests {
     fn make_label(h: &mut H, at: Point, text: &str) {
         h.a.use_tool(Tool::Text, 96);
         h.down(at);
+        h.up(at, false);
         h.a.text_insert(text);
         h.a.close_text(true);
     }
@@ -4605,5 +4674,173 @@ mod tests {
         h.a.use_tool(Tool::Select, 96);
         double_press(&mut h, pt(100, 100), 100);
         assert!(h.a.text().is_none());
+    }
+
+    // ---- Task 115: khung chữ, màu chữ trong bảng
+
+    fn frame_of(a: &Annot, i: usize) -> (Pt, Pt) {
+        match &a.shapes()[i] {
+            Shape::Label { a, b, .. } => (*a, *b),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_single_click_makes_a_default_sized_frame_and_a_drag_sets_the_frame() {
+        let mut h = H::new();
+        h.a.use_tool(Tool::Text, 96);
+        h.down(pt(100, 100));
+        h.up(pt(100, 100), false);
+        let t = h.a.text().unwrap();
+        let size = t.size;
+        let (a, b) = (t.a, t.b);
+        assert_eq!(a, Pt { x: 100.0, y: 100.0 });
+        assert!(b.x - a.x >= 4.0 * size && b.y - a.y >= size, "{a:?} {b:?}");
+        h.a.text_insert("x");
+        h.a.close_text(true);
+        assert_eq!(frame_of(&h.a, 0), (a, b));
+        // Kéo (kể cả ngược chiều): khung theo chuột, chuẩn hóa; cỡ chữ không đổi.
+        let mut h = H::new();
+        h.a.use_tool(Tool::Text, 96);
+        h.down(pt(300, 200));
+        h.drag(pt(200, 150), false);
+        h.up(pt(200, 150), false);
+        let t = h.a.text().unwrap();
+        assert_eq!(
+            (t.a, t.b),
+            (Pt { x: 200.0, y: 150.0 }, Pt { x: 300.0, y: 200.0 })
+        );
+        assert_eq!(t.size, size);
+        assert!(!h.a.capturing());
+        h.a.text_insert("hi");
+        h.a.close_text(true);
+        assert_eq!(h.a.shapes().len(), 1);
+    }
+
+    #[test]
+    fn resizing_a_text_frame_by_a_handle_is_one_undo_step_and_keeps_the_font_size() {
+        let mut h = H::new();
+        make_label(&mut h, pt(100, 100), "abc");
+        let before = h.a.shapes()[0].clone();
+        let Shape::Label { size, .. } = before else {
+            panic!()
+        };
+        let (_, b0) = frame_of(&h.a, 0);
+        h.a.use_tool(Tool::Select, 96);
+        select_at(&mut h, pt(110, 110));
+        // Tay nắm Đông-Nam nằm ở góc dưới phải của khung a..b.
+        let grip = pt(b0.x as i32, b0.y as i32);
+        h.gesture(grip, pt(grip.x + 60, grip.y + 40));
+        let (a1, b1) = frame_of(&h.a, 0);
+        assert_eq!((b1.x, b1.y), (b0.x + 60.0, b0.y + 40.0));
+        assert_eq!(a1, Pt { x: 100.0, y: 100.0 });
+        let Shape::Label { size: s1, .. } = &h.a.shapes()[0] else {
+            panic!()
+        };
+        assert_eq!(*s1, size, "cỡ chữ không đổi theo khung");
+        h.a.undo(96);
+        assert_eq!(h.a.shapes()[0], before, "một bước hoàn tác");
+    }
+
+    #[test]
+    fn text_colour_chip_applies_to_the_text_and_follows_the_colour_button() {
+        let mut h = H::new();
+        h.a.use_tool(Tool::Text, 96);
+        h.down(pt(100, 100));
+        h.up(pt(100, 100), false);
+        assert_eq!(h.a.style_kind(), Some(StyleKind::Label));
+        click_style(&mut h, StyleCell::Target(StyleTarget::Text));
+        assert_eq!(h.a.style_target(), StyleTarget::Text);
+        click_style(&mut h, StyleCell::Color(7));
+        assert_eq!(h.a.color(), PALETTE[7], "đồng bộ nút Màu");
+        assert_eq!(h.a.style_view(96).unwrap().text, PALETTE[7]);
+        assert_eq!(h.a.style_view(96).unwrap().fill, None, "nền không đổi");
+        h.a.text_insert("ab");
+        h.a.close_text(true);
+        match &h.a.shapes()[0] {
+            Shape::Label { color, style, .. } => {
+                assert_eq!(*color, PALETTE[7]);
+                assert_eq!(style.fill, None);
+            }
+            other => panic!("{other:?}"),
+        }
+        // Chọn màu từ nút Màu cũng hiện ở ô Màu chữ.
+        h.a.choose_color(PALETTE[9], 96);
+        h.a.use_tool(Tool::Text, 96);
+        assert_eq!(h.a.style_view(96).unwrap().text, PALETTE[9]);
+    }
+
+    #[test]
+    fn text_colour_on_a_selected_label_is_one_undo_step_and_fill_border_still_work() {
+        let mut h = H::new();
+        make_label(&mut h, pt(100, 100), "abc");
+        let before = h.a.shapes()[0].clone();
+        h.a.use_tool(Tool::Select, 96);
+        select_at(&mut h, pt(110, 110));
+        assert_eq!(h.a.style_view(96).unwrap().text, DEFAULT_COLOR);
+        click_style(&mut h, StyleCell::Target(StyleTarget::Text));
+        click_style(&mut h, StyleCell::Color(11));
+        match &h.a.shapes()[0] {
+            Shape::Label { color, style, .. } => {
+                assert_eq!(*color, PALETTE[11]);
+                assert_eq!(style.fill, None);
+                assert_eq!(style.stroke, before.style().unwrap().stroke);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(h.a.style_view(96).unwrap().text, PALETTE[11]);
+        h.a.undo(96);
+        assert_eq!(h.a.shapes()[0], before);
+        // Đổi sang đích Nền: màu áp cho nền, màu chữ giữ nguyên.
+        select_at(&mut h, pt(110, 110));
+        click_style(&mut h, StyleCell::Target(StyleTarget::Fill));
+        click_style(&mut h, StyleCell::Color(2));
+        let st = h.a.shapes()[0].style().unwrap();
+        assert_eq!(st.fill, Some(PALETTE[2]));
+        match &h.a.shapes()[0] {
+            Shape::Label { color, .. } => assert_eq!(*color, DEFAULT_COLOR),
+            other => panic!("{other:?}"),
+        }
+        click_style(&mut h, StyleCell::Target(StyleTarget::Border));
+        click_style(&mut h, StyleCell::Color(4));
+        assert_eq!(h.a.shapes()[0].style().unwrap().stroke, PALETTE[4]);
+    }
+
+    #[test]
+    fn shapes_have_no_text_target_and_exactly_one_target_lights_up() {
+        use crate::annotate_style::chip_focus;
+        let mut h = H::new();
+        h.a.use_tool(Tool::Text, 96);
+        click_style(&mut h, StyleCell::Target(StyleTarget::Text));
+        // Chuyển sang Hình chữ nhật: đích Màu chữ rơi về Nền, vẫn đúng một đích sáng.
+        h.a.use_tool(Tool::Rect, 96);
+        assert_eq!(h.a.style_target(), StyleTarget::Fill);
+        let v = h.a.style_view(96).unwrap();
+        let f = chip_focus(v.kind, h.a.style_target(), v.fill);
+        assert_eq!(
+            [f.text, f.fill, f.border, f.no_fill]
+                .iter()
+                .filter(|b| **b)
+                .count(),
+            1
+        );
+        click_style(&mut h, StyleCell::Color(3));
+        assert_eq!(h.a.style_view(96).unwrap().fill, Some(PALETTE[3]));
+        // Bảng Chữ: ba đích lần lượt, luôn đúng một ô sáng.
+        h.a.use_tool(Tool::Text, 96);
+        for t in [StyleTarget::Text, StyleTarget::Fill, StyleTarget::Border] {
+            click_style(&mut h, StyleCell::Target(t));
+            let v = h.a.style_view(96).unwrap();
+            let f = chip_focus(v.kind, h.a.style_target(), v.fill);
+            assert_eq!(h.a.style_target(), t);
+            assert_eq!(
+                [f.text, f.fill, f.border, f.no_fill]
+                    .iter()
+                    .filter(|b| **b)
+                    .count(),
+                1,
+                "{t:?}"
+            );
+        }
     }
 }
