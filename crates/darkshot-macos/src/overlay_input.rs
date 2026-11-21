@@ -24,6 +24,9 @@ pub const KEY_ESCAPE: u16 = 53;
 pub const MAC_BAR: [Action; 3] = [Action::Save, Action::Copy, Action::Cancel];
 /// Khoảng chừa thêm (điểm ở 96 DPI) dưới mép trên cho viên nhắc, để không nằm dưới tai thỏ.
 pub const HINT_NOTCH_CLEAR: i32 = 40;
+/// Đệm ngang và dọc (96 DPI) của nhãn kích thước, như bản Windows.
+const LABEL_PAD_X: i32 = 7;
+const LABEL_PAD_Y: i32 = 2;
 /// Dung sai (điểm) khi khớp khung ảnh chụp với khung `NSScreen`.
 const FRAME_EPS: f64 = 0.5;
 
@@ -38,99 +41,136 @@ pub struct Mods {
 
 /// DPI tương đương của hệ số `scale` (96 ở 1x, 192 ở Retina 2x) để dùng hằng bố cục của core.
 pub fn dpi_of(scale: f64) -> u32 {
-    let _ = scale;
-    todo!()
+    if !(scale.is_finite() && scale > 0.0) {
+        return 96;
+    }
+    // `as` bão hòa, không panic.
+    ((96.0 * scale).round() as u32).max(1)
 }
 
 /// Điểm toàn cục Cocoa (gốc dưới trái màn hình chính, Y lên) của một sự kiện sang pixel của màn
 /// hình có khung Cocoa `screen` và hệ số `scale` (gốc trên trái màn hình đó).
 pub fn event_to_px(global: (f64, f64), screen: RectF, scale: f64) -> Point {
-    let _ = (global, screen, scale);
-    todo!()
+    let x = global.0 - screen.x;
+    // Cạnh trên của màn hình trong Cocoa là `y + h`; Y lật về hướng xuống.
+    let y = (screen.y + screen.h) - global.1;
+    Point {
+        x: pt_to_px(x, scale),
+        y: pt_to_px(y, scale),
+    }
 }
 
 /// Bán kính bắt tay nắm (pixel) ở hệ số `scale`.
 pub fn handle_radius(scale: f64) -> i32 {
-    let _ = scale;
-    todo!()
+    pt_to_px(f64::from(HANDLE_HIT), scale).max(1)
 }
 
 /// Với mỗi ảnh chụp (khung gốc trên trái, điểm), chỉ số `NSScreen` có cùng khung. `screens` là
 /// khung Cocoa theo thứ tự `NSScreen.screens` (phần tử đầu là màn hình chính). Thiếu, thừa hay
 /// trùng thì `None` (cấu hình màn hình đã đổi sau khi chụp).
 pub fn match_screens(shots: &[RectF], screens: &[RectF]) -> Option<Vec<usize>> {
-    let _ = (
-        shots,
-        screens,
-        cocoa_to_top_left as fn(RectF, f64) -> RectF,
-        FRAME_EPS,
-    );
-    todo!()
+    if shots.is_empty() || shots.len() != screens.len() {
+        return None;
+    }
+    let primary_h = screens[0].h;
+    let tl: Vec<RectF> = screens
+        .iter()
+        .map(|s| cocoa_to_top_left(*s, primary_h))
+        .collect();
+    let same = |a: &RectF, b: &RectF| {
+        (a.x - b.x).abs() <= FRAME_EPS
+            && (a.y - b.y).abs() <= FRAME_EPS
+            && (a.w - b.w).abs() <= FRAME_EPS
+            && (a.h - b.h).abs() <= FRAME_EPS
+    };
+    let mut out = Vec::with_capacity(shots.len());
+    for shot in shots {
+        let i = tl.iter().position(|s| same(s, shot))?;
+        if out.contains(&i) {
+            return None;
+        }
+        out.push(i);
+    }
+    Some(out)
 }
 
 /// Chữ của nhãn kích thước (pixel thật của ảnh sẽ lưu).
 pub fn size_label(r: Rect) -> String {
-    let _ = r;
-    todo!()
+    format!("{} \u{d7} {}", r.w, r.h)
 }
 
 /// Ô nhãn kích thước cỡ chữ `text` (pixel): trên vùng chọn nếu đủ chỗ, không thì trong góc trên
 /// trái vùng chọn; kẹp ngang vào màn hình.
 pub fn label_rect(sel: Rect, text: (i32, i32), dpi: u32, mon: Rect) -> Rect {
-    let _ = (sel, text, dpi, mon, clamp_x as fn(Rect, Rect) -> Rect, GAP);
-    todo!()
+    let w = text.0.max(0).saturating_add(2 * scaled(LABEL_PAD_X, dpi));
+    let h = text.1.max(0).saturating_add(2 * scaled(LABEL_PAD_Y, dpi));
+    let gap = scaled(GAP, dpi);
+    let above = sel.y.saturating_sub(gap).saturating_sub(h);
+    let (x, y) = if above >= mon.y {
+        (sel.x, above)
+    } else {
+        (sel.x.saturating_add(gap), sel.y.saturating_add(gap))
+    };
+    clamp_x(Rect { x, y, w, h }, mon)
 }
 
 /// Viên nhắc "Kéo để chọn vùng · Esc để thoát" cỡ chữ `text`: giữa mép trên, chừa tai thỏ.
 pub fn hint_rect(mon: Rect, text: (i32, i32), dpi: u32) -> Rect {
-    let _ = (
-        mon,
-        text,
-        dpi,
-        snap::hint_rect as fn(Rect, (i32, i32), u32) -> Rect,
-    );
-    todo!()
+    let mut r = snap::hint_rect(mon, text, dpi);
+    r.y = r.y.saturating_add(scaled(HINT_NOTCH_CLEAR, dpi));
+    r
 }
 
 /// Cạnh một nút của thanh hành động (pixel).
 pub fn bar_button_size(dpi: u32) -> i32 {
-    let _ = (dpi, scaled as fn(i32, u32) -> i32, BUTTON);
-    todo!()
+    scaled(BUTTON, dpi)
 }
 
 /// Thanh hành động cạnh vùng chọn `sel`, luôn nằm trong màn hình `mon`.
 pub fn bar_rect(sel: Rect, dpi: u32, mon: Rect) -> Rect {
-    let _ = (
-        sel,
-        dpi,
-        mon,
-        place_toolbar as fn(Rect, (i32, i32), i32, Rect) -> Rect,
-    );
-    todo!()
+    let b = bar_button_size(dpi);
+    let w = b.saturating_mul(MAC_BAR.len() as i32);
+    place_toolbar(sel, (w, b), scaled(GAP, dpi), mon)
 }
 
 /// Ô của nút thứ `i` trên thanh `bar`.
 pub fn bar_button_rect(bar: Rect, dpi: u32, i: usize) -> Rect {
-    let _ = (bar, dpi, i);
-    todo!()
+    let b = bar_button_size(dpi);
+    let i = i32::try_from(i).unwrap_or(i32::MAX);
+    Rect {
+        x: bar.x.saturating_add(b.saturating_mul(i)),
+        y: bar.y,
+        w: b,
+        h: b,
+    }
 }
 
 /// Nút của thanh `bar` dưới điểm `p`.
 pub fn bar_action_at(bar: Rect, p: Point, dpi: u32) -> Option<Action> {
-    let _ = (bar, p, dpi);
-    todo!()
+    if !bar.contains(p) {
+        return None;
+    }
+    MAC_BAR
+        .iter()
+        .enumerate()
+        .find(|(i, _)| bar_button_rect(bar, dpi, *i).contains(p))
+        .map(|(_, a)| *a)
 }
 
 /// Gợi ý của một nút (phím tắt kiểu Mac).
 pub fn bar_tip(a: Action) -> Msg {
-    let _ = a;
-    todo!()
+    match a {
+        Action::Save => Msg::OverlaySaveMac,
+        Action::Copy => Msg::OverlayCopyMac,
+        _ => Msg::OverlayCancelMac,
+    }
 }
 
 /// Ô gợi ý của nút đang trỏ: dưới thanh nếu đủ chỗ, không thì trên; trong màn hình.
 pub fn tip_rect(bar: Rect, text: (i32, i32), dpi: u32, mon: Rect) -> Rect {
-    let _ = (bar, text, dpi, mon);
-    todo!()
+    let w = text.0.max(0).saturating_add(2 * scaled(LABEL_PAD_X, dpi));
+    let h = text.1.max(0).saturating_add(2 * scaled(LABEL_PAD_Y, dpi));
+    place_toolbar(bar, (w.min(mon.w), h.min(mon.h)), scaled(GAP, dpi), mon)
 }
 
 /// Hành động của một phím: `Esc` luôn hủy; `⌘S` lưu, `⌘C` chép khi có vùng chọn và không đang
@@ -142,8 +182,19 @@ pub fn key_action(
     has_sel: bool,
     dragging: bool,
 ) -> Option<Action> {
-    let _ = (key_code, chars, mods, has_sel, dragging);
-    todo!()
+    if key_code == KEY_ESCAPE || chars == Some("\u{1b}") {
+        return Some(Action::Cancel);
+    }
+    if !mods.cmd || mods.ctrl || mods.opt || !has_sel || dragging {
+        return None;
+    }
+    // Theo chữ của phím (bố cục bàn phím), không theo vị trí phím.
+    let c = chars?.chars().next()?.to_ascii_lowercase();
+    match c {
+        's' => Some(Action::Save),
+        'c' => Some(Action::Copy),
+        _ => None,
+    }
 }
 
 /// Kích thước pixel và hệ số của một màn hình trong lớp phủ.
@@ -191,68 +242,132 @@ pub struct Model {
     last_input: Instant,
 }
 
+const EMPTY: Rect = Rect {
+    x: 0,
+    y: 0,
+    w: 0,
+    h: 0,
+};
+
 impl Model {
     pub fn new(screens: Vec<ScreenPx>, now: Instant) -> Model {
-        let _ = (screens, now);
-        todo!()
+        Model {
+            screens,
+            active: None,
+            sel: Selection::new(EMPTY),
+            pressed: None,
+            hover: None,
+            last_input: now,
+        }
     }
 
     pub fn active(&self) -> Option<usize> {
-        todo!()
+        self.active
     }
 
     /// Vùng chọn trên màn hình đang chọn (pixel).
     pub fn rect(&self) -> Option<Rect> {
-        todo!()
+        self.active.and(self.sel.rect())
     }
 
     pub fn is_dragging(&self) -> bool {
-        todo!()
+        self.sel.is_dragging()
     }
 
     /// Khung pixel của màn hình `i` (gốc 0, 0).
     pub fn bounds(&self, i: usize) -> Option<Rect> {
-        let _ = i;
-        todo!()
+        self.screens.get(i).map(|s| Rect {
+            x: 0,
+            y: 0,
+            w: s.w,
+            h: s.h,
+        })
     }
 
     pub fn dpi(&self, i: usize) -> u32 {
-        let _ = i;
-        todo!()
+        self.screens.get(i).map_or(96, |s| dpi_of(s.scale))
     }
 
     /// Thanh hành động trên màn hình đang chọn.
     pub fn bar(&self) -> Option<(usize, Rect)> {
-        todo!()
+        if self.is_dragging() {
+            return None;
+        }
+        let i = self.active?;
+        let sel = self.rect()?;
+        let mon = self.bounds(i)?;
+        Some((i, bar_rect(sel, self.dpi(i), mon)))
     }
 
     pub fn view_state(&self, i: usize) -> ViewState {
-        let _ = i;
-        todo!()
+        if i >= self.screens.len() {
+            return ViewState::default_hidden();
+        }
+        let mine = self.active == Some(i);
+        ViewState {
+            rect: if mine { self.rect() } else { None },
+            bar: self.bar().filter(|(s, _)| *s == i).map(|(_, b)| b),
+            hover: if mine { self.hover } else { None },
+            pressed: if mine { self.pressed } else { None },
+            hint: self.rect().is_none(),
+        }
     }
 
     /// Nhấn chuột trái ở `p` (pixel của màn hình `screen`).
     pub fn press(&mut self, screen: usize, p: Point, now: Instant) {
-        let _ = (screen, p, now);
-        todo!()
+        self.last_input = now;
+        let Some(bounds) = self.bounds(screen) else {
+            return;
+        };
+        if let Some((s, bar)) = self.bar() {
+            if s == screen && bar.contains(p) {
+                self.pressed = bar_action_at(bar, p, self.dpi(s));
+                return;
+            }
+        }
+        self.pressed = None;
+        if self.active != Some(screen) {
+            self.active = Some(screen);
+            self.sel = Selection::new(bounds);
+            self.hover = None;
+        }
+        let rad = self
+            .screens
+            .get(screen)
+            .map_or(1, |s| handle_radius(s.scale));
+        self.sel.press(p, rad);
     }
 
     /// Kéo tới `p` (pixel của màn hình đang chọn; ngoài màn hình thì `Selection` kẹp lại).
     pub fn drag(&mut self, p: Point, now: Instant) {
-        let _ = (p, now);
-        todo!()
+        self.last_input = now;
+        if self.pressed.is_some() {
+            return;
+        }
+        self.sel.drag_to(p);
     }
 
     /// Nhả chuột ở `p`; trả hành động khi nhấn và nhả trên cùng một nút của thanh.
     pub fn release(&mut self, p: Point, now: Instant) -> Option<Action> {
-        let _ = (p, now);
-        todo!()
+        self.last_input = now;
+        if let Some(a) = self.pressed.take() {
+            let (s, bar) = self.bar()?;
+            return (bar_action_at(bar, p, self.dpi(s)) == Some(a)).then_some(a);
+        }
+        if self.sel.is_dragging() {
+            self.sel.drag_to(p);
+        }
+        self.sel.release();
+        None
     }
 
     /// Chuột di chuyển (không nhấn) trên màn hình `screen`.
     pub fn hover(&mut self, screen: usize, p: Point, now: Instant) {
-        let _ = (screen, p, now);
-        todo!()
+        self.last_input = now;
+        self.hover = self
+            .bar()
+            .filter(|(s, _)| *s == screen)
+            .and_then(|(s, bar)| bar_action_at(bar, p, self.dpi(s)));
     }
 
     /// Một phím xuống; trả hành động cần làm.
@@ -263,14 +378,19 @@ impl Model {
         mods: Mods,
         now: Instant,
     ) -> Option<Action> {
-        let _ = (key_code, chars, mods, now);
-        todo!()
+        self.last_input = now;
+        key_action(
+            key_code,
+            chars,
+            mods,
+            self.rect().is_some(),
+            self.is_dragging(),
+        )
     }
 
     /// Đã quá `IDLE_TIMEOUT` kể từ tương tác cuối.
     pub fn idle_expired(&self, now: Instant) -> bool {
-        let _ = now;
-        todo!()
+        now.saturating_duration_since(self.last_input) >= IDLE_TIMEOUT
     }
 }
 
