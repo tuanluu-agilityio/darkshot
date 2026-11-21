@@ -4,7 +4,7 @@ Cập nhật: 2026-11-21
 
 ## CHƯA RÀ SOÁT / CHƯA QA (quyết định của chủ dự án, 2026-11-21)
 
-Chủ dự án gần hết token nên cho builder (sonnet) làm hết Task 107, 108, 109 mà KHÔNG rà soát theo từng task và KHÔNG QA tay theo từng task; chỉ có cổng tự động (`check.sh`, `check-windows-cross.sh`, CI Windows+macOS). Các task này được gộp vào `feat/macos-port` khi cổng tự động xanh. **Trước khi gộp `feat/macos-port` vào `main` bắt buộc:** (1) một lượt rà soát opus cuối cho 107–109 (khóa bí mật trong Tùy chọn, an toàn khi thoát của tải lên: không được mất ảnh, vòng đời Objective-C), (2) QA tay trên máy thật theo các gói `docs/tasks/107-…`, `108-…`, (3) một lượt chạy thử bản Windows (`check.ps1` đã chạy trên CI; chưa ai chạy ứng dụng Windows thật sau M2). Task 103–106 đã rà soát và QA tay đạt.
+Chủ dự án gần hết token nên cho builder (sonnet) làm hết Task 107, 108, 109 mà KHÔNG rà soát theo từng task và KHÔNG QA tay theo từng task; chỉ có cổng tự động (`check.sh`, `check-windows-cross.sh`, CI Windows+macOS). Các task này được gộp vào `feat/macos-port` khi cổng tự động xanh. **Trước khi gộp `feat/macos-port` vào `main` bắt buộc:** (1) một lượt rà soát opus cuối cho 107–109 (khóa bí mật trong Tùy chọn, an toàn khi thoát của tải lên: không được mất ảnh, vòng đời Objective-C), (2) QA tay trên máy thật theo các gói `docs/tasks/107-…`, `108-…`, (3) một lượt chạy thử bản Windows (`check.ps1` đã chạy trên CI; chưa ai chạy ứng dụng Windows thật sau M2). Task 103–106 đã rà soát và QA tay đạt. Chỗ hở đã biết của 108: thoát ngoài menu (đăng xuất, tắt máy, SIGTERM) chưa lưu lượt tải lên dở → làm ở Task 109 phần A (`docs/tasks/109-macos-polish.md`).
 
 ## Nhánh macOS (đang làm, song song)
 
