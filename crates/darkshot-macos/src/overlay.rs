@@ -15,6 +15,7 @@ use crate::overlay_input::{
 };
 use crate::overlay_view::{make_window, OverlayView, OverlayWindow};
 use darkshot_core::actions::Action;
+use darkshot_core::annotate::Shape;
 use darkshot_core::geometry::Rect;
 use darkshot_core::image::Image;
 use dispatch2::{DispatchQueue, DispatchTime};
@@ -44,6 +45,9 @@ pub enum Outcome {
         action: Action,
         image: Image,
         rect: Rect,
+        /// Hình đánh dấu (tọa độ ảnh màn hình, từ dưới lên trên theo chỉ số); bên gọi đốt vào ảnh
+        /// đã cắt. Rỗng khi chưa có công cụ đánh dấu (Task 111).
+        shapes: Vec<Shape>,
     },
 }
 
@@ -65,6 +69,8 @@ pub struct Frame {
     pub scale: f64,
     pub dpi: u32,
     pub state: ViewState,
+    /// Hình đánh dấu của màn hình này (rỗng nếu màn hình không phải màn hình đang chọn).
+    pub shapes: Vec<Shape>,
 }
 
 struct Slot {
@@ -80,6 +86,8 @@ struct Slot {
 struct Session {
     id: u64,
     model: Model,
+    /// Hình đánh dấu của phiên, thuộc màn hình đang chọn; chỉ số tăng dần là từ dưới lên trên.
+    shapes: Vec<Shape>,
     slots: Vec<Slot>,
     /// Ảnh gốc của từng màn hình (cùng thứ tự `slots`), để cắt khi có hành động.
     images: Vec<Image>,
@@ -295,6 +303,7 @@ pub fn open(
     let session = Session {
         id,
         model,
+        shapes: Vec::new(),
         slots,
         images: shots.into_iter().map(|s| s.image).collect(),
         observer,
@@ -482,6 +491,11 @@ pub fn frame(i: usize) -> Option<Frame> {
             scale: slot.scale,
             dpi: s.model.dpi(i),
             state: s.model.view_state(i),
+            shapes: if s.model.active() == Some(i) {
+                s.shapes.clone()
+            } else {
+                Vec::new()
+            },
         })
     })
 }
@@ -505,6 +519,7 @@ fn finish(action: Option<Action>) {
     };
     let Session {
         model,
+        shapes,
         slots,
         images,
         observer,
@@ -539,6 +554,7 @@ fn finish(action: Option<Action>) {
                 action: a,
                 image,
                 rect,
+                shapes,
             },
             None => Outcome::Cancelled,
         },

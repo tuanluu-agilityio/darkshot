@@ -21,6 +21,7 @@
 //! chụp vùng mở lớp phủ; lưu/tải lên toàn màn hình lấy màn hình chứa con trỏ rồi chạy hành động
 //! trên luồng nền; cổng về rảnh ngay khi đã có ảnh.
 
+use crate::annotate_draw;
 use crate::capture::{self, CaptureError, DisplayShot};
 use crate::clipboard::PasteboardClipboard;
 use crate::coords::{cocoa_to_top_left, RectF};
@@ -38,6 +39,7 @@ use crate::tray::Tray;
 use crate::upload;
 use crate::{hotkey, lang, paths, timeutil};
 use darkshot_core::actions::{run_action, Action, Ctx, NoticeKind, Notifier};
+use darkshot_core::annotate::Shape;
 use darkshot_core::app_flow::OpenReason;
 use darkshot_core::app_state::{self, AppState, ConfigNotice};
 use darkshot_core::capture_gate::{
@@ -603,7 +605,7 @@ fn on_full_captured(
         w: i32::try_from(image.width).unwrap_or(i32::MAX),
         h: i32::try_from(image.height).unwrap_or(i32::MAX),
     };
-    act_in_background(action, image, rect);
+    act_in_background(action, image, rect, Vec::new());
 }
 
 /// Lớp phủ đã đóng (mọi đường): cổng về rảnh, rồi làm hành động trên luồng nền.
@@ -613,9 +615,10 @@ fn on_overlay_closed(outcome: Outcome) {
         action,
         image,
         rect,
+        shapes,
     } = outcome
     {
-        act_in_background(action, image, rect);
+        act_in_background(action, image, rect, shapes);
     }
 }
 
@@ -629,8 +632,9 @@ fn report_capture_error(e: &CaptureError) {
 }
 
 /// Làm `action` trên vùng `rect` (pixel) của `image`, không chặn luồng chính. Lưu/chép: cắt rồi
-/// `actions::run_action` trên luồng `darkshot-action`. Tải lên: `start_upload`.
-fn act_in_background(action: Action, image: Image, rect: Rect) {
+/// `actions::run_action` trên luồng `darkshot-action`. Tải lên: `start_upload`. `shapes` (hình đánh
+/// dấu, tọa độ ảnh màn hình) được đốt vào ảnh đã cắt trước hành động; rỗng thì không đổi gì.
+fn act_in_background(action: Action, image: Image, rect: Rect, shapes: Vec<Shape>) {
     let Some(config) = STATE.with(|s| s.borrow().as_ref().map(|a| a.config.clone())) else {
         // Không có cấu hình: không thể biết thư mục lưu; báo thay vì im lặng làm mất ảnh.
         notify_error(
@@ -641,7 +645,7 @@ fn act_in_background(action: Action, image: Image, rect: Rect) {
     };
     let lang = lang::current();
     if action == Action::Upload {
-        start_upload(&config, image, rect, lang);
+        start_upload(&config, image, rect, &shapes, lang);
         return;
     }
     let (save_dir, expiry, upload_format, jpeg_quality) = (
@@ -665,7 +669,7 @@ fn act_in_background(action: Action, image: Image, rect: Rect) {
                 upload_format,
                 jpeg_quality,
             };
-            let cropped = image.crop(rect);
+            let cropped = burn_shapes(image.crop(rect), rect, &shapes);
             let _ = run_action(&ctx, action, &cropped);
             IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
         });
@@ -686,12 +690,29 @@ fn act_in_background(action: Action, image: Image, rect: Rect) {
     }
 }
 
+/// In `shapes` (tọa độ ảnh màn hình) vào ảnh `cropped` đã cắt từ vùng `rect`. Danh sách rỗng trả lại
+/// đúng ảnh đó, không đụng gì. Lỗi vẽ: ghi `stderr` và giữ ảnh (mất đánh dấu còn hơn mất ảnh chụp).
+fn burn_shapes(mut cropped: Image, rect: Rect, shapes: &[Shape]) -> Image {
+    if !shapes.is_empty() {
+        if let Err(e) = annotate_draw::burn(&mut cropped, shapes, rect) {
+            eprintln!("darkshot: cannot draw the markings ({e})");
+        }
+    }
+    cropped
+}
+
 /// Tải lên (luồng chính chỉ cắt ảnh và ghi sổ; mạng, mã hóa và ghi tệp ở luồng `darkshot-upload`).
 /// Ảnh vào sổ `PendingUploads` trước khi chạy, nên thoát giữa chừng vẫn lưu được (`quit`).
 /// Chưa cấu hình R2: `run_action` lưu ảnh vào máy và báo; sau đó luồng nhờ luồng chính mở Tùy chọn
 /// tab R2 (`needs_settings`).
-fn start_upload(config: &Config, image: Image, rect: Rect, lang: Lang) {
-    let image = Arc::new(upload::image_for_upload(image, rect));
+fn start_upload(config: &Config, image: Image, rect: Rect, shapes: &[Shape], lang: Lang) {
+    // Đốt hình ngay trên luồng chính (cùng chỗ với việc cắt ảnh) để ảnh vào sổ đã có hình: thoát
+    // giữa chừng vẫn lưu đúng ảnh có đánh dấu. Rỗng: không tốn gì.
+    let image = Arc::new(burn_shapes(
+        upload::image_for_upload(image, rect),
+        rect,
+        shapes,
+    ));
     let deps = upload::Deps {
         uploader: upload::uploader_for(config),
         clipboard: Arc::new(PasteboardClipboard),
@@ -766,6 +787,37 @@ fn terminate_app() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn burn_shapes_empty_is_untouched_and_nonempty_draws() {
+        use darkshot_core::annotate::Pt;
+        use darkshot_core::theme::Rgb;
+        let img = Image {
+            width: 20,
+            height: 20,
+            bgra: [10u8, 10, 10, 255].repeat(400),
+        };
+        let rect = Rect {
+            x: 100,
+            y: 50,
+            w: 20,
+            h: 20,
+        };
+        let ptr = img.bgra.as_ptr();
+        let same = burn_shapes(img, rect, &[]);
+        assert_eq!(same.bgra.as_ptr(), ptr, "rỗng: không sao chép, không đổi");
+        assert!(same.bgra.chunks(4).all(|p| p == [10, 10, 10, 255]));
+        let shape = Shape::Blur {
+            a: Pt { x: 105.0, y: 55.0 },
+            b: Pt { x: 110.0, y: 60.0 },
+            color: Rgb(255, 0, 0),
+        };
+        let out = burn_shapes(same, rect, &[shape]);
+        // Điểm (105-100, 55-50) = (5, 5) thuộc ảnh đã cắt.
+        let i = (5 * 20 + 5) * 4;
+        assert_eq!(&out.bgra[i..i + 4], &[0, 0, 255, 255]);
+        assert_eq!(&out.bgra[0..4], &[10, 10, 10, 255]);
+    }
+
     use super::*;
 
     fn temp_dir(name: &str) -> std::path::PathBuf {
