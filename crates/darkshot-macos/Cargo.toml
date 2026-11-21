@@ -14,7 +14,72 @@ path = "src/main.rs"
 [target.'cfg(target_os = "macos")'.dependencies]
 darkshot-core = { version = "0.4.0", path = "../darkshot-core" }
 libc = "=0.2.191"
+block2 = { version = "=0.6.2", default-features = false, features = ["std"] }
+dispatch2 = { version = "=0.3.1", default-features = false, features = ["std"] }
 objc2 = "=0.6.5"
-objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std", "NSPasteboard"] }
-objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSArray", "NSData", "NSString"] }
+objc2-app-kit = { version = "=0.3.2", default-features = false, features = [
+    "std",
+    "objc2-core-foundation",
+    "NSApplication",
+    "NSButton",
+    "NSCell",
+    "NSControl",
+    "NSImage",
+    "NSMenu",
+    "NSMenuItem",
+    "NSPasteboard",
+    "NSResponder",
+    "NSRunningApplication",
+    "NSStatusBar",
+    "NSStatusBarButton",
+    "NSStatusItem",
+    "NSView",
+] }
+objc2-core-foundation = { version = "=0.3.2", default-features = false, features = [
+    "std",
+    "CFCGTypes",
+    "CFData",
+    "CFString",
+] }
+objc2-core-graphics = { version = "=0.3.2", default-features = false, features = [
+    "std",
+    "CGColorSpace",
+    "CGDataProvider",
+    "CGDirectDisplay",
+    "CGEvent",
+    "CGEventSource",
+    "CGEventTypes",
+    "CGImage",
+    "CGWindow",
+] }
+objc2-foundation = { version = "=0.3.2", default-features = false, features = [
+    "std",
+    "block2",
+    "NSArray",
+    "NSBundle",
+    "NSData",
+    "NSError",
+    "NSLocale",
+    "NSObject",
+    "NSString",
+] }
+objc2-screen-capture-kit = { version = "=0.3.2", default-features = false, features = [
+    "std",
+    "block2",
+    "objc2-core-foundation",
+    "objc2-core-graphics",
+    "SCError",
+    "SCScreenshotManager",
+    "SCShareableContent",
+    "SCStream",
+] }
+objc2-user-notifications = { version = "=0.3.2", default-features = false, features = [
+    "std",
+    "block2",
+    "UNNotification",
+    "UNNotificationContent",
+    "UNNotificationRequest",
+    "UNNotificationTrigger",
+    "UNUserNotificationCenter",
+] }
 security-framework = { version = "=3.7.0", default-features = false }

@@ -1,27 +1,34 @@
-//! Điểm vào của darkshot cho macOS (Apple silicon). Khung rỗng của Task 100;
-//! các phần nền tảng được thêm ở Task 103 trở đi (thiết kế đợt M).
+//! Điểm vào của darkshot cho macOS (Apple silicon, macOS 14+). Vỏ ứng dụng ở `app.rs` (Task 104).
 
-// Các module nền tảng của Task 103 chưa được vòng lặp ứng dụng gọi tới (Task 104 nối vào);
-// `allow(dead_code)` chỉ đặt trên từng khai báo module, gỡ khi đã nối.
 #[cfg(target_os = "macos")]
-#[allow(dead_code)]
+mod app;
+#[cfg(target_os = "macos")]
+mod capture;
+#[cfg(target_os = "macos")]
 mod clipboard;
+// `coords` có các hàm cho lớp phủ chọn vùng (Task 105) chưa được gọi.
 #[cfg(target_os = "macos")]
 #[allow(dead_code)]
 mod coords;
 #[cfg(target_os = "macos")]
+mod lang;
+#[cfg(target_os = "macos")]
+mod notify;
+// `paths` có các đường dẫn cho tính năng sau (lịch sử, chụp từng bước, lần chụp trước).
+#[cfg(target_os = "macos")]
 #[allow(dead_code)]
 mod paths;
 #[cfg(target_os = "macos")]
-#[allow(dead_code)]
 mod secret;
 #[cfg(target_os = "macos")]
-#[allow(dead_code)]
 mod timeutil;
+#[cfg(target_os = "macos")]
+mod tray;
 
 #[cfg(target_os = "macos")]
 fn main() {
-    println!("darkshot for macOS: skeleton only (Task 100).");
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    std::process::exit(app::run(&args));
 }
 
 #[cfg(not(target_os = "macos"))]

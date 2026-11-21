@@ -51,7 +51,7 @@ PY
 echo '== no legacy name'
 python3 -I - <<'PY' || exit 1
 import os, re, sys
-legacy = 'shot' + 'me'
+legacy = 'shot' + 'me'   # so khop KHONG phan biet hoa thuong, nhu Select-String cua check.ps1
 skip = {'crates/darkshot-windows/src/legacy.rs', 'crates/darkshot-core/src/migrate.rs'}
 exempt_heading = {
     'README.md': '## Chuyển từ ' + legacy,
@@ -74,7 +74,7 @@ for rel in sorted(files):
                 exempt = line.rstrip() == exempt_heading.get(rel)
             if exempt or re.search(r'tuanluu-agilityio/|2026 - Tuan', line):
                 continue
-            if legacy in line:
+            if legacy in line.lower():
                 print(f'CHECK FAILED: legacy name in {rel}:{i + 1}'); found = True
         continue
     try:
@@ -82,7 +82,7 @@ for rel in sorted(files):
     except (UnicodeDecodeError, OSError):
         continue
     for i, line in enumerate(text.split('\n')):
-        if legacy in line:
+        if legacy in line.lower():
             print(f'CHECK FAILED: legacy name in {rel}:{i + 1}'); found = True
 sys.exit(1 if found else 0)
 PY

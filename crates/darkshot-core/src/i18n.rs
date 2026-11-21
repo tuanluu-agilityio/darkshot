@@ -447,6 +447,19 @@ messages! {
         "The background task couldn't run."
     ),
     StepsEndFailedTitle => ("Không xóa hết ảnh của phiên", "Couldn't delete all session images"),
+    // Bản macOS (Task 104).
+    MacMenuQuit => ("Thoát darkshot", "Quit darkshot"),
+    MacScreenPermissionTitle => ("Cần quyền Ghi màn hình", "Screen Recording permission needed"),
+    MacScreenPermissionBody => (
+        "Mở Cài đặt hệ thống → Quyền riêng tư & Bảo mật → Ghi màn hình (macOS 15: Ghi màn hình & âm thanh hệ thống), bật darkshot rồi mở lại darkshot.",
+        "Open System Settings → Privacy & Security → Screen Recording (macOS 15: Screen & System Audio Recording), turn on darkshot, then reopen darkshot."
+    ),
+    MacNoDisplayBody => ("Không tìm thấy màn hình nào để chụp.", "No display was found to capture."),
+    MacCaptureFailedBody => (
+        "macOS không cho chụp lúc này. Hãy thử lại.",
+        "macOS did not allow the capture right now. Try again."
+    ),
+    MacSetupTitle => ("Cần thiết lập darkshot", "darkshot needs setup"),
 }
 
 /// Mọi mục dùng làm tiêu đề thông báo.
@@ -473,6 +486,8 @@ pub const NOTICE_TITLES: &[Msg] = &[
     Msg::StepsStartFailedTitle,
     Msg::StepsSessionSaveFailedTitle,
     Msg::StepsEndFailedTitle,
+    Msg::MacScreenPermissionTitle,
+    Msg::MacSetupTitle,
 ];
 
 /// Chữ trên nút OK: giống nhau ở mọi ngôn ngữ nên nằm ngoài bảng `Msg`
@@ -1542,5 +1557,24 @@ mod tests {
             assert!(h.contains(t(l, Msg::TrayStepsStart)), "{l:?}");
             assert!(h.contains("Ctrl+N"), "{l:?}");
         }
+    }
+
+    #[test]
+    fn mac_permission_notice_names_the_settings_path() {
+        let vi = t(Lang::Vi, Msg::MacScreenPermissionBody);
+        assert!(
+            vi.contains("Quyền riêng tư & Bảo mật") && vi.contains("Ghi màn hình"),
+            "{vi}"
+        );
+        let en = t(Lang::En, Msg::MacScreenPermissionBody);
+        assert!(
+            en.contains("System Settings")
+                && en.contains("Privacy & Security")
+                && en.contains("Screen Recording"),
+            "{en}"
+        );
+        assert!(NOTICE_TITLES.contains(&Msg::MacScreenPermissionTitle));
+        assert!(NOTICE_TITLES.contains(&Msg::MacSetupTitle));
+        assert_eq!(t(Lang::En, Msg::MacMenuQuit), "Quit darkshot");
     }
 }
