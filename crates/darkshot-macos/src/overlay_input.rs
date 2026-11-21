@@ -103,6 +103,14 @@ pub fn match_screens(shots: &[(RectF, u64)], screens: &[RectF]) -> Option<Vec<(u
     Some(pairs)
 }
 
+/// Quyết định sau khi một cửa sổ lớp phủ mất key (kiểm ở lượt kế của hàng đợi chính): `keys` là
+/// trạng thái key của mọi cửa sổ của phiên. Bấm sang màn hình khác chỉ chuyển key giữa các cửa sổ
+/// của cùng phiên (không hủy); không cửa sổ nào còn key (ứng dụng khác lấy bàn phím) thì hủy.
+pub fn cancel_after_key_loss(keys: &[bool]) -> bool {
+    let _ = keys;
+    todo!()
+}
+
 /// Chữ của nhãn kích thước (pixel thật của ảnh sẽ lưu).
 pub fn size_label(r: Rect) -> String {
     format!("{} \u{d7} {}", r.w, r.h)
@@ -968,6 +976,19 @@ mod tests {
         m.release(pt(500, 300), t0);
         assert_eq!(m.key(8, Some("c"), cmd, t0), Some(Action::Copy));
         assert_eq!(m.key(1, Some("s"), cmd, t0), Some(Action::Save));
+    }
+
+    #[test]
+    fn key_loss_cancels_only_when_no_overlay_window_is_key() {
+        // Bấm sang màn hình khác: cửa sổ kia nhận key, không hủy.
+        assert!(!cancel_after_key_loss(&[false, true]));
+        assert!(!cancel_after_key_loss(&[true, false]));
+        assert!(!cancel_after_key_loss(&[true]));
+        // Ứng dụng khác lấy bàn phím (⌘Tab, bấm ngoài): không cửa sổ nào còn key, hủy.
+        assert!(cancel_after_key_loss(&[false, false]));
+        assert!(cancel_after_key_loss(&[false]));
+        // Không còn cửa sổ nào: hủy (không bao giờ để phiên treo).
+        assert!(cancel_after_key_loss(&[]));
     }
 
     #[test]
