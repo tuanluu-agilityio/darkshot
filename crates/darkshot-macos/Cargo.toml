@@ -39,9 +39,11 @@ objc2-core-foundation = { version = "=0.3.2", default-features = false, features
     "std",
     "CFCGTypes",
     "CFData",
+    "CFString",
 ] }
 objc2-core-graphics = { version = "=0.3.2", default-features = false, features = [
     "std",
+    "CGColorSpace",
     "CGDataProvider",
     "CGDirectDisplay",
     "CGEvent",
@@ -66,6 +68,7 @@ objc2-screen-capture-kit = { version = "=0.3.2", default-features = false, featu
     "block2",
     "objc2-core-foundation",
     "objc2-core-graphics",
+    "SCError",
     "SCScreenshotManager",
     "SCShareableContent",
     "SCStream",

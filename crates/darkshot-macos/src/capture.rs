@@ -5,8 +5,23 @@
 //! thử chạy trên máy không có GUI.
 
 use crate::coords::{pt_to_px, RectF};
+use block2::RcBlock;
 use darkshot_core::i18n::{t, Lang, Msg};
 use darkshot_core::image::Image;
+use objc2::rc::{autoreleasepool, Retained};
+use objc2::AnyThread;
+use objc2_core_graphics::{
+    kCGColorSpaceSRGB, CGDataProvider, CGDisplayBounds, CGEvent, CGImage,
+    CGPreflightScreenCaptureAccess, CGRequestScreenCaptureAccess,
+};
+use objc2_foundation::{NSArray, NSError};
+use objc2_screen_capture_kit::{
+    SCContentFilter, SCDisplay, SCScreenshotManager, SCShareableContent, SCStreamConfiguration,
+    SCStreamErrorCode, SCWindow,
+};
+use std::ptr::NonNull;
+use std::sync::mpsc;
+use std::time::Duration;
 
 /// Ảnh của một màn hình.
 #[derive(Clone, Debug, PartialEq)]
@@ -246,6 +261,167 @@ pub fn display_at(frames: &[RectF], x: f64, y: f64) -> Option<usize> {
         .enumerate()
         .min_by(|(_, a), (_, b)| dist(a).total_cmp(&dist(b)))
         .map(|(i, _)| i)
+}
+
+/// Thời gian chờ tối đa cho mỗi lời gọi ScreenCaptureKit.
+const SCK_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// `kCVPixelFormatType_32BGRA` ('BGRA').
+const PIXEL_FORMAT_BGRA: u32 = u32::from_be_bytes(*b"BGRA");
+
+/// Ứng dụng đã có quyền Screen Recording chưa (không hỏi, không hiện gì).
+pub fn screen_capture_allowed() -> bool {
+    CGPreflightScreenCaptureAccess()
+}
+
+/// Hỏi quyền Screen Recording (hệ thống hiện hộp thoại hoặc mở Cài đặt). Bên gọi chỉ gọi một
+/// lần mỗi lần chạy, trên luồng chính.
+pub fn request_screen_capture_access() -> bool {
+    CGRequestScreenCaptureAccess()
+}
+
+/// Vị trí con trỏ trong toạ độ toàn cục gốc trên trái, đơn vị điểm (như `CGDisplayBounds`).
+/// Gọi được từ mọi luồng.
+pub fn cursor_location() -> Option<(f64, f64)> {
+    let ev = CGEvent::new(None)?;
+    let p = CGEvent::location(Some(&ev));
+    Some((p.x, p.y))
+}
+
+/// Chụp mọi màn hình, mỗi màn hình một ảnh ở pixel vật lý. Chặn luồng gọi tới khi xong (tối đa
+/// vài giây mỗi màn hình): **không gọi trên luồng chính**.
+pub fn capture_displays(include_cursor: bool) -> Result<Vec<DisplayShot>, CaptureError> {
+    if !screen_capture_allowed() {
+        return Err(CaptureError::PermissionDenied);
+    }
+    autoreleasepool(|_| {
+        let content = shareable_content()?;
+        // SAFETY: `content` là đối tượng hợp lệ do ScreenCaptureKit trả về.
+        let displays = unsafe { content.0.displays() };
+        if displays.is_empty() {
+            return Err(CaptureError::NoDisplay);
+        }
+        let mut shots = Vec::with_capacity(displays.len());
+        for display in displays.to_vec() {
+            shots.push(capture_one(&display, include_cursor)?);
+        }
+        Ok(shots)
+    })
+}
+
+/// `Retained` chuyển qua luồng. ScreenCaptureKit trao đối tượng cho khối hoàn tất trên hàng đợi
+/// riêng của nó; các đối tượng `SCShareableContent`/`SCDisplay` là ảnh chụp bất biến, dùng được
+/// từ luồng khác.
+struct SendRetained<T>(Retained<T>);
+// SAFETY: chỉ dùng cho `SCShareableContent` (bất biến sau khi tạo, ScreenCaptureKit không gắn
+// nó với luồng nào); chỉ một luồng giữ nó tại một thời điểm.
+unsafe impl<T> Send for SendRetained<T> {}
+
+fn sck_error(err: *mut NSError, what: &str) -> CaptureError {
+    // SAFETY: ScreenCaptureKit trao `NSError` hợp lệ hoặc null; `retain` nhận null.
+    let code = unsafe { Retained::retain(err) }.map(|e| e.code());
+    match code {
+        Some(c) if c == SCStreamErrorCode::UserDeclined.0 => CaptureError::PermissionDenied,
+        Some(c) => CaptureError::Failed(format!("{what} failed (SCStreamError {c})")),
+        None => CaptureError::Failed(format!("{what} returned nothing")),
+    }
+}
+
+fn shareable_content() -> Result<SendRetained<SCShareableContent>, CaptureError> {
+    let (tx, rx) = mpsc::channel();
+    let block = RcBlock::new(move |content: *mut SCShareableContent, err: *mut NSError| {
+        // SAFETY: con trỏ hợp lệ hoặc null, do ScreenCaptureKit trao; `retain` giữ nó sống.
+        let r = match unsafe { Retained::retain(content) } {
+            Some(c) => Ok(SendRetained(c)),
+            None => Err(sck_error(err, "SCShareableContent")),
+        };
+        let _ = tx.send(r);
+    });
+    // SAFETY: khối có đúng chữ ký mà phương thức đòi; ScreenCaptureKit giữ khối tới khi gọi xong.
+    unsafe { SCShareableContent::getShareableContentWithCompletionHandler(&block) };
+    rx.recv_timeout(SCK_TIMEOUT)
+        .map_err(|_| CaptureError::Failed("SCShareableContent timed out".into()))?
+}
+
+fn capture_one(display: &SCDisplay, include_cursor: bool) -> Result<DisplayShot, CaptureError> {
+    // SAFETY: `display` hợp lệ (lấy từ `SCShareableContent`).
+    let id = unsafe { display.displayID() };
+    let b = CGDisplayBounds(id);
+    let frame_pt = RectF {
+        x: b.origin.x,
+        y: b.origin.y,
+        w: b.size.width,
+        h: b.size.height,
+    };
+    let excluded = NSArray::<SCWindow>::new();
+    // SAFETY: `alloc` mới, `display` và mảng rỗng hợp lệ.
+    let filter = unsafe {
+        SCContentFilter::initWithDisplay_excludingWindows(
+            SCContentFilter::alloc(),
+            display,
+            &excluded,
+        )
+    };
+    // SAFETY: `filter` hợp lệ; `infoForFilter` có từ macOS 14 (yêu cầu tối thiểu).
+    let scale = f64::from(unsafe { SCShareableContent::infoForFilter(&filter).pointPixelScale() });
+    let (w, h) = pixel_size(frame_pt, scale)
+        .ok_or_else(|| CaptureError::Failed(format!("bad display geometry (scale {scale})")))?;
+    // SAFETY: cấu hình mới, các giá trị hợp lệ; `kCGColorSpaceSRGB` là hằng sống suốt tiến trình.
+    let config = unsafe {
+        let c = SCStreamConfiguration::new();
+        c.setWidth(w as usize);
+        c.setHeight(h as usize);
+        c.setShowsCursor(include_cursor);
+        c.setPixelFormat(PIXEL_FORMAT_BGRA);
+        c.setColorSpaceName(kCGColorSpaceSRGB);
+        c
+    };
+    let (tx, rx) = mpsc::channel();
+    let block = RcBlock::new(move |img: *mut CGImage, err: *mut NSError| {
+        let r = match NonNull::new(img) {
+            // SAFETY: `img` khác null và hợp lệ trong khối; đổi ngay sang bộ đệm của ta.
+            Some(p) => image_from_cg(unsafe { p.as_ref() }).map_err(CaptureError::Failed),
+            None => Err(sck_error(err, "SCScreenshotManager")),
+        };
+        let _ = tx.send(r);
+    });
+    // SAFETY: bộ lọc, cấu hình và khối hợp lệ; ScreenCaptureKit giữ khối tới khi gọi xong.
+    unsafe {
+        SCScreenshotManager::captureImageWithFilter_configuration_completionHandler(
+            &filter,
+            &config,
+            Some(&block),
+        )
+    };
+    let image = rx
+        .recv_timeout(SCK_TIMEOUT)
+        .map_err(|_| CaptureError::Failed("SCScreenshotManager timed out".into()))??;
+    shot_from_frame(image, frame_pt, scale, id)
+}
+
+/// Đọc pixel của một `CGImage` 8 bit, 32 bit mỗi pixel sang `Image` BGRA.
+fn image_from_cg(img: &CGImage) -> Result<Image, String> {
+    let i = Some(img);
+    let layout = layout_from_cg(
+        CGImage::alpha_info(i).0,
+        CGImage::bitmap_info(i).0,
+        CGImage::bits_per_component(i),
+        CGImage::bits_per_pixel(i),
+    )
+    .ok_or_else(|| "unsupported CGImage pixel format".to_string())?;
+    let provider = CGImage::data_provider(i).ok_or_else(|| "CGImage has no data".to_string())?;
+    let data = CGDataProvider::data(Some(&provider))
+        .ok_or_else(|| "CGImage data copy failed".to_string())?;
+    // SAFETY: `CGDataProviderCopyData` trả một `CFData` bất biến mới, không ai sửa nó trong lúc
+    // ta đọc.
+    let bytes = unsafe { data.as_bytes_unchecked() };
+    to_bgra(
+        bytes,
+        CGImage::width(i),
+        CGImage::height(i),
+        CGImage::bytes_per_row(i),
+        layout,
+    )
 }
 
 #[cfg(test)]
@@ -557,5 +733,42 @@ mod tests {
             assert!(!body.contains("-3801"));
         }
         assert!(NOTICE_TITLES.contains(&Msg::CaptureFailedTitle));
+    }
+
+    // Chạm hệ thống thật: chủ dự án chạy tay (quyền Screen Recording do Terminal giữ khi chạy
+    // ngoài gói .app).
+    #[test]
+    #[ignore = "chụp màn hình thật; chạy tay: cargo test -p darkshot-macos -- --ignored --test-threads=1"]
+    fn captures_every_display_at_physical_size() {
+        let shots = capture_displays(false).expect("cần quyền Screen Recording");
+        assert!(!shots.is_empty());
+        for s in &shots {
+            assert!(s.image.is_valid(), "{}", s.display_id);
+            // Kích thước ảnh = khung (điểm) × hệ số.
+            assert_eq!(
+                pixel_size(s.frame_pt, s.scale),
+                Some((s.image.width, s.image.height)),
+                "{:?} @ {}",
+                s.frame_pt,
+                s.scale
+            );
+            // Ảnh màn hình đục: không có pixel trong suốt.
+            assert!(s.image.bgra.chunks(4).all(|p| p[3] == 255));
+        }
+        let ids: std::collections::HashSet<u32> = shots.iter().map(|s| s.display_id).collect();
+        assert_eq!(ids.len(), shots.len(), "mỗi màn hình một ảnh");
+        let (x, y) = cursor_location().expect("vị trí con trỏ");
+        let frames: Vec<RectF> = shots.iter().map(|s| s.frame_pt).collect();
+        assert!(display_at(&frames, x, y).is_some());
+    }
+
+    #[test]
+    #[ignore = "đọc quyền Screen Recording thật; chạy tay: cargo test -p darkshot-macos -- --ignored --test-threads=1"]
+    fn missing_permission_is_an_error_not_an_empty_image() {
+        if screen_capture_allowed() {
+            assert!(capture_displays(true).is_ok());
+        } else {
+            assert_eq!(capture_displays(true), Err(CaptureError::PermissionDenied));
+        }
     }
 }
