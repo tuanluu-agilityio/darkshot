@@ -256,10 +256,7 @@ pub fn mac_taken_notice(
             &mac_combos(keys, &f.unsupported),
         ));
     }
-    Some((
-        i18n::t(lang, Msg::HotkeysNotWorkingTitle),
-        parts.join("\n"),
-    ))
+    Some((i18n::t(lang, Msg::HotkeysNotWorkingTitle), parts.join("\n")))
 }
 
 /// Thông báo một lần lúc khởi động khi cấu hình dùng PrintScreen/ScrollLock/Pause (mục 3 rà soát
@@ -640,6 +637,9 @@ mod tests {
             assert_eq!(title, i18n::t(lang, Msg::HotkeysNotWorkingTitle));
             assert!(body.contains("F13") && body.contains("Shift+F14"), "{body}");
         }
-        assert_eq!(mac_windows_keys_notice(Lang::Vi, &mac_default_hotkeys()), None);
+        assert_eq!(
+            mac_windows_keys_notice(Lang::Vi, &mac_default_hotkeys()),
+            None
+        );
     }
 }

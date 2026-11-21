@@ -6,70 +6,97 @@
 //! `apply_form`); `Debug` của `Form` đã che khóa. Module này không bao giờ in hay trả khóa trong
 //! thông báo lỗi.
 
-use crate::keymap::{mac_describe, mac_kind, mac_to_vk, HotkeyFailures};
+use crate::keymap::{is_windows_only_key, mac_describe, mac_kind, mac_to_vk, HotkeyFailures};
 use darkshot_core::app_flow::OpenReason;
 use darkshot_core::config::{self, Config, Expiry, Hotkey, HotkeyRole, HotkeySlot, Hotkeys};
 use darkshot_core::config::{ConfigError, SecretStore};
 use darkshot_core::hotkey_keys::{Capture, CaptureState, KeyEv};
 use darkshot_core::i18n::{Lang, Msg};
-use darkshot_core::settings_form::{
-    initial_tab, tab_of, Field, Form, FormError, Tab,
-};
+use darkshot_core::settings_form::{initial_tab, tab_of, Field, Form, FormError, Tab};
 use std::path::Path;
 
 /// Biểu mẫu ban đầu của một cấu hình. Ô khóa bí mật để TRỐNG (không bao giờ hiện lại khóa đã lưu);
 /// các trường bản Mac không có điều khiển (khởi động cùng máy, cập nhật, lịch sử, bắt cửa sổ,
 /// dòng "chụp lại vùng trước") giữ nguyên giá trị cấu hình để mở rồi OK không làm đổi gì.
 pub fn form_from_config(cfg: &Config) -> Form {
-    let _ = cfg;
-    unimplemented!()
+    Form {
+        account_id: cfg.r2.account_id.clone(),
+        access_key_id: cfg.r2.access_key_id.clone(),
+        secret_access_key: String::new(),
+        bucket: cfg.r2.bucket.clone(),
+        public_base_url: cfg.r2.public_base_url.clone(),
+        expiry: cfg.expiry,
+        hotkeys: cfg.hotkeys,
+        save_dir: cfg.save_dir.to_string_lossy().into_owned(),
+        autostart: cfg.autostart,
+        language: cfg.language,
+        show_success_notices: cfg.show_success_notices,
+        check_updates: cfg.check_updates,
+        keep_selection: cfg.keep_selection,
+        include_cursor: cfg.include_cursor,
+        upload_format: cfg.upload_format,
+        jpeg_quality: cfg.jpeg_quality,
+        history_enabled: cfg.history_enabled,
+        snap_windows: cfg.snap_windows,
+    }
 }
 
 /// Các dòng phím tắt có hiện trên Mac (`keymap::mac_kind`), theo thứ tự `HotkeyRole::ALL`.
 pub fn visible_roles() -> Vec<HotkeyRole> {
-    unimplemented!()
+    HotkeyRole::ALL
+        .into_iter()
+        .filter(|r| mac_kind(*r).is_some())
+        .collect()
 }
 
 /// Ô nhận tiêu điểm khi `field` sai: dòng phím tắt bị ẩn trên Mac thì về dòng đầu còn hiện.
 pub fn focus_field(field: Field) -> Field {
-    let _ = field;
-    unimplemented!()
+    match field {
+        Field::HotkeyRow(r) if mac_kind(r).is_none() => Field::HotkeyRow(
+            visible_roles()
+                .first()
+                .copied()
+                .unwrap_or(HotkeyRole::Region),
+        ),
+        f => f,
+    }
 }
 
 /// (tab, ô) để chuyển tới khi `apply_form` báo lỗi.
 pub fn error_target(e: &FormError) -> (Tab, Field) {
-    let _ = e;
-    unimplemented!()
+    let field = focus_field(e.field);
+    (tab_of(field), field)
 }
 
 /// Chỉ số tab (theo `Tab::ALL`) mở đầu cho lý do mở.
 pub fn initial_tab_index(reason: OpenReason) -> usize {
-    let _ = reason;
-    unimplemented!()
+    initial_tab(reason).index()
 }
 
 /// Chỉ số của `e` trong `Expiry::ALL` (thứ tự mục của danh sách thả).
 pub fn expiry_index(e: Expiry) -> usize {
-    let _ = e;
-    unimplemented!()
+    Expiry::ALL.iter().position(|x| *x == e).unwrap_or(0)
 }
 
 /// `Expiry` của chỉ số mục; ngoài khoảng thì mặc định.
 pub fn expiry_from_index(i: isize) -> Expiry {
-    let _ = i;
-    unimplemented!()
+    usize::try_from(i)
+        .ok()
+        .and_then(|i| Expiry::ALL.get(i).copied())
+        .unwrap_or_default()
 }
 
 /// Chỉ số của `l` trong `Lang::ALL`.
 pub fn lang_index(l: Lang) -> usize {
-    let _ = l;
-    unimplemented!()
+    Lang::ALL.iter().position(|x| *x == l).unwrap_or(0)
 }
 
 /// `Lang` của chỉ số mục; ngoài khoảng thì `fallback`.
 pub fn lang_from_index(i: isize, fallback: Lang) -> Lang {
-    let _ = (i, fallback);
-    unimplemented!()
+    usize::try_from(i)
+        .ok()
+        .and_then(|i| Lang::ALL.get(i).copied())
+        .unwrap_or(fallback)
 }
 
 /// Trạng thái hiện cạnh một dòng phím tắt.
@@ -86,14 +113,28 @@ pub enum RowStatus {
 
 /// Trạng thái dòng `role` theo lần đăng ký gần nhất (`failures`); dòng tắt luôn `Ok`.
 pub fn row_status(keys: &Hotkeys, role: HotkeyRole, failures: &HotkeyFailures) -> RowStatus {
-    let _ = (keys, role, failures);
-    unimplemented!()
+    let slot = keys.get(role);
+    if !slot.enabled || mac_kind(role).is_none() {
+        RowStatus::Ok
+    } else if failures.unsupported.contains(&role) {
+        RowStatus::Unsupported
+    } else if failures.taken.contains(&role) {
+        RowStatus::Taken
+    } else if is_windows_only_key(slot.key.vk) {
+        RowStatus::WindowsKey
+    } else {
+        RowStatus::Ok
+    }
 }
 
 /// Câu hiện cho một trạng thái; `Ok` không có câu.
 pub fn status_msg(s: RowStatus) -> Option<Msg> {
-    let _ = s;
-    unimplemented!()
+    match s {
+        RowStatus::Ok => None,
+        RowStatus::Taken => Some(Msg::MacHotkeyStatusTaken),
+        RowStatus::Unsupported => Some(Msg::MacHotkeyStatusUnsupported),
+        RowStatus::WindowsKey => Some(Msg::MacHotkeyStatusWindowsKey),
+    }
 }
 
 /// Một sự kiện phím của ô bắt phím (mã phím macOS và phím bổ trợ lúc xảy ra).
@@ -125,8 +166,44 @@ pub enum CaptureStep {
 /// Đổi một sự kiện phím macOS thành bước bắt phím, dùng `keymap::mac_to_vk` rồi máy trạng thái
 /// `CaptureState` của core (luật phím hợp lệ nằm ở core).
 pub fn capture_step(state: &mut CaptureState, input: KeyInput) -> CaptureStep {
-    let _ = (state, input);
-    unimplemented!()
+    /// `kVK_Escape`.
+    const MAC_ESCAPE: u16 = 0x35;
+    let bare = !(input.ctrl || input.alt || input.shift || input.cmd);
+    if input.down && input.code == MAC_ESCAPE && bare {
+        return CaptureStep::Cancel;
+    }
+    let Some(vk) = mac_to_vk(u32::from(input.code)) else {
+        // Nhả phím lạ: bỏ qua; bấm phím lạ: báo chưa hỗ trợ.
+        return if input.down {
+            CaptureStep::Unsupported
+        } else {
+            CaptureStep::Wait
+        };
+    };
+    let (ctrl, alt, shift, win) = (input.ctrl, input.alt, input.shift, input.cmd);
+    let ev = if input.down {
+        KeyEv::Down {
+            vk,
+            ctrl,
+            alt,
+            shift,
+            win,
+        }
+    } else {
+        KeyEv::Up {
+            vk,
+            ctrl,
+            alt,
+            shift,
+            win,
+        }
+    };
+    match state.feed(ev) {
+        Capture::Got(hk) => CaptureStep::Got(hk),
+        Capture::NeedModifier => CaptureStep::NeedModifier,
+        // Alt+F4 không có nghĩa trên Mac; coi như chưa đủ.
+        Capture::Ignore | Capture::PassThrough => CaptureStep::Wait,
+    }
 }
 
 /// Tên tổ hợp hiện trong ô phím (kiểu Mac).
@@ -137,8 +214,9 @@ pub fn hotkey_text(slot: &HotkeySlot) -> String {
 /// Ghi cấu hình bằng `config::save`; khóa bí mật chỉ đi vào `store`. Lỗi trả về là câu của core
 /// (không chứa khóa).
 pub fn persist(path: &Path, cfg: &Config, store: &dyn SecretStore) -> Result<(), String> {
-    let _ = (path, cfg, store);
-    unimplemented!()
+    config::save(path, cfg, store).map_err(|e| match e {
+        ConfigError::Io(m) | ConfigError::Corrupt(m) | ConfigError::Secret(m) => m,
+    })
 }
 
 /// Cỡ cửa sổ và cột (điểm), dùng chung cho dựng giao diện và kiểm tra chữ không bị cắt.
@@ -297,10 +375,7 @@ mod tests {
 
     #[test]
     fn tabs_and_initial_tab() {
-        assert_eq!(
-            Tab::ALL,
-            [Tab::General, Tab::Hotkeys, Tab::Format, Tab::R2]
-        );
+        assert_eq!(Tab::ALL, [Tab::General, Tab::Hotkeys, Tab::Format, Tab::R2]);
         assert_eq!(initial_tab_index(OpenReason::User), 0);
         assert_eq!(initial_tab_index(OpenReason::NeedsR2), 3);
         assert_eq!(Tab::ALL[initial_tab_index(OpenReason::NeedsR2)], Tab::R2);
@@ -427,7 +502,13 @@ mod tests {
         assert!(matches!(capture_step(&mut st, down), CaptureStep::Got(_)));
         // Nhả rồi bấm lại: nhận lại.
         assert_eq!(
-            capture_step(&mut st, KeyInput { down: false, ..down }),
+            capture_step(
+                &mut st,
+                KeyInput {
+                    down: false,
+                    ..down
+                }
+            ),
             CaptureStep::Wait
         );
         assert!(matches!(capture_step(&mut st, down), CaptureStep::Got(_)));
@@ -471,14 +552,8 @@ mod tests {
         );
         // Dòng tắt không báo gì, dù phím gì.
         keys.upload_full.enabled = false;
-        assert_eq!(
-            row_status(&keys, HotkeyRole::UploadFull, &f),
-            RowStatus::Ok
-        );
-        assert_eq!(
-            row_status(&keys, HotkeyRole::RepeatLast, &f),
-            RowStatus::Ok
-        );
+        assert_eq!(row_status(&keys, HotkeyRole::UploadFull, &f), RowStatus::Ok);
+        assert_eq!(row_status(&keys, HotkeyRole::RepeatLast, &f), RowStatus::Ok);
         assert_eq!(status_msg(RowStatus::Ok), None);
         for s in [
             RowStatus::Taken,
@@ -552,7 +627,6 @@ mod tests {
         assert!(!err.contains("SENTINEL"));
         // Lỗi kho khóa xảy ra trước khi ghi: không có tệp nào.
         assert!(!path.exists());
-        let _: Option<ConfigError> = None;
     }
 
     #[test]
