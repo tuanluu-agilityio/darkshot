@@ -461,6 +461,7 @@ messages! {
     ),
     MacSetupTitle => ("Cần thiết lập darkshot", "darkshot needs setup"),
     // Gợi ý nút của lớp phủ chọn vùng bản macOS (Task 105): phím tắt kiểu Mac.
+    OverlayUploadMac => ("Tải lên và chép link (⌘D)", "Upload and copy link (⌘D)"),
     OverlaySaveMac => ("Lưu vào máy (⌘S)", "Save to disk (⌘S)"),
     OverlayCopyMac => ("Chép ảnh (⌘C)", "Copy image (⌘C)"),
     OverlayCancelMac => ("Hủy (Esc)", "Cancel (Esc)"),
