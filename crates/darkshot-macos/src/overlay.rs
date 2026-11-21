@@ -10,7 +10,8 @@
 use crate::capture::DisplayShot;
 use crate::coords::RectF;
 use crate::overlay_input::{
-    event_to_px, match_screens, Model, Mods, ScreenPx, ViewState, IDLE_CHECK_EVERY,
+    cancel_after_key_loss, event_to_px, match_screens, Model, Mods, ScreenPx, ViewState,
+    IDLE_CHECK_EVERY,
 };
 use crate::overlay_view::{make_window, OverlayView, OverlayWindow};
 use darkshot_core::actions::Action;
@@ -22,7 +23,7 @@ use objc2::runtime::AnyObject;
 use objc2::{define_class, msg_send, sel, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSApplication, NSApplicationDidChangeScreenParametersNotification,
-    NSApplicationDidResignActiveNotification, NSCursor, NSScreen,
+    NSApplicationDidResignActiveNotification, NSCursor, NSScreen, NSWindowDidResignKeyNotification,
 };
 use objc2_core_foundation::{CFData, CFRetained, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{
@@ -115,10 +116,18 @@ define_class!(
             cancel();
         }
 
-        /// Chuyển sang ứng dụng khác (`⌘Tab`, Mission Control): không để lại lớp phủ.
+        /// Chuyển sang ứng dụng khác (`⌘Tab`, Mission Control) khi ứng dụng đã được kích hoạt:
+        /// không để lại lớp phủ.
         #[unsafe(method(appResigned:))]
         fn app_resigned(&self, _note: &NSNotification) {
             cancel();
+        }
+
+        /// Một cửa sổ lớp phủ mất key. Ứng dụng có thể không bao giờ active (panel không kích
+        /// hoạt) nên `appResigned:` không bắn khi người dùng chuyển ứng dụng; kiểm ở lượt kế.
+        #[unsafe(method(windowResignedKey:))]
+        fn window_resigned_key(&self, _note: &NSNotification) {
+            check_key_later();
         }
     }
 );
@@ -268,6 +277,15 @@ pub fn open(
             Some(NSApplicationDidResignActiveNotification),
             None,
         );
+        for slot in &slots {
+            let window: &AnyObject = &slot.window;
+            center.addObserver_selector_name_object(
+                target,
+                sel!(windowResignedKey:),
+                Some(NSWindowDidResignKeyNotification),
+                Some(window),
+            );
+        }
     }
     let id = NEXT_ID.with(|n| n.replace(n.get().wrapping_add(1)));
     let views: Vec<(Retained<OverlayWindow>, Retained<OverlayView>)> = slots
@@ -298,7 +316,8 @@ pub fn open(
         w.makeKeyAndOrderFront(None);
         w.makeFirstResponder(Some(v));
     }
-    // Ứng dụng nền (`accessory`) phải được kích hoạt thì cửa sổ mới nhận phím ngay.
+    // Cửa sổ là panel không kích hoạt nên nhận phím ngay cả khi macOS 14+ từ chối kích hoạt
+    // (kích hoạt hợp tác); vẫn xin kích hoạt, được thì tốt.
     app.activate();
     NSCursor::crosshairCursor().set();
     // Nếu phiên đã bị đóng ngay trong các lời gọi trên (thông báo đồng bộ), lời gọi hiện cửa sổ
@@ -315,6 +334,34 @@ pub fn open(
         }
     }
     Ok(())
+}
+
+/// Sau khi một cửa sổ lớp phủ mất key: ở lượt kế của hàng đợi chính (khi AppKit đã trao key cho
+/// cửa sổ khác nếu người dùng chỉ bấm sang màn hình khác), không còn cửa sổ nào của phiên là key
+/// thì hủy.
+fn check_key_later() {
+    let Some(id) = SESSION.with(|s| s.try_borrow().ok().and_then(|b| b.as_ref().map(|s| s.id)))
+    else {
+        return;
+    };
+    DispatchQueue::main().exec_async(move || check_key(id));
+}
+
+fn check_key(id: u64) {
+    let windows: Option<Vec<Retained<OverlayWindow>>> = SESSION.with(|s| {
+        s.try_borrow().ok().and_then(|b| {
+            b.as_ref()
+                .filter(|s| s.id == id)
+                .map(|s| s.slots.iter().map(|w| w.window.clone()).collect())
+        })
+    });
+    let Some(windows) = windows else {
+        return;
+    };
+    let keys: Vec<bool> = windows.iter().map(|w| w.isKeyWindow()).collect();
+    if cancel_after_key_loss(&keys) {
+        cancel();
+    }
 }
 
 /// Hẹn kiểm lưới an toàn của phiên `id`.
@@ -481,7 +528,9 @@ fn finish(action: Option<Action>) {
     DispatchQueue::main().exec_async(|| RETIRED.with(|r| r.borrow_mut().clear()));
     NSCursor::arrowCursor().set();
     if let Some(mtm) = MainThreadMarker::new() {
-        // Trả tiêu điểm cho ứng dụng trước đó (để dán ngay sau khi chép).
+        // Nếu `activate()` đã thành công thì ứng dụng đang active: ẩn để trả tiêu điểm cho ứng
+        // dụng trước đó (dán ngay sau khi chép). Nếu ứng dụng chưa từng active (panel không kích
+        // hoạt) thì ứng dụng trước vẫn active và lệnh này vô hại. `open` bỏ ẩn lại.
         NSApplication::sharedApplication(mtm).hide(None);
     }
     let outcome = match (action, model.active(), model.rect()) {

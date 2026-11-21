@@ -52,8 +52,9 @@ Try:
   5. After releasing the mouse a Save / Copy / Cancel bar appears next to the region.
      Save (or Cmd+S) writes a PNG into $profile/Pictures/darkshot and a notification shows
      the path; Copy (or Cmd+C) puts the image on the clipboard; Cancel or Esc closes the
-     overlay at any time. Switching apps (Cmd+Tab) or changing displays also closes it, and it
-     closes by itself after 120 s without input.
+     overlay at any time, also right after it opens without clicking first. Switching apps
+     (Cmd+Tab) or changing displays also closes it (pressing on another display does not), and
+     it closes by itself after 120 s without input.
   6. While the demo is open, run in another terminal:
        open -n --env "DARKSHOT_PROFILE_DIR=$profile" "$app"
      A second copy for the same profile exits at once (no second menu bar icon).

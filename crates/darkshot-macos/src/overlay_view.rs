@@ -1,6 +1,6 @@
 //! Cửa sổ và view của lớp phủ chọn vùng (Task 105): mỗi `NSScreen` một `DarkshotOverlayWindow`
-//! không viền (nhận phím được) chứa một `DarkshotOverlayView` (`isFlipped`, gốc trên trái như
-//! core). View chỉ đổi sự kiện thành lời gọi tới `overlay` và vẽ bằng Core Graphics trong không
+//! (panel không viền, không kích hoạt ứng dụng, nhận phím được) chứa một `DarkshotOverlayView`
+//! (`isFlipped`, gốc trên trái như core). View chỉ đổi sự kiện thành lời gọi tới `overlay` và vẽ bằng Core Graphics trong không
 //! gian pixel của màn hình đó; mọi trạng thái nằm ở `overlay` (mô hình thuần `overlay_input`).
 
 use crate::lang;
@@ -21,7 +21,7 @@ use objc2::runtime::AnyObject;
 use objc2::{define_class, msg_send, DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSBackingStoreType, NSColor, NSCursor, NSEvent, NSEventModifierFlags, NSFont,
-    NSFontAttributeName, NSForegroundColorAttributeName, NSGraphicsContext, NSResponder,
+    NSFontAttributeName, NSForegroundColorAttributeName, NSGraphicsContext, NSPanel, NSResponder,
     NSScreenSaverWindowLevel, NSStringDrawing, NSView, NSWindow, NSWindowAnimationBehavior,
     NSWindowCollectionBehavior, NSWindowStyleMask,
 };
@@ -37,9 +37,13 @@ const DIM_ALPHA: CGFloat = 0.45;
 const FONT_PT: CGFloat = 12.0;
 
 define_class!(
-    // SAFETY: NSWindow cho phép kế thừa; lớp không có ivar và không cài `Drop`. Chỉ dùng trên
+    // SAFETY: NSPanel cho phép kế thừa; lớp không có ivar và không cài `Drop`. Chỉ dùng trên
     // luồng chính (như mọi NSWindow).
-    #[unsafe(super(NSWindow, NSResponder, NSObject))]
+    //
+    // Panel `NonactivatingPanel`: trở thành key window và nhận `keyDown:` mà KHÔNG cần ứng dụng
+    // được kích hoạt (như Spotlight). Trên macOS 14+ `activate()` có thể bị từ chối (kích hoạt
+    // hợp tác); khi đó một NSWindow thường không nhận phím tới khi người dùng bấm chuột.
+    #[unsafe(super(NSPanel, NSWindow, NSResponder, NSObject))]
     #[thread_kind = MainThreadOnly]
     #[name = "DarkshotOverlayWindow"]
     pub struct OverlayWindow;
@@ -185,12 +189,14 @@ pub fn make_window(
     index: usize,
 ) -> (Retained<OverlayWindow>, Retained<OverlayView>) {
     let this = OverlayWindow::alloc(mtm).set_ivars(());
-    // SAFETY: bộ khởi tạo chỉ định của NSWindow trên đối tượng vừa cấp phát; tham số hợp lệ.
+    // SAFETY: bộ khởi tạo chỉ định của NSWindow (NSPanel kế thừa) trên đối tượng vừa cấp phát;
+    // tham số hợp lệ. `NonactivatingPanel` phải có ngay lúc khởi tạo (đổi sau không có hiệu lực
+    // đầy đủ với window server).
     let window: Retained<OverlayWindow> = unsafe {
         msg_send![
             super(this),
             initWithContentRect: frame,
-            styleMask: NSWindowStyleMask::Borderless,
+            styleMask: NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel,
             backing: NSBackingStoreType::Buffered,
             defer: false
         ]
@@ -210,6 +216,10 @@ pub fn make_window(
     window.setHasShadow(false);
     window.setAnimationBehavior(NSWindowAnimationBehavior::None);
     window.setAcceptsMouseMovedEvents(true);
+    // Panel nhận key cả khi chỉ bấm chuột hay khi hiện (không chỉ khi cần ô nhập), và không tự ẩn
+    // khi ứng dụng không active (ứng dụng có thể không bao giờ active).
+    window.setBecomesKeyOnlyIfNeeded(false);
+    window.setHidesOnDeactivate(false);
     let bounds = NSRect::new(NSPoint::new(0.0, 0.0), frame.size);
     let view = OverlayView::new(mtm, bounds, index);
     window.setContentView(Some(&view));

@@ -107,8 +107,7 @@ pub fn match_screens(shots: &[(RectF, u64)], screens: &[RectF]) -> Option<Vec<(u
 /// trạng thái key của mọi cửa sổ của phiên. Bấm sang màn hình khác chỉ chuyển key giữa các cửa sổ
 /// của cùng phiên (không hủy); không cửa sổ nào còn key (ứng dụng khác lấy bàn phím) thì hủy.
 pub fn cancel_after_key_loss(keys: &[bool]) -> bool {
-    let _ = keys;
-    todo!()
+    !keys.iter().any(|k| *k)
 }
 
 /// Chữ của nhãn kích thước (pixel thật của ảnh sẽ lưu).
