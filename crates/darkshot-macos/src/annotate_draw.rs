@@ -1734,6 +1734,62 @@ mod tests {
         }
     }
 
+    // ---- Task 113: Highlight hình chữ nhật
+
+    fn highlight(a: Pt, b: Pt, color: Rgb, opacity: f32) -> Shape {
+        Shape::Highlight {
+            a,
+            b,
+            color,
+            opacity,
+        }
+    }
+
+    #[test]
+    fn highlight_rect_blends_at_its_opacity_without_a_border() {
+        let white = Rgb(255, 255, 255);
+        let h = highlight(pt(10.0, 10.0), pt(50.0, 40.0), white, 0.5);
+        let img = render(60, 50, 0, &[h]);
+        let c = px(&img, 30, 25);
+        assert!(near(c, [128, 128, 128, 255], 3), "{c:?}");
+        // Sát mép trong cũng cùng độ pha (không viền đậm hơn).
+        assert!(near(px(&img, 11, 11), [128, 128, 128, 255], 3));
+        assert!(near(px(&img, 48, 38), [128, 128, 128, 255], 3));
+        // Ngoài hình giữ nguyên.
+        assert_eq!(px(&img, 8, 25), [0, 0, 0, 255]);
+        assert_eq!(px(&img, 52, 25), [0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn highlight_rect_drawn_backwards_equals_forwards_and_default_opacity_is_marker_alpha() {
+        let a = render(
+            60,
+            50,
+            40,
+            &[highlight(pt(50.0, 40.0), pt(10.0, 10.0), RED, HIGHLIGHT_OPACITY)],
+        );
+        let b = render(
+            60,
+            50,
+            40,
+            &[highlight(pt(10.0, 10.0), pt(50.0, 40.0), RED, HIGHLIGHT_OPACITY)],
+        );
+        assert_eq!(a, b);
+        // 0,4 đỏ + 0,6 xám 40: R = 102 + 24 = 126.
+        assert!(near(px(&a, 30, 25), [24, 24, 126, 255], 3), "{:?}", px(&a, 30, 25));
+    }
+
+    #[test]
+    fn highlight_rect_blends_with_what_is_below_and_ignores_bad_numbers() {
+        let blue = blue_block();
+        let h = highlight(pt(10.0, 15.0), pt(50.0, 25.0), RED, 0.4);
+        let img = render(60, 40, 100, &[blue, h]);
+        let p = px(&img, 30, 20);
+        assert!(near(p, [153, 0, 102, 255], 3), "{p:?}");
+        let bad = highlight(pt(f32::NAN, 0.0), pt(5.0, 5.0), RED, 0.4);
+        assert_eq!(render(60, 40, 7, &[bad]), solid(60, 40, 7));
+    }
+
     #[test]
     fn box_border_has_the_right_color_and_thickness() {
         let img = render(60, 50, 0, &[styled(false, Some(GREEN), 4.0, 1.0)]);

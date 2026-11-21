@@ -1456,6 +1456,110 @@ mod tests {
         }
     }
 
+    // ---- Task 113: Highlight hình chữ nhật
+
+    fn hl(opacity: f32) -> Shape {
+        Shape::Highlight {
+            a: p(10.0, 10.0),
+            b: p(60.0, 40.0),
+            color: BLUE,
+            opacity,
+        }
+    }
+
+    #[test]
+    fn highlight_hit_inside_only_while_visible() {
+        let h = hl(0.4);
+        assert!(hit_shape(&h, Z, p(35.0, 25.0), 2.0));
+        assert!(hit_shape(&h, Z, p(11.0, 25.0), 0.0));
+        assert!(!hit_shape(&h, Z, p(200.0, 200.0), 2.0));
+        assert!(!hit_shape(&hl(0.0), Z, p(35.0, 25.0), 0.0));
+        // Kéo ngược chiều vẫn trúng như nhau.
+        let rev = Shape::Highlight {
+            a: p(60.0, 40.0),
+            b: p(10.0, 10.0),
+            color: BLUE,
+            opacity: 0.4,
+        };
+        assert!(hit_shape(&rev, Z, p(35.0, 25.0), 0.0));
+    }
+
+    #[test]
+    fn highlight_has_eight_handles_moves_and_resizes() {
+        let h = hl(0.5);
+        assert_eq!(handles(&h, Z).len(), 8);
+        let g = Gesture {
+            index: 0,
+            grip: Grip::Box(Handle::SE),
+            start: p(60.0, 40.0),
+            original: h.clone(),
+            original_bounds: Z,
+        };
+        let img = Image {
+            width: 1,
+            height: 1,
+            bgra: vec![0; 4],
+        };
+        match transform(&g, p(90.0, 70.0), false, 6.0, &img) {
+            Shape::Highlight {
+                a,
+                b,
+                color,
+                opacity,
+            } => assert_eq!((a, b, color, opacity), (p(10.0, 10.0), p(90.0, 70.0), BLUE, 0.5)),
+            other => panic!("{other:?}"),
+        }
+        let mv = Gesture {
+            grip: Grip::Move,
+            start: p(0.0, 0.0),
+            ..g
+        };
+        match transform(&mv, p(5.0, 7.0), false, 6.0, &img) {
+            Shape::Highlight { a, b, opacity, .. } => {
+                assert_eq!((a, b, opacity), (p(15.0, 17.0), p(65.0, 47.0), 0.5))
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn highlight_restyle_changes_color_opacity_and_marker_width() {
+        match highlight_restyle(&hl(0.4), None, Some(0.7), Some(RED)) {
+            Shape::Highlight { color, opacity, .. } => assert_eq!((color, opacity), (RED, 0.7)),
+            other => panic!("{other:?}"),
+        }
+        // Độ trong suốt được kẹp; NaN giữ nguyên.
+        match highlight_restyle(&hl(0.4), None, Some(9.0), None) {
+            Shape::Highlight { opacity, .. } => assert_eq!(opacity, 1.0),
+            other => panic!("{other:?}"),
+        }
+        match highlight_restyle(&hl(0.4), None, Some(f32::NAN), None) {
+            Shape::Highlight { opacity, .. } => assert_eq!(opacity, 0.4),
+            other => panic!("{other:?}"),
+        }
+        let mk = Shape::Marker {
+            points: vec![p(1.0, 1.0), p(9.0, 9.0)],
+            width: 10.0,
+            color: RED,
+        };
+        match highlight_restyle(&mk, Some(24.0), Some(0.9), Some(BLUE)) {
+            Shape::Marker {
+                points,
+                width,
+                color,
+            } => assert_eq!((points.len(), width, color), (2, 24.0, BLUE)),
+            other => panic!("{other:?}"),
+        }
+        // Hình khác giữ nguyên.
+        let r = rect(p(0.0, 0.0), p(5.0, 5.0));
+        assert_eq!(highlight_restyle(&r, Some(3.0), Some(0.5), Some(BLUE)), r);
+        // restyle chung đổi màu Highlight (nút Màu), bỏ qua cỡ.
+        match restyle(&hl(0.4), Some(SizeLevel::Huge), Some(RED), 96) {
+            Shape::Highlight { color, opacity, .. } => assert_eq!((color, opacity), (RED, 0.4)),
+            other => panic!("{other:?}"),
+        }
+    }
+
     fn label() -> Shape {
         Shape::Label {
             origin: p(10.0, 10.0),

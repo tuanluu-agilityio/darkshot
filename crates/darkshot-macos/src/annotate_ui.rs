@@ -1867,7 +1867,7 @@ impl Default for Annot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::annotate_style::WIDTH_MAX_DIP;
+    use crate::annotate_style::{MARKER_WIDTH_MAX_DIP, WIDTH_MAX_DIP};
     use crate::overlay_input::{bar_rect, side_rect};
     use darkshot_core::annotate::STROKE_DIP;
     use darkshot_core::annotate::{constrain_45, constrain_square};
@@ -3064,6 +3064,10 @@ mod tests {
             StyleCell::Target(StyleTarget::Fill) => l.fill_chip,
             StyleCell::Target(StyleTarget::Border) => l.border_chip,
             StyleCell::NoFill => l.no_fill,
+            StyleCell::Mode(m) => {
+                let i = HighlightMode::ALL.iter().position(|x| *x == m).unwrap();
+                l.modes.expect("bảng Highlight có hàng chế độ")[i]
+            }
             StyleCell::Width(d) if d < 0 => l.width_minus,
             StyleCell::Width(_) => l.width_plus,
             StyleCell::Opacity(d) if d < 0 => l.opacity_minus,
@@ -3122,7 +3126,7 @@ mod tests {
             (Tool::Line, None),
             (Tool::Arrow, None),
             (Tool::Pen, None),
-            (Tool::Marker, None),
+            (Tool::Marker, Some(StyleKind::MarkerFree)),
             (Tool::Blur, None),
             (Tool::Step, None),
             (Tool::Select, None),
@@ -3260,6 +3264,207 @@ mod tests {
     }
 
     /// Chọn hình đầu (bấm cạnh trái) rồi tô nền.
+    // ---- Task 113: Highlight hai chế độ
+
+    fn pick_mode(h: &mut H, m: HighlightMode) {
+        h.a.use_tool(Tool::Marker, 96);
+        click_style(h, StyleCell::Mode(m));
+    }
+
+    fn select_at(h: &mut H, p: Point) {
+        h.a.use_tool(Tool::Select, 96);
+        h.down(p);
+        h.up(p, false);
+    }
+
+    #[test]
+    fn highlight_defaults_to_freehand_and_the_marker_panel_shows() {
+        let mut h = H::new();
+        h.a.use_tool(Tool::Marker, 96);
+        assert_eq!(h.a.style_kind(), Some(StyleKind::MarkerFree));
+        let v = h.a.style_view(96).unwrap();
+        assert_eq!(v.mode, Some(HighlightMode::Freehand));
+        assert_eq!(v.width_dip, MARKER_DIP);
+        h.gesture(pt(100, 100), pt(200, 100));
+        assert!(matches!(h.a.shapes()[0], Shape::Marker { .. }));
+        pick_mode(&mut h, HighlightMode::Rect);
+        assert_eq!(h.a.style_kind(), Some(StyleKind::MarkerRect));
+        assert_eq!(h.a.style_view(96).unwrap().opacity, HIGHLIGHT_OPACITY);
+    }
+
+    #[test]
+    fn switching_mode_never_changes_drawn_shapes_and_is_remembered() {
+        let mut h = H::new();
+        h.a.use_tool(Tool::Marker, 96);
+        h.gesture(pt(100, 100), pt(200, 100));
+        let before = h.a.shapes().to_vec();
+        let steps = h.a.can_undo();
+        pick_mode(&mut h, HighlightMode::Rect);
+        assert_eq!(h.a.shapes(), before.as_slice());
+        assert_eq!(h.a.can_undo(), steps);
+        assert_eq!(h.a.prefs().highlight_mode, HighlightMode::Rect);
+        // Nhớ qua các lần mở lớp phủ.
+        let again = Annot::with_prefs(h.a.prefs());
+        assert_eq!(again.prefs().highlight_mode, HighlightMode::Rect);
+        h.gesture(pt(100, 200), pt(300, 230));
+        assert!(matches!(h.a.shapes()[1], Shape::Highlight { .. }));
+        pick_mode(&mut h, HighlightMode::Freehand);
+        assert_eq!(h.a.shapes().len(), 2);
+    }
+
+    #[test]
+    fn rect_mode_drag_makes_a_normalized_borderless_highlight() {
+        let mut h = H::new();
+        pick_mode(&mut h, HighlightMode::Rect);
+        // Kéo ngược chiều.
+        h.down(pt(300, 230));
+        h.drag(pt(100, 200), false);
+        assert!(h
+            .a
+            .layers()
+            .iter()
+            .any(|l| matches!(l, Layer::Boxed(Shape::Highlight { .. }))));
+        h.up(pt(100, 200), false);
+        match &h.a.shapes()[0] {
+            Shape::Highlight {
+                a,
+                b,
+                color,
+                opacity,
+            } => {
+                assert_eq!((a.x, a.y, b.x, b.y), (100.0, 200.0, 300.0, 230.0));
+                assert_eq!(*color, h.a.color());
+                assert_eq!(*opacity, HIGHLIGHT_OPACITY);
+            }
+            other => panic!("{other:?}"),
+        }
+        // Kích thước 0 hoặc quá nhỏ bị bỏ, không ghi sổ.
+        let n = h.a.shapes().len();
+        h.gesture(pt(150, 300), pt(150, 300));
+        h.gesture(pt(150, 300), pt(250, 301));
+        assert_eq!(h.a.shapes().len(), n);
+    }
+
+    #[test]
+    fn highlight_rect_selects_moves_and_undoes() {
+        let mut h = H::new();
+        pick_mode(&mut h, HighlightMode::Rect);
+        h.gesture(pt(100, 200), pt(300, 230));
+        select_at(&mut h, pt(200, 215));
+        assert_eq!(h.a.selected(), Some(0));
+        assert_eq!(h.a.style_kind(), Some(StyleKind::MarkerRect));
+        h.down(pt(200, 215));
+        h.drag(pt(220, 235), false);
+        h.up(pt(220, 235), false);
+        match &h.a.shapes()[0] {
+            Shape::Highlight { a, b, .. } => {
+                assert_eq!((a.x, a.y, b.x, b.y), (120.0, 220.0, 320.0, 250.0))
+            }
+            other => panic!("{other:?}"),
+        }
+        h.a.undo(96);
+        match &h.a.shapes()[0] {
+            Shape::Highlight { a, .. } => assert_eq!((a.x, a.y), (100.0, 200.0)),
+            other => panic!("{other:?}"),
+        }
+        h.a.redo(96);
+        assert_eq!(h.a.shapes().len(), 1);
+    }
+
+    #[test]
+    fn highlight_opacity_and_color_changes_are_one_undo_step_each() {
+        let mut h = H::new();
+        pick_mode(&mut h, HighlightMode::Rect);
+        h.gesture(pt(100, 200), pt(300, 230));
+        select_at(&mut h, pt(200, 215));
+        let before = h.a.shapes().to_vec();
+        click_style(&mut h, StyleCell::Opacity(1));
+        match &h.a.shapes()[0] {
+            Shape::Highlight { opacity, .. } => assert!((opacity - 0.5).abs() < 1e-6, "{opacity}"),
+            other => panic!("{other:?}"),
+        }
+        h.a.undo(96);
+        assert_eq!(h.a.shapes(), before.as_slice(), "một lần hoàn tác trả đủ");
+        h.a.redo(96);
+        select_at(&mut h, pt(200, 215));
+        click_style(&mut h, StyleCell::Color(7));
+        match &h.a.shapes()[0] {
+            Shape::Highlight { color, opacity, .. } => {
+                assert_eq!(*color, PALETTE[7]);
+                assert!((opacity - 0.5).abs() < 1e-6);
+            }
+            other => panic!("{other:?}"),
+        }
+        // Độ trong suốt mặc định cho lần vẽ sau.
+        assert!((h.a.prefs().highlight_opacity - 0.5).abs() < 1e-6);
+        h.a.use_tool(Tool::Marker, 96);
+        h.gesture(pt(100, 300), pt(300, 330));
+        match &h.a.shapes()[1] {
+            Shape::Highlight { opacity, .. } => assert!((opacity - 0.5).abs() < 1e-6),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn freehand_width_applies_to_selected_stroke_and_next_ones() {
+        let mut h = H::new();
+        h.a.use_tool(Tool::Marker, 96);
+        click_style(&mut h, StyleCell::Width(1));
+        assert_eq!(h.a.prefs().marker_width_dip, MARKER_DIP + 2.0);
+        h.gesture(pt(100, 100), pt(200, 100));
+        match &h.a.shapes()[0] {
+            Shape::Marker { width, .. } => assert_eq!(*width, MARKER_DIP + 2.0),
+            other => panic!("{other:?}"),
+        }
+        select_at(&mut h, pt(150, 100));
+        assert_eq!(h.a.selected(), Some(0));
+        let before = h.a.shapes().to_vec();
+        click_style(&mut h, StyleCell::Width(-1));
+        click_style(&mut h, StyleCell::Width(-1));
+        match &h.a.shapes()[0] {
+            Shape::Marker { width, .. } => assert_eq!(*width, MARKER_DIP - 2.0),
+            other => panic!("{other:?}"),
+        }
+        h.a.undo(96);
+        h.a.undo(96);
+        assert_eq!(h.a.shapes(), before.as_slice());
+        for _ in 0..40 {
+            click_style(&mut h, StyleCell::Width(1));
+        }
+        assert_eq!(h.a.style_view(96).unwrap().width_dip, MARKER_WIDTH_MAX_DIP);
+        h.a.set_size(SizeLevel::Huge, 96);
+        assert_eq!(h.a.prefs().marker_width_dip, SizeLevel::Huge.marker_dip());
+    }
+
+    #[test]
+    fn highlight_rect_is_burned_where_it_was_drawn() {
+        let mut h = H::new();
+        pick_mode(&mut h, HighlightMode::Rect);
+        h.gesture(pt(100, 200), pt(300, 230));
+        let shapes = h.a.take_shapes(96);
+        let (w, hh) = (h.img.width as i32, h.img.height as i32);
+        let mut out = h.img.clone();
+        crate::annotate_draw::burn(
+            &mut out,
+            &shapes,
+            Rect {
+                x: 0,
+                y: 0,
+                w,
+                h: hh,
+            },
+        )
+        .unwrap();
+        let at = |im: &Image, x: i32, y: i32| {
+            let i = ((y * w + x) * 4) as usize;
+            [im.bgra[i], im.bgra[i + 1], im.bgra[i + 2]]
+        };
+        assert_ne!(at(&out, 200, 215), at(&h.img, 200, 215), "trong hình đã trộn màu");
+        for (x, y) in [(200, 190), (200, 240), (90, 215), (310, 215)] {
+            assert_eq!(at(&out, x, y), at(&h.img, x, y), "ngoài hình: {x},{y}");
+        }
+    }
+
     fn click_style_with_select(h: &mut H) {
         h.down(pt(100, 130));
         h.up(pt(100, 130), false);

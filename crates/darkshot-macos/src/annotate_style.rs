@@ -471,4 +471,84 @@ mod tests {
         let (_, hl) = panel_size(StyleKind::Label, 96);
         assert!(hl > hb);
     }
+
+    // ---- Task 113: Highlight hai chế độ
+
+    #[test]
+    fn marker_width_steps_by_two_inside_the_range() {
+        assert_eq!(step_marker_width(16.0, 1), 18.0);
+        assert_eq!(step_marker_width(16.0, -1), 14.0);
+        assert_eq!(step_marker_width(MARKER_WIDTH_MIN_DIP, -1), MARKER_WIDTH_MIN_DIP);
+        assert_eq!(step_marker_width(MARKER_WIDTH_MAX_DIP, 1), MARKER_WIDTH_MAX_DIP);
+        assert_eq!(clamp_marker_width(f32::NAN), MARKER_WIDTH_MIN_DIP);
+        assert_eq!(clamp_marker_width(500.0), MARKER_WIDTH_MAX_DIP);
+        assert_eq!(clamp_marker_width(-3.0), MARKER_WIDTH_MIN_DIP);
+    }
+
+    #[test]
+    fn highlight_panels_hit_modes_colors_and_only_their_own_stepper() {
+        for dpi in [96, 144, 192] {
+            for kind in [StyleKind::MarkerFree, StyleKind::MarkerRect] {
+                let l = at(kind, dpi);
+                assert_eq!(panel_size(kind, dpi), panel_size(StyleKind::Box, dpi));
+                let m = l.modes.expect("hàng chọn chế độ");
+                assert_eq!(
+                    cell_at(&l, centre(m[0])),
+                    Some(StyleCell::Mode(HighlightMode::Freehand))
+                );
+                assert_eq!(
+                    cell_at(&l, centre(m[1])),
+                    Some(StyleCell::Mode(HighlightMode::Rect))
+                );
+                for (i, c) in l.cells.iter().enumerate() {
+                    assert_eq!(cell_at(&l, centre(*c)), Some(StyleCell::Color(i)));
+                }
+                // Không có Nền/Viền/Không nền ở bảng Highlight.
+                assert_eq!(cell_at(&l, centre(l.fill_chip)), None);
+                let (w, o) = (
+                    cell_at(&l, centre(l.width_plus)),
+                    cell_at(&l, centre(l.opacity_plus)),
+                );
+                if kind == StyleKind::MarkerFree {
+                    assert_eq!((w, o), (Some(StyleCell::Width(1)), None));
+                } else {
+                    assert_eq!((w, o), (None, Some(StyleCell::Opacity(1))));
+                }
+                assert!(l.aligns.is_none());
+                // Mọi ô nằm trong bảng và không chồng nhau.
+                let mut rs: Vec<Rect> = m.to_vec();
+                rs.extend(l.cells.iter().copied());
+                rs.extend([
+                    l.width_minus,
+                    l.width_value,
+                    l.width_plus,
+                    l.opacity_minus,
+                    l.opacity_value,
+                    l.opacity_plus,
+                ]);
+                for r in &rs {
+                    assert!(
+                        r.x >= l.panel.x
+                            && r.y >= l.panel.y
+                            && r.right() <= l.panel.right()
+                            && r.bottom() <= l.panel.bottom()
+                    );
+                }
+                for (i, a) in rs.iter().enumerate() {
+                    for b in &rs[i + 1..] {
+                        assert!(
+                            a.right() <= b.x
+                                || b.right() <= a.x
+                                || a.bottom() <= b.y
+                                || b.bottom() <= a.y,
+                            "{a:?} chồng {b:?}"
+                        );
+                    }
+                }
+            }
+        }
+        // Bảng Hình, Chữ không có hàng chế độ.
+        assert!(at(StyleKind::Box, 96).modes.is_none());
+        assert!(at(StyleKind::Label, 96).modes.is_none());
+    }
 }

@@ -1613,6 +1613,78 @@ mod tests {
         );
     }
 
+    // ---- Task 113: Highlight hai chế độ
+
+    #[test]
+    fn highlight_mode_defaults_and_opacity_constant() {
+        assert_eq!(HighlightMode::ALL, [HighlightMode::Freehand, HighlightMode::Rect]);
+        assert_eq!(HighlightMode::default(), HighlightMode::Freehand);
+        assert_eq!(HIGHLIGHT_OPACITY, f32::from(MARKER_ALPHA) / 255.0);
+    }
+
+    #[test]
+    fn highlight_from_stroke_normalizes_and_ignores_other_shapes() {
+        let red = Rgb(255, 0, 0);
+        let drag = Shape::Rect {
+            a: p(100.0, 80.0),
+            b: p(20.0, 30.0),
+            width: 4.0,
+            color: red,
+        };
+        assert_eq!(
+            highlight_from_stroke(&drag, 0.4),
+            Shape::Highlight {
+                a: p(20.0, 30.0),
+                b: p(100.0, 80.0),
+                color: red,
+                opacity: 0.4
+            }
+        );
+        let line = Shape::Line {
+            a: p(0.0, 0.0),
+            b: p(9.0, 9.0),
+            width: 2.0,
+            color: red,
+        };
+        assert_eq!(highlight_from_stroke(&line, 0.4), line);
+    }
+
+    #[test]
+    fn highlight_bounds_are_normalized_with_one_px_pad() {
+        let h = Shape::Highlight {
+            a: p(60.0, 40.0),
+            b: p(10.0, 10.0),
+            color: Rgb(0, 0, 255),
+            opacity: 0.4,
+        };
+        assert_eq!(
+            h.bounds(),
+            Some(Rect {
+                x: 9,
+                y: 9,
+                w: 52,
+                h: 32
+            })
+        );
+        assert_eq!(h.style(), None);
+        assert_eq!(h.highlight_opacity(), Some(0.4));
+        assert_eq!(
+            Shape::Marker {
+                points: vec![],
+                width: 1.0,
+                color: Rgb(0, 0, 0)
+            }
+            .highlight_opacity(),
+            None
+        );
+    }
+
+    #[test]
+    fn highlight_drag_too_short_is_dropped_by_rect_rule() {
+        assert!(too_short(Tool::Rect, p(5.0, 5.0), p(5.0, 5.0)));
+        assert!(too_short(Tool::Rect, p(5.0, 5.0), p(50.0, 6.0)));
+    }
+
     #[test]
     fn too_short_ellipse_like_rect() {
         for (a, b) in [
