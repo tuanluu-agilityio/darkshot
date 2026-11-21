@@ -341,6 +341,7 @@ fn draw_one(g: *mut GpGraphics, s: &Shape, text: &mut Option<TextStyle>) -> bool
             points,
             width,
             color,
+            ..
         } => draw_marker(g, points, *width, *color),
         Shape::Blur { a, b, color } => draw_blur(g, *a, *b, *color),
         Shape::Text {
@@ -1066,6 +1067,7 @@ mod tests {
             points: vec![pt(10.0, 20.0), pt(30.0, 22.0), pt(50.0, 20.0)],
             width: 16.0,
             color: Rgb(255, 255, 255),
+            opacity: darkshot_core::annotate::HIGHLIGHT_OPACITY,
         };
         let crop = full(&img);
         assert_eq!(burn(&mut img, &[m], crop), Ok(()));
@@ -1088,6 +1090,7 @@ mod tests {
             points: vec![pt(30.0, 20.0), pt(30.0, 20.0)],
             width: 8.0,
             color: Rgb(255, 255, 255),
+            opacity: darkshot_core::annotate::HIGHLIGHT_OPACITY,
         };
         let crop = full(&img);
         assert_eq!(burn(&mut img, &[pen, marker], crop), Ok(()));
@@ -1121,6 +1124,7 @@ mod tests {
             ],
             width: 16.0,
             color: Rgb(0, 0, 0),
+            opacity: darkshot_core::annotate::HIGHLIGHT_OPACITY,
         };
         let crop = full(&img);
         assert_eq!(burn(&mut img, &[m], crop), Ok(()));
@@ -1201,6 +1205,7 @@ mod tests {
                 points: vec![pt(50.0, 50.0), pt(100.0, 60.0), pt(150.0, 30.0)],
                 width: 16.0,
                 color: PALETTE[2],
+                opacity: darkshot_core::annotate::HIGHLIGHT_OPACITY,
             },
             Shape::Blur {
                 a: pt(85.3, 32.6),

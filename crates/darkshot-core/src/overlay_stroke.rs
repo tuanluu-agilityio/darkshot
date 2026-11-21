@@ -65,6 +65,7 @@ pub fn begin_stroke(
             points: vec![p],
             width,
             color,
+            opacity: crate::annotate::HIGHLIGHT_OPACITY,
         },
         Tool::Line => Shape::Line {
             a: p,

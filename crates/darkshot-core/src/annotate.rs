@@ -234,16 +234,43 @@ pub struct Style {
     /// Độ dày viền (px); 0 là không viền.
     pub stroke_width: f32,
     pub opacity: f32,
+    /// Bo góc (px ảnh); 0 là góc vuông. Chỉ Hình chữ nhật và Chữ dùng (elip bỏ qua); khi vẽ kẹp theo
+    /// nửa cạnh ngắn của hộp (`clamp_radius`).
+    pub radius: f32,
+    /// Bật thì không vẽ viền (không tính vào hộp bao) mà vẫn giữ `stroke`, `stroke_width` để khi tắt
+    /// viền trở lại như cũ.
+    pub no_border: bool,
+}
+
+/// Bo góc kẹp vào 0..=nửa cạnh ngắn của hộp `w` x `h` (px); không phải số hoặc âm thì 0.
+pub fn clamp_radius(radius: f32, w: f32, h: f32) -> f32 {
+    let max = (w.min(h) / 2.0).max(0.0);
+    if radius.is_nan() || radius <= 0.0 || !max.is_finite() {
+        0.0
+    } else {
+        radius.min(max)
+    }
 }
 
 impl Style {
-    /// Không nền, đặc, viền `stroke_width` px màu `stroke`.
+    /// Không nền, đặc, viền `stroke_width` px màu `stroke`, góc vuông.
     pub fn new(stroke: Rgb, stroke_width: f32) -> Style {
         Style {
             fill: None,
             stroke,
             stroke_width,
             opacity: 1.0,
+            radius: 0.0,
+            no_border: false,
+        }
+    }
+
+    /// Độ dày viền thực sự vẽ (px): 0 khi `no_border`.
+    pub fn border_width(&self) -> f32 {
+        if self.no_border {
+            0.0
+        } else {
+            self.stroke_width.max(0.0)
         }
     }
 
@@ -259,6 +286,11 @@ impl Style {
                 0.0
             } else {
                 self.stroke_width.max(0.0)
+            },
+            radius: if self.radius.is_nan() {
+                0.0
+            } else {
+                self.radius.max(0.0)
             },
             ..self
         }
@@ -317,10 +349,13 @@ pub enum Shape {
         width: f32,
         color: Rgb,
     },
+    /// Bút dạ quang tự do. `opacity` (0..=1) là độ trong suốt; Windows vẫn vẽ cố định
+    /// `MARKER_ALPHA` và bỏ qua trường này; hình tạo mới mang `HIGHLIGHT_OPACITY`.
     Marker {
         points: Vec<Pt>,
         width: f32,
         color: Rgb,
+        opacity: f32,
     },
     /// Vùng che: tô kín `blur_pixel_rect(a, b)` bằng `color` (màu trung bình của ảnh chụp gốc).
     Blur { a: Pt, b: Pt, color: Rgb },
@@ -430,7 +465,7 @@ impl Shape {
             Shape::Text { .. } | Shape::Label { .. } => None,
             Shape::Box { a, b, style, .. } => bounds_of(
                 &[*a, *b],
-                style.stroke_width.max(0.0) / 2.0 * std::f32::consts::SQRT_2 + 1.0,
+                style.border_width() / 2.0 * std::f32::consts::SQRT_2 + 1.0,
             ),
             Shape::Ellipse { a, b, width, .. } => bounds_of(&[*a, *b], width / 2.0 + 1.0),
             Shape::Highlight { a, b, .. } => bounds_of(&[*a, *b], 1.0),
@@ -528,6 +563,8 @@ pub fn styled_from_stroke(shape: &Shape, fill: Option<Rgb>, opacity: f32) -> Sha
             stroke: color,
             stroke_width: width,
             opacity,
+            radius: 0.0,
+            no_border: false,
         }
         .sanitized(),
     }
@@ -1732,7 +1769,8 @@ mod tests {
             Shape::Marker {
                 points: vec![],
                 width: 1.0,
-                color: Rgb(0, 0, 0)
+                color: Rgb(0, 0, 0),
+                opacity: HIGHLIGHT_OPACITY,
             }
             .highlight_opacity(),
             None
@@ -2197,5 +2235,78 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    // ---- Task 114: không viền, bo góc, độ trong suốt của nét Highlight
+
+    #[test]
+    fn clamp_radius_keeps_between_zero_and_half_the_short_side() {
+        assert_eq!(clamp_radius(0.0, 100.0, 40.0), 0.0);
+        assert_eq!(clamp_radius(8.0, 100.0, 40.0), 8.0);
+        assert_eq!(clamp_radius(500.0, 100.0, 40.0), 20.0);
+        assert_eq!(clamp_radius(500.0, 30.0, 80.0), 15.0);
+        assert_eq!(clamp_radius(-3.0, 100.0, 40.0), 0.0);
+        assert_eq!(clamp_radius(f32::NAN, 100.0, 40.0), 0.0);
+        assert_eq!(clamp_radius(5.0, 0.0, 40.0), 0.0);
+        assert_eq!(clamp_radius(5.0, f32::INFINITY, f32::INFINITY), 0.0);
+    }
+
+    #[test]
+    fn no_border_hides_the_border_but_keeps_width_and_colour() {
+        let mut st = Style::new(DEFAULT_COLOR, 6.0);
+        assert_eq!((st.radius, st.no_border), (0.0, false));
+        assert_eq!(st.border_width(), 6.0);
+        st.no_border = true;
+        assert_eq!(st.border_width(), 0.0);
+        assert_eq!((st.stroke, st.stroke_width), (DEFAULT_COLOR, 6.0));
+        st.no_border = false;
+        assert_eq!(st.border_width(), 6.0);
+        // Độ dày âm không bao giờ cho viền âm.
+        assert_eq!(Style::new(DEFAULT_COLOR, -4.0).border_width(), 0.0);
+        // `sanitized` kẹp bo góc.
+        let bad = Style {
+            radius: f32::NAN,
+            ..Style::new(DEFAULT_COLOR, 1.0)
+        };
+        assert_eq!(bad.sanitized().radius, 0.0);
+        let neg = Style {
+            radius: -9.0,
+            ..Style::new(DEFAULT_COLOR, 1.0)
+        };
+        assert_eq!(neg.sanitized().radius, 0.0);
+        let ok = Style {
+            radius: 7.5,
+            ..Style::new(DEFAULT_COLOR, 1.0)
+        };
+        assert_eq!(ok.sanitized().radius, 7.5);
+    }
+
+    #[test]
+    fn box_bounds_ignore_a_hidden_border() {
+        let mk = |no_border| Shape::Box {
+            a: Pt { x: 10.0, y: 10.0 },
+            b: Pt { x: 60.0, y: 40.0 },
+            oval: false,
+            style: Style {
+                no_border,
+                ..Style::new(DEFAULT_COLOR, 12.0)
+            },
+        };
+        let with = mk(false).bounds().unwrap();
+        let without = mk(true).bounds().unwrap();
+        assert!(without.w < with.w && without.h < with.h);
+        assert_eq!((without.x, without.y), (9, 9), "chỉ còn 1 px khử răng cưa");
+    }
+
+    #[test]
+    fn styled_from_stroke_starts_square_with_a_border() {
+        let raw = Shape::Rect {
+            a: Pt { x: 1.0, y: 1.0 },
+            b: Pt { x: 9.0, y: 9.0 },
+            width: 3.0,
+            color: DEFAULT_COLOR,
+        };
+        let st = styled_from_stroke(&raw, None, 1.0).style().unwrap();
+        assert_eq!((st.radius, st.no_border), (0.0, false));
     }
 }

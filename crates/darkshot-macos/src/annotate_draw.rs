@@ -6,8 +6,8 @@
 //! `draw_shapes` duyệt danh sách theo chỉ số tăng dần, hình sau đè lên hình trước.
 
 use darkshot_core::annotate::{
-    align_offsets, arrow_geometry, arrow_min_head, blur_pixel_rect, outline_color, Align, Pt,
-    Shape, Style, TextEdit, LABEL_PAD_EM, MARKER_ALPHA, STEP_RING, TEXT_DIP, TEXT_OUTLINE_DIP,
+    align_offsets, arrow_geometry, arrow_min_head, blur_pixel_rect, clamp_radius, outline_color,
+    Align, Pt, Shape, Style, TextEdit, LABEL_PAD_EM, STEP_RING, TEXT_DIP, TEXT_OUTLINE_DIP,
 };
 use darkshot_core::geometry::Rect;
 use darkshot_core::image::Image;
@@ -323,15 +323,15 @@ fn draw_arrow(c: &CGContext, a: Pt, b: Pt, width: f32, color: Rgb) -> bool {
     true
 }
 
-fn draw_marker(c: &CGContext, points: &[Pt], width: f32, color: Rgb) -> bool {
+fn draw_marker(c: &CGContext, points: &[Pt], width: f32, color: Rgb, opacity: f32) -> bool {
     if points.is_empty() {
         return true;
     }
-    if !(points.iter().all(|p| sane_pt(*p)) && sane(width)) || width <= 0.0 {
+    if !(points.iter().all(|p| sane_pt(*p)) && sane(width)) || width <= 0.0 || !opacity.is_finite()
+    {
         return false;
     }
-    let alpha = f32::from(MARKER_ALPHA) / 255.0;
-    set_fill(c, color, alpha);
+    set_fill(c, color, opacity.clamp(0.0, 1.0));
     // Mọi điểm trùng nhau: vẽ ô vuông như nét một điểm.
     if let Some(first) = single_spot(points) {
         let r = width / 2.0;
@@ -400,32 +400,64 @@ fn with_opacity(c: &CGContext, opacity: f32, paint: impl FnOnce()) {
     CGContext::restore_g_state(Some(c));
 }
 
-/// Nền và viền của hình chữ nhật/elip `r` theo `style` (viền căn giữa trên cạnh `r`).
+/// Đường bo góc của hình chữ nhật `r`, bán kính `radius` (đã kẹp theo nửa cạnh ngắn); 0 thì hình
+/// chữ nhật thường.
+fn rounded_rect_path(c: &CGContext, r: CGRect, radius: f32) {
+    let rad = f64::from(clamp_radius(
+        radius,
+        r.size.width as f32,
+        r.size.height as f32,
+    ));
+    let (x0, y0) = (r.origin.x, r.origin.y);
+    let (x1, y1) = (x0 + r.size.width, y0 + r.size.height);
+    if rad <= 0.0 {
+        CGContext::add_rect(Some(c), r);
+        return;
+    }
+    CGContext::move_to_point(Some(c), x0 + rad, y0);
+    CGContext::add_arc_to_point(Some(c), x1, y0, x1, y1, rad);
+    CGContext::add_arc_to_point(Some(c), x1, y1, x0, y1, rad);
+    CGContext::add_arc_to_point(Some(c), x0, y1, x0, y0, rad);
+    CGContext::add_arc_to_point(Some(c), x0, y0, x1, y0, rad);
+    CGContext::close_path(Some(c));
+}
+
+/// Nền và viền của hình chữ nhật/elip `r` theo `style` (viền căn giữa trên cạnh `r`; không viền khi
+/// `no_border`; bo góc chỉ cho hình chữ nhật).
 fn paint_box(c: &CGContext, r: CGRect, oval: bool, style: &Style) {
     if let Some(fill) = style.fill {
         set_fill(c, fill, 1.0);
         if oval {
             CGContext::fill_ellipse_in_rect(Some(c), r);
         } else {
-            CGContext::fill_rect(Some(c), r);
+            rounded_rect_path(c, r, style.radius);
+            CGContext::fill_path(Some(c));
         }
     }
-    if style.stroke_width > 0.0 {
+    let bw = style.border_width();
+    if bw > 0.0 {
         set_stroke(c, style.stroke, 1.0);
-        CGContext::set_line_width(Some(c), f(style.stroke_width));
+        CGContext::set_line_width(Some(c), f(bw));
         if oval {
             CGContext::stroke_ellipse_in_rect(Some(c), r);
         } else {
             CGContext::set_line_join(Some(c), CGLineJoin::Miter);
             CGContext::set_line_cap(Some(c), CGLineCap::Butt);
-            CGContext::stroke_rect(Some(c), r);
+            if style.radius > 0.0 {
+                CGContext::set_line_join(Some(c), CGLineJoin::Round);
+            }
+            rounded_rect_path(c, r, style.radius);
+            CGContext::stroke_path(Some(c));
         }
     }
 }
 
 fn draw_box(c: &CGContext, a: Pt, b: Pt, oval: bool, style: &Style) -> bool {
-    let w = style.stroke_width;
-    if !(sane_pt(a) && sane_pt(b) && sane(w)) || w < 0.0 || !style.opacity.is_finite() {
+    let w = style.border_width();
+    if !(sane_pt(a) && sane_pt(b) && sane(w) && sane(style.radius))
+        || w < 0.0
+        || !style.opacity.is_finite()
+    {
         return false;
     }
     if style.fill.is_none() && w <= 0.0 {
@@ -496,20 +528,21 @@ fn draw_label(
     align: Align,
     style: &Style,
 ) -> bool {
-    if !sane(style.stroke_width) || style.stroke_width < 0.0 || !style.opacity.is_finite() {
+    let bw = style.border_width();
+    if !sane(bw) || !sane(style.radius) || !style.opacity.is_finite() {
         return false;
     }
     let Some(m) = label_metrics(origin, text, size, align) else {
         return false;
     };
-    if style.fill.is_some() || style.stroke_width > 0.0 {
+    if style.fill.is_some() || bw > 0.0 {
         // Viền nằm trọn trong hộp: thụt vào nửa độ dày.
-        let inset = style.stroke_width / 2.0;
+        let inset = bw / 2.0;
         let r = cg_rect(
             m.x + inset,
             m.y + inset,
-            (m.w - style.stroke_width).max(0.0),
-            (m.h - style.stroke_width).max(0.0),
+            (m.w - bw).max(0.0),
+            (m.h - bw).max(0.0),
         );
         with_opacity(c, style.opacity, || paint_box(c, r, false, style));
     }
@@ -597,7 +630,8 @@ fn draw_one(c: &CGContext, s: &Shape) -> bool {
             points,
             width,
             color,
-        } => draw_marker(c, points, *width, *color),
+            opacity,
+        } => draw_marker(c, points, *width, *color, *opacity),
         Shape::Blur { a, b, color } => draw_blur(c, *a, *b, *color),
         Shape::Text {
             origin,
@@ -741,7 +775,7 @@ pub fn shape_bounds(s: &Shape) -> Rect {
 
 /// Hộp bao của khối chữ: cả hộp (gồm đệm và viền), nới nét ngoài của chữ.
 fn label_bounds(origin: Pt, text: &str, size: f32, align: Align, style: &Style) -> Rect {
-    let margin = (outline_width(size) / 2.0).max(style.stroke_width.max(0.0) / 2.0);
+    let margin = (outline_width(size) / 2.0).max(style.border_width() / 2.0);
     let (x, y, w, h) = match label_metrics(origin, text, size, align) {
         Some(m) => (m.x, m.y, m.w, m.h),
         None => {
@@ -1085,6 +1119,7 @@ mod tests {
             points: vec![],
             width: 10.0,
             color: RED,
+            opacity: darkshot_core::annotate::HIGHLIGHT_OPACITY,
         };
         let img = render(20, 20, 7, &[none, marker_none]);
         assert_eq!(img, solid(20, 20, 7));
@@ -1133,6 +1168,7 @@ mod tests {
             points: vec![pt(10.0, 20.0), pt(50.0, 20.0)],
             width: 10.0,
             color: RED,
+            opacity: darkshot_core::annotate::HIGHLIGHT_OPACITY,
         };
         let img = render(60, 40, 100, &[m]);
         // 0,4 * 255 + 0,6 * 100 = 162; 0,6 * 100 = 60.
@@ -1151,6 +1187,7 @@ mod tests {
             ],
             width: 10.0,
             color: RED,
+            opacity: darkshot_core::annotate::HIGHLIGHT_OPACITY,
         };
         let img = render(60, 40, 100, &[x]);
         let cross = px(&img, 30, 20);
@@ -1470,6 +1507,7 @@ mod tests {
             points: vec![pt(10.0, 20.0), pt(50.0, 20.0)],
             width: 10.0,
             color: RED,
+            opacity: darkshot_core::annotate::HIGHLIGHT_OPACITY,
         };
         // Marker sau: pha với xanh bên dưới (không còn là xanh thuần, không thành đỏ thuần).
         let img = render(60, 40, 100, &[blue.clone(), marker.clone()]);
@@ -1679,6 +1717,7 @@ mod tests {
                 points: vec![pt(inf, inf)],
                 width: 4.0,
                 color: RED,
+                opacity: darkshot_core::annotate::HIGHLIGHT_OPACITY,
             },
             Shape::Blur {
                 a: pt(nan, 1.0),
@@ -1726,6 +1765,7 @@ mod tests {
                 points: vec![pt(10.0, 20.0), pt(40.0, 20.0)],
                 width: 12.0,
                 color: RED,
+                opacity: darkshot_core::annotate::HIGHLIGHT_OPACITY,
             },
             text(pt(8.0, 8.0), "Ab", 24.0, YELLOW),
         ];
@@ -1754,6 +1794,7 @@ mod tests {
                 stroke: RED,
                 stroke_width: width,
                 opacity,
+                ..Style::new(RED, 0.0)
             },
         }
     }
@@ -1892,6 +1933,7 @@ mod tests {
                 stroke: BLUE,
                 stroke_width: width,
                 opacity,
+                ..Style::new(RED, 0.0)
             },
         }
     }
@@ -2018,6 +2060,166 @@ mod tests {
         assert!(near(px(&img, 5, 5), bgr(GREEN), 3), "dịch theo vùng cắt");
     }
 
+    // ---- Task 114: bo góc, không viền, độ trong suốt của nét Highlight
+
+    fn rounded(fill: Option<Rgb>, width: f32, radius: f32, no_border: bool) -> Shape {
+        Shape::Box {
+            a: pt(10.0, 10.0),
+            b: pt(50.0, 40.0),
+            oval: false,
+            style: Style {
+                fill,
+                stroke: RED,
+                stroke_width: width,
+                radius,
+                no_border,
+                ..Style::new(RED, 0.0)
+            },
+        }
+    }
+
+    #[test]
+    fn rounded_corners_are_empty_while_edges_and_centre_stay_filled() {
+        let sq = render(60, 50, 0, &[rounded(Some(GREEN), 0.0, 0.0, false)]);
+        assert!(near(px(&sq, 11, 11), bgr(GREEN), 3), "góc vuông được tô");
+        let r = render(60, 50, 0, &[rounded(Some(GREEN), 0.0, 12.0, false)]);
+        assert_eq!(px(&r, 11, 11), [0, 0, 0, 255], "góc bị bo là nền");
+        assert_eq!(px(&r, 48, 38), [0, 0, 0, 255]);
+        assert_eq!(px(&r, 48, 11), [0, 0, 0, 255]);
+        assert_eq!(px(&r, 11, 38), [0, 0, 0, 255]);
+        assert!(near(px(&r, 30, 25), bgr(GREEN), 3), "tâm");
+        assert!(near(px(&r, 30, 11), bgr(GREEN), 3), "giữa cạnh trên");
+        assert!(near(px(&r, 11, 25), bgr(GREEN), 3), "giữa cạnh trái");
+        // Tâm hình cung cách góc đúng bán kính: điểm trong cung được tô.
+        assert!(near(px(&r, 18, 18), bgr(GREEN), 3));
+        // Bán kính lớn hơn nửa cạnh ngắn bị kẹp (viên thuốc): vẫn có tâm và cạnh giữa, góc rỗng.
+        let pill = render(60, 50, 0, &[rounded(Some(GREEN), 0.0, 999.0, false)]);
+        assert_eq!(px(&pill, 11, 11), [0, 0, 0, 255]);
+        assert!(near(px(&pill, 30, 25), bgr(GREEN), 3));
+        assert!(near(px(&pill, 30, 11), bgr(GREEN), 3));
+        // Bo góc áp cho cả viền: góc ngoài của viền cũng tròn.
+        let rb = render(60, 50, 0, &[rounded(None, 4.0, 12.0, false)]);
+        assert_eq!(px(&rb, 10, 10), [0, 0, 0, 255], "góc ngoài viền bị bo");
+        assert!(near(px(&rb, 30, 10), bgr(RED), 3), "giữa cạnh là viền");
+        assert!(near(px(&rb, 10, 25), bgr(RED), 3));
+        assert_eq!(px(&rb, 30, 25), [0, 0, 0, 255]);
+        // Elip bỏ qua bo góc.
+        let oval = |radius| Shape::Box {
+            a: pt(10.0, 10.0),
+            b: pt(50.0, 40.0),
+            oval: true,
+            style: Style {
+                fill: Some(GREEN),
+                radius,
+                ..Style::new(RED, 0.0)
+            },
+        };
+        assert_eq!(
+            render(60, 50, 0, &[oval(0.0)]),
+            render(60, 50, 0, &[oval(20.0)])
+        );
+    }
+
+    #[test]
+    fn no_border_draws_nothing_for_the_border_and_never_changes_the_fill() {
+        let with = render(70, 50, 0, &[rounded(Some(GREEN), 8.0, 0.0, false)]);
+        let without = render(70, 50, 0, &[rounded(Some(GREEN), 8.0, 0.0, true)]);
+        assert!(near(px(&with, 7, 25), bgr(RED), 3), "viền ngoài mép");
+        assert_eq!(px(&without, 7, 25), [0, 0, 0, 255], "ẩn viền: không còn");
+        assert!(near(px(&without, 30, 25), bgr(GREEN), 3));
+        assert!(
+            near(px(&without, 10, 25), bgr(GREEN), 3),
+            "nền tới mép hình"
+        );
+        // Không nền, không viền: không vẽ gì.
+        let none = render(70, 50, 0, &[rounded(None, 8.0, 0.0, true)]);
+        assert_eq!(none, render(70, 50, 0, &[]));
+        // Tắt lại thì viền trở lại giống hệt.
+        assert_eq!(
+            with,
+            render(70, 50, 0, &[rounded(Some(GREEN), 8.0, 0.0, false)])
+        );
+    }
+
+    #[test]
+    fn label_block_honours_radius_and_no_border() {
+        let mk = |radius, no_border, width| Shape::Label {
+            origin: pt(10.0, 10.0),
+            text: "Hi".into(),
+            size: 24.0,
+            color: RED,
+            align: Align::Left,
+            style: Style {
+                fill: Some(GREEN),
+                stroke: BLUE,
+                stroke_width: width,
+                radius,
+                no_border,
+                ..Style::new(BLUE, 0.0)
+            },
+        };
+        let b = shape_bounds(&mk(0.0, false, 0.0));
+        let (x, y) = (10u32, 10u32);
+        let sq = render(
+            b.right() as u32 + 10,
+            b.bottom() as u32 + 10,
+            0,
+            &[mk(0.0, false, 0.0)],
+        );
+        assert!(near(px(&sq, x + 1, y + 1), bgr(GREEN), 3));
+        let rr = render(
+            b.right() as u32 + 10,
+            b.bottom() as u32 + 10,
+            0,
+            &[mk(14.0, false, 0.0)],
+        );
+        assert_eq!(px(&rr, x + 1, y + 1), [0, 0, 0, 255], "góc khối chữ bị bo");
+        // Không viền: khối nền giữ nguyên dù có độ dày viền, không còn xanh dương ở mép.
+        let nb = render(
+            b.right() as u32 + 10,
+            b.bottom() as u32 + 10,
+            0,
+            &[mk(0.0, true, 6.0)],
+        );
+        assert!(near(px(&nb, x + 1, y + 1), bgr(GREEN), 3));
+        let bb = render(
+            b.right() as u32 + 10,
+            b.bottom() as u32 + 10,
+            0,
+            &[mk(0.0, false, 6.0)],
+        );
+        assert!(near(px(&bb, x + 1, y + 1), bgr(BLUE), 3));
+    }
+
+    #[test]
+    fn freehand_highlight_blends_at_its_own_opacity() {
+        let mk = |opacity| Shape::Marker {
+            points: vec![pt(10.0, 25.0), pt(50.0, 25.0)],
+            width: 16.0,
+            color: Rgb(255, 255, 255),
+            opacity,
+        };
+        let at = |o: f32| px(&render(60, 50, 100, &[mk(o)]), 30, 25)[2];
+        let expect = |o: f32| (100.0 * (1.0 - o) + 255.0 * o).round() as i32;
+        for o in [0.1f32, 0.4, 0.7, 1.0] {
+            assert!(
+                (i32::from(at(o)) - expect(o)).abs() <= 3,
+                "{o}: {} vs {}",
+                at(o),
+                expect(o)
+            );
+        }
+        assert!(at(0.2) < at(0.5) && at(0.5) < at(0.9));
+        // Mặc định cũ giữ nguyên: HIGHLIGHT_OPACITY chính là MARKER_ALPHA / 255.
+        assert!(
+            (i32::from(at(darkshot_core::annotate::HIGHLIGHT_OPACITY)) - expect(0.4)).abs() <= 3
+        );
+        // Số không hợp lệ: không vẽ được, các hình còn lại vẫn vẽ.
+        let mut img = solid(60, 50, 7);
+        let crop = full(&img);
+        assert!(burn(&mut img, &[mk(f32::NAN)], crop).is_err());
+    }
+
     /// Chạy tay (an toàn, chỉ ghi một tệp PNG vào thư mục tạm): ảnh mẫu có mọi loại hình để xem bằng
     /// mắt. Lệnh: `cargo test -p darkshot-macos --bin darkshot-macos -- --ignored annotate_sample
     /// --test-threads=1`.
@@ -2077,6 +2279,7 @@ mod tests {
                 points: vec![pt(370.0, 140.0), pt(560.0, 140.0)],
                 width: 24.0,
                 color: YELLOW,
+                opacity: darkshot_core::annotate::HIGHLIGHT_OPACITY,
             },
             text(pt(380.0, 120.0), "Marker trên chữ", 22.0, Rgb(20, 20, 20)),
             Shape::Blur {
@@ -2125,6 +2328,7 @@ mod tests {
                     stroke: Rgb(0, 90, 200),
                     stroke_width: 6.0,
                     opacity: 0.5,
+                    ..Style::new(RED, 0.0)
                 },
             },
             Shape::Box {
@@ -2136,6 +2340,7 @@ mod tests {
                     stroke: Rgb(120, 0, 0),
                     stroke_width: 4.0,
                     opacity: 1.0,
+                    ..Style::new(RED, 0.0)
                 },
             },
             Shape::Label {
@@ -2149,7 +2354,45 @@ mod tests {
                     stroke: Rgb(120, 90, 0),
                     stroke_width: 3.0,
                     opacity: 0.85,
+                    ..Style::new(RED, 0.0)
                 },
+            },
+            Shape::Box {
+                a: pt(20.0, 305.0),
+                b: pt(110.0, 330.0),
+                oval: false,
+                style: Style {
+                    fill: Some(Rgb(255, 230, 120)),
+                    stroke: Rgb(80, 40, 0),
+                    stroke_width: 3.0,
+                    radius: 12.0,
+                    ..Style::new(RED, 0.0)
+                },
+            },
+            Shape::Box {
+                a: pt(120.0, 305.0),
+                b: pt(210.0, 330.0),
+                oval: false,
+                style: Style {
+                    fill: Some(Rgb(120, 200, 255)),
+                    stroke: Rgb(0, 0, 0),
+                    stroke_width: 6.0,
+                    no_border: true,
+                    radius: 8.0,
+                    ..Style::new(RED, 0.0)
+                },
+            },
+            Shape::Marker {
+                points: vec![pt(370.0, 190.0), pt(560.0, 190.0)],
+                width: 24.0,
+                color: YELLOW,
+                opacity: 0.8,
+            },
+            Shape::Marker {
+                points: vec![pt(370.0, 225.0), pt(560.0, 225.0)],
+                width: 24.0,
+                color: YELLOW,
+                opacity: 0.2,
             },
             Shape::Label {
                 origin: pt(450.0, 150.0),
