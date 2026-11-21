@@ -1,6 +1,7 @@
 pub mod actions;
 pub mod annotate;
 pub mod app_flow;
+pub mod app_state;
 pub mod capture_gate;
 pub mod color;
 pub mod color_picker;
@@ -26,6 +27,7 @@ pub mod snap;
 pub mod steps;
 pub mod theme;
 pub mod thumb;
+pub mod tray_logic;
 pub mod update;
 pub mod upload;
 
