@@ -193,6 +193,9 @@ pub fn open(
         return Err(OpenError::AlreadyOpen);
     }
     // Phiên trước chắc chắn đã xong (không ở trong phương thức của nó): hủy luôn đồ cũ.
+    // Bất biến: chỉ an toàn vì `on_close` không bao giờ mở lại lớp phủ ngay trong cùng lời gọi
+    // (`finish` chạy bên trong phương thức của view/đích thông báo đang nằm trong `RETIRED`);
+    // `open` chỉ được gọi từ một lượt riêng của hàng đợi chính (kết quả chụp, `on_captured`).
     RETIRED.with(|r| r.borrow_mut().clear());
     let screens: Vec<RectF> = NSScreen::screens(mtm)
         .to_vec()
@@ -263,6 +266,11 @@ pub fn open(
     SESSION.with(|s| *s.borrow_mut() = Some(session));
 
     // Hiện sau khi đã lưu phiên (view đọc phiên khi vẽ); không giữ mượn `SESSION` lúc gọi AppKit.
+    // `finish` ẩn ứng dụng (`hide`) để trả tiêu điểm cho ứng dụng trước đó; cửa sổ của ứng dụng
+    // đang ẩn không hiện ra, và `activate()` trên macOS 14+ có thể bị từ chối. Vì vậy bỏ ẩn
+    // (không kích hoạt, không đòi hệ thống đồng ý) trước khi hiện lớp phủ.
+    let app = NSApplication::sharedApplication(mtm);
+    app.unhideWithoutActivation();
     for (w, _) in &views {
         w.orderFrontRegardless();
     }
@@ -272,7 +280,7 @@ pub fn open(
         w.makeFirstResponder(Some(v));
     }
     // Ứng dụng nền (`accessory`) phải được kích hoạt thì cửa sổ mới nhận phím ngay.
-    NSApplication::sharedApplication(mtm).activate();
+    app.activate();
     NSCursor::crosshairCursor().set();
     // Nếu phiên đã bị đóng ngay trong các lời gọi trên (thông báo đồng bộ), lời gọi hiện cửa sổ
     // sau đó có thể đã hiện lại một cửa sổ đã đóng: ẩn hết để không còn cửa sổ mồ côi.
