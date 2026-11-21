@@ -130,6 +130,7 @@ Trạng thái: `chờ`, `đang làm`, `rà soát`, `xong`. Token là số do age
 | 112 Bản macOS: kiểu cho Hình và Chữ (nền, viền, độ dày, độ trong suốt chung, căn lề; Shape::Box/Label cộng thêm; bảng thuộc tính); CHƯA rà soát, CHƯA QA tay | task/112-macos-shape-text-style | builder | sonnet | xong (cổng tự động) | 299.753 | bỏ qua | 0 | 299.753 |
 | 113 Bản macOS: Highlight hai chế độ (tự do chỉnh độ dày; hình chữ nhật không viền, chỉnh màu và độ trong suốt; Shape::Highlight cộng thêm); CHƯA rà soát, CHƯA QA tay | task/113-macos-highlight-modes | builder | sonnet | xong (cổng tự động) | 176.961 | bỏ qua | 0 | 176.961 |
 | 114 Bản macOS: sửa bảng kiểu theo QA (Nền/Không nền loại trừ, Không viền, bo góc px, độ trong suốt Highlight tự do, tooltip, nhấp đúp sửa chữ, bảng không che vùng chụp, kéo/thu gọn); CHƯA rà soát, CHƯA QA tay | task/114-macos-style-fixes | builder | sonnet | xong (cổng tự động) | 318.149 | bỏ qua | 0 | 318.149 |
+| 115 Bản macOS: viền nằm ngoài vùng nền; Chữ là khung kích thước tự do (căn ngang, luôn giữa dọc, ngắt dòng, cỡ chữ không theo khung); chip Màu chữ trong bảng; CHƯA rà soát, CHƯA QA tay | task/115-macos-border-textbox | builder | sonnet | xong (cổng tự động) | 252.502 | bỏ qua | 0 | 252.502 |
 
 Task 15–19 là đợt 1 (kế hoạch `docs/superpowers/plans/2026-11-16-options-tabs-i18n.md`). Cộng Task 15–19: 1.326.884 (làm 847.114; rà soát 448.567; sửa 31.203). Theo model: opus (Task 17) 413.406; sonnet (15, 16, 18 và rà soát 19) 724.702; haiku (làm và sửa 19) 188.776. Chủ dự án đã nghiệm thu đợt 1 qua thử tay (2026-11-16).
 
