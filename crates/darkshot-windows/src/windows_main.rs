@@ -35,7 +35,9 @@ use darkshot_core::actions::{
     notice_visible, run_action, Action, Clipboard, Ctx, NoticeKind, Notifier,
 };
 use darkshot_core::app_flow::{
-    history_window_stale, info_windows_stale, lang_after_save, merge_reason, parse_args, OpenReason,
+    config_ok_at_start, custom_colors_need_save, history_window_stale, hotkey_defers,
+    info_windows_stale, lang_after_save, merge_reason, parse_args, pin_origin, remaining,
+    timer_should_wait, without_frame, OpenReason, EXIT_BUDGET,
 };
 use darkshot_core::capture_gate::{
     enumerates_windows, gate_step, kind_of, next_kind, CaptureGate, CaptureKind, GateAction,
@@ -43,12 +45,13 @@ use darkshot_core::capture_gate::{
 };
 use darkshot_core::color::CustomColors;
 use darkshot_core::config::{HotkeyRole, Hotkeys, UploadFormat, JPEG_QUALITY_DEFAULT};
-use darkshot_core::geometry::{full_screen_rect, restore_selection, to_screen_coords, Point, Rect};
-use darkshot_core::i18n::{self, Lang, Msg};
+use darkshot_core::geometry::{full_screen_rect, restore_selection, to_screen_coords, Rect};
+use darkshot_core::i18n::{self, Msg};
 use darkshot_core::last_capture::{
     last_capture_after, read_last_capture, remember_after, repeat_plan, write_last_capture,
     LastCapture, RepeatPlan,
 };
+use darkshot_core::notices::{hotkeys_taken_notice, pin_failure_notice, step_error_notice};
 use darkshot_core::update::{
     self, update_after_check, update_outcome, Release, Version, RELEASE_URL_PREFIX,
 };
@@ -432,21 +435,6 @@ fn register_hotkeys_or_notify(hwnd: HWND, keys: &Hotkeys, notifier: &dyn Notifie
     notify_hotkeys_taken(keys, &failed, notifier);
 }
 
-/// Tiêu đề và nội dung của thông báo gộp "Phím tắt chưa hoạt động"; `None` khi không có dòng lỗi.
-pub fn hotkeys_taken_notice(
-    lang: Lang,
-    keys: &Hotkeys,
-    failed: &[HotkeyRole],
-) -> Option<(&'static str, String)> {
-    if failed.is_empty() {
-        return None;
-    }
-    Some((
-        i18n::t(lang, Msg::HotkeysNotWorkingTitle),
-        i18n::hotkeys_taken_body(lang, &hotkey::taken_combos(keys, failed)),
-    ))
-}
-
 /// Báo **một** thông báo lỗi cho các dòng `failed` (nếu có).
 fn notify_hotkeys_taken(keys: &Hotkeys, failed: &[HotkeyRole], notifier: &dyn Notifier) {
     if let Some((title, body)) = hotkeys_taken_notice(lang::current(), keys, failed) {
@@ -634,14 +622,6 @@ fn capture_flow_with(hwnd: HWND, requested: CaptureKind, notifier: Option<Arc<dy
     run_on_image(hwnd, action, image, notifier);
 }
 
-/// Khung cửa sổ `frames` (tọa độ màn hình) bỏ khung `skip` (nếu có).
-pub fn without_frame(mut frames: Vec<Rect>, skip: Option<Rect>) -> Vec<Rect> {
-    if let Some(r) = skip {
-        frames.retain(|f| *f != r);
-    }
-    frames
-}
-
 /// Hiện lại thanh phiên đã ẩn quanh lượt chụp khi rời phạm vi (mọi đường ra của `capture_flow_with`).
 struct BarHiddenForCapture(bool);
 
@@ -680,27 +660,6 @@ fn post_steps_capture() {
             let _ = PostMessageW(Some(h), WM_STEPS_CAPTURE, WPARAM(0), LPARAM(0));
         }
     }
-}
-
-/// Tiêu đề và nội dung thông báo cho một lỗi của phiên chụp từng bước.
-pub fn step_error_notice(lang: Lang, e: &steps_store::StepError) -> (&'static str, String) {
-    use steps_store::StepError;
-    let (title, why) = match e {
-        StepError::Image(w) => (Msg::SaveFailedTitle, w),
-        StepError::Session(w) => (Msg::StepsSessionSaveFailedTitle, w),
-        StepError::End(w) => (Msg::StepsEndFailedTitle, w),
-        StepError::Start(w) => (Msg::StepsStartFailedTitle, w),
-    };
-    (i18n::t(lang, title), i18n::reason(lang, why))
-}
-
-/// Tổng thời gian chờ lúc thoát (ghi Lịch sử, ảnh bước, xuất), chia nhau theo một hạn chót chung;
-/// Windows cho khoảng 5 giây ở `WM_ENDSESSION`.
-const EXIT_BUDGET: Duration = Duration::from_secs(4);
-
-/// Thời gian còn lại tới hạn chót `deadline` (0 khi đã qua).
-fn remaining(deadline: std::time::Instant, now: std::time::Instant) -> Duration {
-    deadline.saturating_duration_since(now)
 }
 
 /// Việc lúc thoát (Thoát, tắt máy): lưu ảnh của lượt tải lên còn dở, ghi Lịch sử, chờ ảnh bước và
@@ -751,51 +710,6 @@ fn capture_request(hwnd: HWND, kind: CaptureKind) {
     }
 }
 
-/// Phím chụp tới khi một menu đang mở (menu khay, hoặc menu ngữ cảnh của ảnh ghim/Lịch sử): đóng
-/// menu rồi chụp hoãn qua `GateEvent::MenuCapture`, không chạy lớp phủ lồng trong vòng lặp modal.
-pub fn hotkey_defers(tray_menu_open: bool, pin_menu_open: bool) -> bool {
-    tray_menu_open || pin_menu_open
-}
-
-/// Hẹn giờ chụp sau menu khay tới khi menu ngữ cảnh của ảnh ghim hay Lịch sử đang mở: chờ thêm.
-pub fn timer_should_wait(pin_menu_open: bool, history_menu_open: bool) -> bool {
-    pin_menu_open || history_menu_open
-}
-
-/// Góc trên trái của ảnh ghim (tọa độ màn hình) cho vùng `rect` (tọa độ ảnh chụp): góc sau khi kẹp
-/// vào ảnh như `picked_image`/`crop`, cộng gốc `origin` của màn hình ảo đúng một lần.
-pub fn pin_origin(rect: Rect, origin: Point) -> Point {
-    let clamped = Rect {
-        x: rect.x.max(0),
-        y: rect.y.max(0),
-        ..rect
-    };
-    let r = to_screen_coords(clamped, origin);
-    Point { x: r.x, y: r.y }
-}
-
-/// Thông báo khi không ghim được: đủ ảnh thì Info, ảnh quá lớn hay lỗi tạo cửa sổ thì Error. Lý do của
-/// `PinError::Create` (tiếng Anh, chữ của hệ thống) không bao giờ hiện cho người dùng.
-pub fn pin_failure_notice(lang: Lang, e: &pin::PinError) -> (NoticeKind, &'static str, String) {
-    match e {
-        pin::PinError::Limit => (
-            NoticeKind::Info,
-            i18n::t(lang, Msg::PinLimitTitle),
-            i18n::pin_limit_body(lang, darkshot_core::pin::MAX_PINS),
-        ),
-        pin::PinError::TooLarge => (
-            NoticeKind::Error,
-            i18n::t(lang, Msg::PinFailedTitle),
-            i18n::t(lang, Msg::PinTooLargeBody).to_string(),
-        ),
-        pin::PinError::Create(_) => (
-            NoticeKind::Error,
-            i18n::t(lang, Msg::PinFailedTitle),
-            i18n::t(lang, Msg::PinFailedBody).to_string(),
-        ),
-    }
-}
-
 /// Mở cửa sổ Nhận dạng chữ cho `image`; không mở được thì báo lỗi (không hiện lý do kỹ thuật).
 fn open_ocr(
     image: darkshot_core::image::Image,
@@ -839,24 +753,6 @@ fn pin_action(action: Action, image: darkshot_core::image::Image, pin_rect: Opti
     };
     let notifier: Arc<dyn Notifier> = Arc::new(tray.notifier());
     run_on_image(hwnd, action, image, notifier);
-}
-
-/// Có ghi file cấu hình sau khi lớp phủ đóng không: chỉ khi màu tự chọn đã đổi và cấu hình
-/// trong bộ nhớ khớp file (`config_ok`, xem `config_ok_at_start`). Cấu hình hỏng hoặc không đọc
-/// được thì không bao giờ ghi đè file (sẽ mất khóa R2 trong đó).
-pub fn custom_colors_need_save(
-    before: &CustomColors,
-    after: &CustomColors,
-    config_ok: bool,
-) -> bool {
-    config_ok && before != after
-}
-
-/// Cấu hình đọc lúc khởi động có khớp file không: chỉ khi file đã có (`file_existed`) và đọc
-/// bình thường, không thông báo nào (hỏng, không đọc được, hay mất khóa bí mật). Chưa có file
-/// thì không ghi, để lần chạy đầu không tạo file với R2 rỗng (mất việc tự mở Tùy chọn).
-pub fn config_ok_at_start(notice: Option<app::ConfigNotice>, file_existed: bool) -> bool {
-    file_existed && notice.is_none()
 }
 
 /// Cập nhật màu tự chọn trong cấu hình đang dùng; `write` thì ghi file bằng đúng đường lưu cấu
@@ -1548,6 +1444,7 @@ fn main() {
 mod tests {
     use super::*;
     use darkshot_core::config::Config;
+    use darkshot_core::i18n::Lang;
 
     #[test]
     fn normal_mode_keeps_everything() {
@@ -1578,50 +1475,6 @@ mod tests {
         assert_ne!(m.mutex_name, startup_mode(None).mutex_name);
     }
 
-    #[test]
-    fn step_error_titles() {
-        use steps_store::StepError;
-        let (t, b) = step_error_notice(Lang::En, &StepError::Start("x".into()));
-        assert_eq!(t, "Couldn't start step capture");
-        assert_eq!(b, "Reason: x");
-        let (t, _) = step_error_notice(Lang::En, &StepError::Session("x".into()));
-        assert_eq!(t, i18n::t(Lang::En, Msg::StepsSessionSaveFailedTitle));
-        let (t, _) = step_error_notice(Lang::En, &StepError::Image("x".into()));
-        assert_eq!(t, i18n::t(Lang::En, Msg::SaveFailedTitle));
-        let (t, b) = step_error_notice(Lang::En, &StepError::End("x".into()));
-        assert_eq!(t, i18n::t(Lang::En, Msg::StepsEndFailedTitle));
-        assert_eq!(b, "Reason: x");
-    }
-
-    /// Các lần chờ lúc thoát chia nhau một hạn chót chung.
-    #[test]
-    fn exit_waits_share_one_deadline() {
-        let now = std::time::Instant::now();
-        let deadline = now + EXIT_BUDGET;
-        assert_eq!(remaining(deadline, now), EXIT_BUDGET);
-        assert_eq!(
-            remaining(deadline, now + Duration::from_secs(1)),
-            EXIT_BUDGET - Duration::from_secs(1)
-        );
-        assert_eq!(
-            remaining(deadline, deadline + Duration::from_secs(1)),
-            Duration::ZERO
-        );
-        assert!(EXIT_BUDGET <= Duration::from_secs(4));
-    }
-
-    #[test]
-    fn without_frame_drops_only_the_session_bar() {
-        let r = |x, y, w, h| Rect { x, y, w, h };
-        let bar = r(700, 12, 400, 40);
-        let wins = vec![r(0, 0, 800, 600), bar, r(10, 10, 50, 50)];
-        assert_eq!(
-            without_frame(wins.clone(), Some(bar)),
-            vec![r(0, 0, 800, 600), r(10, 10, 50, 50)]
-        );
-        assert_eq!(without_frame(wins.clone(), None), wins);
-    }
-
     /// Mã thông điệp của chụp từng bước không trùng mã nào đã dùng (WM_APP+1..+12).
     #[test]
     fn steps_message_ids() {
@@ -1635,49 +1488,6 @@ mod tests {
         assert_ne!(WM_OPEN_HISTORY, WM_OPEN_SETTINGS);
         assert_ne!(WM_OPEN_HISTORY, WM_UPDATE_RESULT);
         assert_ne!(WM_OPEN_HISTORY, history_service::WM_HISTORY_CHANGED);
-    }
-
-    #[test]
-    fn custom_colors_saved_only_when_changed() {
-        use app::ConfigNotice;
-        use darkshot_core::theme::Rgb;
-        let empty = CustomColors::default();
-        let mut added = CustomColors::default();
-        added.add(Rgb(1, 2, 3), None);
-        // Đổi + cấu hình ổn -> ghi.
-        assert!(custom_colors_need_save(&empty, &added, true));
-        let mut other = added;
-        other.add(Rgb(4, 5, 6), Some(0));
-        assert!(custom_colors_need_save(&added, &other, true));
-        // Đổi + cấu hình hỏng / không đọc được / mất khóa -> không ghi.
-        for n in [
-            ConfigNotice::Corrupt,
-            ConfigNotice::Unreadable,
-            ConfigNotice::SecretLost,
-        ] {
-            let ok = config_ok_at_start(Some(n), true);
-            assert!(!ok, "{n:?}");
-            assert!(!custom_colors_need_save(&empty, &added, ok));
-        }
-        assert!(config_ok_at_start(None, true));
-        // Chưa có file lúc khởi động -> không ghi.
-        assert!(!config_ok_at_start(None, false));
-        assert!(!custom_colors_need_save(
-            &empty,
-            &added,
-            config_ok_at_start(None, false)
-        ));
-        // Không đổi -> không ghi.
-        assert!(!custom_colors_need_save(
-            &empty,
-            &CustomColors::default(),
-            true
-        ));
-        assert!(!custom_colors_need_save(&added, &added.clone(), true));
-        // Ghi lại đúng màu đang có ở cùng ô: không đổi, không ghi.
-        let mut same = added;
-        same.add(Rgb(1, 2, 3), Some(0));
-        assert!(!custom_colors_need_save(&added, &same, true));
     }
 
     #[test]
@@ -1730,22 +1540,6 @@ mod tests {
         // Xa nét: không đổi.
         assert_eq!(px(&out, 50, 10), px(&plain, 50, 10));
         assert_eq!(px(&out, 5, 30), px(&plain, 5, 30));
-    }
-
-    #[test]
-    fn hotkeys_taken_notice_only_when_rows_failed() {
-        use darkshot_core::config::HotkeyRole::*;
-        let keys = Hotkeys::default();
-        assert_eq!(hotkeys_taken_notice(Lang::Vi, &keys, &[]), None);
-        let (title, body) = hotkeys_taken_notice(Lang::Vi, &keys, &[UploadFull, Region]).unwrap();
-        assert_eq!(title, i18n::t(Lang::Vi, Msg::HotkeysNotWorkingTitle));
-        assert_eq!(
-            body,
-            i18n::hotkeys_taken_body(
-                Lang::Vi,
-                &["PrintScreen".to_string(), "Ctrl+PrintScreen".to_string()]
-            )
-        );
     }
 
     #[test]
@@ -1812,71 +1606,5 @@ mod tests {
         let img = darkshot_core::thumb::decode_png_file(&pngs[0]).unwrap();
         assert_eq!((img.width, img.height), (200, 120));
         let _ = std::fs::remove_dir_all(&root);
-    }
-
-    /// Góc ảnh ghim = góc trên trái vùng (đã kẹp vào ảnh) cộng gốc màn hình ảo, đúng một lần.
-    #[test]
-    fn pin_origin_is_clamped_corner_in_screen_coords() {
-        let r = |x, y| Rect { x, y, w: 50, h: 40 };
-        // Gốc 0: tọa độ ảnh trùng tọa độ màn hình.
-        assert_eq!(
-            pin_origin(r(10, 20), Point { x: 0, y: 0 }),
-            Point { x: 10, y: 20 }
-        );
-        // Màn hình bên trái/trên: gốc âm.
-        assert_eq!(
-            pin_origin(r(10, 20), Point { x: -1920, y: -200 }),
-            Point { x: -1910, y: -180 }
-        );
-        // Vùng tràn ra ngoài ảnh: góc sau khi kẹp (khớp gốc ảnh cắt của `picked_image`).
-        assert_eq!(
-            pin_origin(r(-15, -7), Point { x: -1920, y: -200 }),
-            Point { x: -1920, y: -200 }
-        );
-        assert_eq!(
-            pin_origin(r(-15, 30), Point { x: 0, y: 0 }),
-            Point { x: 0, y: 30 }
-        );
-    }
-
-    /// Lỗi ghim: đủ ảnh thì Info với số tối đa; lỗi tạo thì Error với thân i18n, không lộ lý do.
-    #[test]
-    fn pin_failure_notices() {
-        use darkshot_core::pin::MAX_PINS;
-        for lang in Lang::ALL {
-            let (kind, title, body) = pin_failure_notice(lang, &pin::PinError::Limit);
-            assert_eq!(kind, NoticeKind::Info);
-            assert_eq!(title, i18n::t(lang, Msg::PinLimitTitle));
-            assert_eq!(body, i18n::pin_limit_body(lang, MAX_PINS));
-            let err = pin::PinError::Create("CreateWindowExW failed 0x80070008".into());
-            let (kind, title, body) = pin_failure_notice(lang, &err);
-            assert_eq!(kind, NoticeKind::Error);
-            assert_eq!(title, i18n::t(lang, Msg::PinFailedTitle));
-            assert_eq!(body, i18n::t(lang, Msg::PinFailedBody));
-            assert!(!body.contains("CreateWindowExW"));
-            let (kind, title, body) = pin_failure_notice(lang, &pin::PinError::TooLarge);
-            assert_eq!(kind, NoticeKind::Error);
-            assert_eq!(title, i18n::t(lang, Msg::PinFailedTitle));
-            assert_eq!(body, i18n::t(lang, Msg::PinTooLargeBody));
-            assert_ne!(body, i18n::t(lang, Msg::PinFailedBody));
-        }
-    }
-
-    /// Phím chụp khi một menu (khay, ảnh ghim hay Lịch sử) đang mở: đóng menu rồi chụp hoãn.
-    #[test]
-    fn hotkey_defers_when_any_menu_open() {
-        assert!(!hotkey_defers(false, false));
-        assert!(hotkey_defers(true, false));
-        assert!(hotkey_defers(false, true));
-        assert!(hotkey_defers(true, true));
-    }
-
-    /// Hẹn giờ chụp sau menu: menu ảnh ghim hay Lịch sử còn mở thì chờ thêm, không chụp.
-    #[test]
-    fn timer_waits_while_pin_or_history_menu_open() {
-        assert!(!timer_should_wait(false, false));
-        assert!(timer_should_wait(true, false));
-        assert!(timer_should_wait(false, true));
-        assert!(timer_should_wait(true, true));
     }
 }

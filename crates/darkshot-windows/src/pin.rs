@@ -82,13 +82,7 @@ pub enum PinPlace {
     CenterOnCursorMonitor,
 }
 
-#[derive(Debug)]
-pub enum PinError {
-    Limit,
-    /// Ảnh vượt `MAX_SIDE` ngay ở mức thu nhỏ nhất.
-    TooLarge,
-    Create(String),
-}
+pub use darkshot_core::notices::PinError;
 
 /// Một chỗ chờ cho đúng một giá trị: đặt mới thì thay giá trị cũ, lấy ra đúng một lần.
 #[derive(Debug)]

@@ -116,6 +116,8 @@ Trạng thái: `chờ`, `đang làm`, `rà soát`, `xong`. Token là số do age
 | 102b Bản macOS (đợt M, M2c 2/5): chuyển biểu mẫu Tùy chọn của `settings.rs` sang core (`settings_form`, kèm `describe`/`key_name` do `apply_form` cần) | task/102b-settings-form-logic | builder | sonnet | xong | 104.697 | 58.958 (reviewer opus, DUYỆT, không lỗi) | 0 | 163.655 |
 | 102c Bản macOS (đợt M, M2c 3/5): chuyển logic phím tắt (`hotkey.rs`, bắt phím của `settings.rs`, `describe`/`key_name`) sang core (`hotkey_keys`) | task/102c-hotkey-keys-logic | builder | sonnet | xong | 85.273 | 39.499 (reviewer opus, DUYỆT, không lỗi) | 0 | 124.772 |
 | 102d Bản macOS (đợt M, M2c 4/5): chuyển logic menu khay và trạng thái ứng dụng (`tray.rs`, `app.rs`) sang core (`tray_logic`, `app_state`, gồm `PendingUploads`, `save_pending` có tham số `lang`) | task/102d-tray-app-logic | builder | sonnet | xong | 107.999 | 54.932 (reviewer opus, DUYỆT, không lỗi) | 0 | 162.931 |
+| 102e Bản macOS (đợt M, M2c 5/5): chuyển hàm thuần còn lại của `windows_main.rs` sang core (`notices`, `app_flow`, kèm `StepError`/`PinError`/`EXIT_BUDGET`) | task/102e-main-residual-logic | builder | sonnet | xong | 101.805 | 49.266 (reviewer opus, DUYỆT, không lỗi) | 0 | 151.071 |
+| Tổng M2 (Task 100–102e: khung cfg, crate macOS, check.sh, CI, chuyển logic sang core), không tính phiên điều phối | | | | xong | | | | 1.023.070 (riêng 101–102e) |
 
 Task 15–19 là đợt 1 (kế hoạch `docs/superpowers/plans/2026-11-16-options-tabs-i18n.md`). Cộng Task 15–19: 1.326.884 (làm 847.114; rà soát 448.567; sửa 31.203). Theo model: opus (Task 17) 413.406; sonnet (15, 16, 18 và rà soát 19) 724.702; haiku (làm và sửa 19) 188.776. Chủ dự án đã nghiệm thu đợt 1 qua thử tay (2026-11-16).
 

@@ -13,7 +13,7 @@ use std::thread::JoinHandle;
 
 // Trạng thái khởi động và sổ tải lên nằm ở core (dùng chung với macOS); giữ tên cũ cho chỗ gọi.
 pub use darkshot_core::app_state::{
-    needs_settings_on_start, should_sync_autostart, startup, AppState, ConfigNotice, PendingUpload,
+    needs_settings_on_start, should_sync_autostart, startup, AppState, PendingUpload,
     PendingUploads,
 };
 

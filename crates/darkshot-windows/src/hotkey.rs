@@ -2,7 +2,7 @@
 
 use darkshot_core::config::{Hotkey, HotkeyRole, Hotkeys};
 // Luật phím tắt nằm ở core; giữ tên cũ cho `windows_main.rs` và `settings.rs`.
-pub use darkshot_core::hotkey_keys::{describe, help_keys, id_of, role_of, taken_combos};
+pub use darkshot_core::hotkey_keys::{describe, help_keys, id_of, role_of};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT,

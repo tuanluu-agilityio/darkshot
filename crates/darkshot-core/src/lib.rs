@@ -17,6 +17,7 @@ pub mod image;
 pub mod last_capture;
 pub mod migrate;
 pub mod naming;
+pub mod notices;
 pub mod ocr_text;
 pub mod overlay_layout;
 pub mod overlay_stroke;
