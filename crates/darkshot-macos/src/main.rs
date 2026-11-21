@@ -10,9 +10,7 @@ mod clipboard;
 #[cfg(target_os = "macos")]
 #[allow(dead_code)]
 mod coords;
-// `hotkey` chưa nối vào ứng dụng ở bước này.
 #[cfg(target_os = "macos")]
-#[allow(dead_code)]
 mod hotkey;
 // `keymap` có hàm đổi ngược mã phím Mac → VK cho cửa sổ Tùy chọn (Task 107).
 #[cfg(target_os = "macos")]
