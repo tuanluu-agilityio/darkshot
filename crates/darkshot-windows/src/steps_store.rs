@@ -41,19 +41,7 @@ struct Saved {
     result: Result<(), String>,
 }
 
-/// Lỗi của phiên, kèm lý do (chữ của hệ thống hoặc chữ đã dịch).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum StepError {
-    /// Không ghi được ảnh bước: bước không được thêm.
-    Image(String),
-    /// Không ghi được `session.json`: phiên trong bộ nhớ vẫn đúng, json được ghi lại ở lần thay
-    /// đổi sau hoặc lúc thoát; hoặc không kết thúc được phiên.
-    Session(String),
-    /// Không bắt đầu được phiên.
-    Start(String),
-    /// Phiên đã kết thúc nhưng không xóa hết tệp của nó (phần sót được xóa nốt về sau).
-    End(String),
-}
+pub use darkshot_core::notices::StepError;
 
 /// Tệp đánh dấu "phiên đã kết thúc, đang xóa" (ghi trước khi xóa `session.json`): thư mục còn tệp
 /// này là phần sót của một lần kết thúc, được xóa nốt chứ không giữ lại như dữ liệu hỏng.
