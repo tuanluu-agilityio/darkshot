@@ -42,6 +42,8 @@ mod secret;
 mod timeutil;
 #[cfg(target_os = "macos")]
 mod tray;
+#[cfg(target_os = "macos")]
+mod upload;
 
 #[cfg(target_os = "macos")]
 fn main() {
