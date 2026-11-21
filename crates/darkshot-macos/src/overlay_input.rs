@@ -21,7 +21,11 @@ pub const IDLE_CHECK_EVERY: Duration = Duration::from_secs(5);
 /// `kVK_Escape`.
 pub const KEY_ESCAPE: u16 = 53;
 /// Các nút của thanh hành động, trái sang phải.
-pub const MAC_BAR: [Action; 3] = [Action::Save, Action::Copy, Action::Cancel];
+///
+/// Thứ tự như `bar_cells`/`BAR_CELLS` của core (Tải lên, Lưu, Chép, Hủy; Mac chưa có Hoàn tác, Ghim,
+/// Nhận dạng chữ). Nút Tải lên luôn hiện, như Windows: chưa cấu hình R2 thì bấm vào sẽ lưu ảnh
+/// và mở Tùy chọn tab R2 (`upload::route`), không ẩn nút.
+pub const MAC_BAR: [Action; 4] = [Action::Upload, Action::Save, Action::Copy, Action::Cancel];
 /// Khoảng chừa thêm (điểm ở 96 DPI) dưới mép trên cho viên nhắc, để không nằm dưới tai thỏ.
 pub const HINT_NOTCH_CLEAR: i32 = 40;
 /// Đệm ngang và dọc (96 DPI) của nhãn kích thước, như bản Windows.
@@ -176,6 +180,7 @@ pub fn bar_action_at(bar: Rect, p: Point, dpi: u32) -> Option<Action> {
 /// Gợi ý của một nút (phím tắt kiểu Mac).
 pub fn bar_tip(a: Action) -> Msg {
     match a {
+        Action::Upload => Msg::OverlayUploadMac,
         Action::Save => Msg::OverlaySaveMac,
         Action::Copy => Msg::OverlayCopyMac,
         _ => Msg::OverlayCancelMac,
@@ -189,7 +194,7 @@ pub fn tip_rect(bar: Rect, text: (i32, i32), dpi: u32, mon: Rect) -> Rect {
     place_toolbar(bar, (w.min(mon.w), h.min(mon.h)), scaled(GAP, dpi), mon)
 }
 
-/// Hành động của một phím: `Esc` luôn hủy; `⌘S` lưu, `⌘C` chép khi có vùng chọn và không đang
+/// Hành động của một phím: `Esc` luôn hủy; `⌘D` tải lên, `⌘S` lưu, `⌘C` chép khi có vùng chọn và không đang
 /// kéo (như `Ctrl+S`/`Ctrl+C` của bản Windows). `chars`: `charactersIgnoringModifiers`.
 pub fn key_action(
     key_code: u16,
@@ -207,6 +212,7 @@ pub fn key_action(
     // Theo chữ của phím (bố cục bàn phím), không theo vị trí phím.
     let c = chars?.chars().next()?.to_ascii_lowercase();
     match c {
+        'd' => Some(Action::Upload),
         's' => Some(Action::Save),
         'c' => Some(Action::Copy),
         _ => None,
@@ -648,12 +654,12 @@ mod tests {
     }
 
     #[test]
-    fn bar_is_three_buttons_from_core_constants() {
+    fn bar_is_four_buttons_from_core_constants() {
         assert_eq!(bar_button_size(96), BUTTON);
         assert_eq!(bar_button_size(192), BUTTON * 2);
         let mon = px(0, 0, 3024, 1964);
         let bar = bar_rect(px(100, 100, 400, 200), 192, mon);
-        assert_eq!((bar.w, bar.h), (3 * BUTTON * 2, BUTTON * 2));
+        assert_eq!((bar.w, bar.h), (4 * BUTTON * 2, BUTTON * 2));
         // Đủ chỗ: dưới vùng, cách GAP, mép phải thẳng mép phải vùng.
         assert_eq!(bar.y, 300 + GAP * 2);
         assert_eq!(bar.right(), 500);
@@ -699,7 +705,7 @@ mod tests {
     fn bar_hit_test() {
         let dpi = 192;
         let b = bar_button_size(dpi);
-        let bar = px(1000, 500, 3 * b, b);
+        let bar = px(1000, 500, 4 * b, b);
         for (i, a) in MAC_BAR.iter().enumerate() {
             let cell = bar_button_rect(bar, dpi, i);
             assert_eq!(cell, px(1000 + i as i32 * b, 500, b, b));
@@ -710,20 +716,84 @@ mod tests {
             assert_eq!(bar_action_at(bar, pt(cell.x, cell.y), dpi), Some(*a));
         }
         assert_eq!(bar_action_at(bar, pt(999, 510), dpi), None);
-        assert_eq!(bar_action_at(bar, pt(1000 + 3 * b, 510), dpi), None);
+        assert_eq!(bar_action_at(bar, pt(1000 + 4 * b, 510), dpi), None);
         assert_eq!(bar_action_at(bar, pt(1010, 500 + b), dpi), None);
     }
 
     #[test]
+    fn bar_order_follows_the_core_bar_cells() {
+        use darkshot_core::overlay_layout::{bar_cells, BarItem};
+        // Các nút Mac có, theo thứ tự của thanh ngang Windows (bỏ ô Mac chưa làm).
+        let from_core: Vec<Action> = bar_cells(false)
+            .into_iter()
+            .flatten()
+            .filter_map(|c| match c {
+                BarItem::Act(a) if MAC_BAR.contains(&a) => Some(a),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(from_core, MAC_BAR.to_vec());
+        assert_eq!(
+            MAC_BAR,
+            [Action::Upload, Action::Save, Action::Copy, Action::Cancel]
+        );
+    }
+
+    #[test]
+    fn four_button_hit_test_at_retina_and_at_the_edges() {
+        for dpi in [96, 144, 192, 288] {
+            let b = bar_button_size(dpi);
+            let bar = px(40, 40, 4 * b, b);
+            for (i, a) in MAC_BAR.iter().enumerate() {
+                let c = bar_button_rect(bar, dpi, i);
+                // Pixel đầu và cuối của ô thuộc ô này; pixel liền kề thuộc ô bên cạnh hoặc ngoài thanh.
+                assert_eq!(bar_action_at(bar, pt(c.x, c.y), dpi), Some(*a));
+                assert_eq!(
+                    bar_action_at(bar, pt(c.right() - 1, c.bottom() - 1), dpi),
+                    Some(*a)
+                );
+                let next = MAC_BAR.get(i + 1).copied();
+                assert_eq!(bar_action_at(bar, pt(c.right(), c.y), dpi), next);
+            }
+            assert_eq!(bar_action_at(bar, pt(bar.x - 1, bar.y), dpi), None);
+            assert_eq!(bar_action_at(bar, pt(bar.right(), bar.y), dpi), None);
+            assert_eq!(bar_action_at(bar, pt(bar.x, bar.bottom()), dpi), None);
+        }
+        // Vùng sát mép màn hình: thanh vẫn đủ bốn nút trong màn hình và mỗi nút bấm được.
+        let mon = px(0, 0, 3024, 1964);
+        for sel in [
+            px(0, 0, 30, 30),
+            px(2994, 1934, 30, 30),
+            px(0, 1934, 3024, 30),
+            px(1000, 1000, 2024, 964),
+        ] {
+            let bar = bar_rect(sel, 192, mon);
+            assert!(bar.x >= 0 && bar.right() <= mon.right() && bar.bottom() <= mon.bottom());
+            assert_eq!(bar.w, 4 * bar_button_size(192));
+            for (i, a) in MAC_BAR.iter().enumerate() {
+                let c = bar_button_rect(bar, 192, i);
+                assert_eq!(
+                    bar_action_at(bar, pt(c.x + c.w / 2, c.y + c.h / 2), 192),
+                    Some(*a),
+                    "{sel:?} nút {i}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn mac_tips_use_mac_shortcuts() {
+        assert_eq!(bar_tip(Action::Upload), Msg::OverlayUploadMac);
         assert_eq!(bar_tip(Action::Save), Msg::OverlaySaveMac);
         assert_eq!(bar_tip(Action::Copy), Msg::OverlayCopyMac);
         assert_eq!(bar_tip(Action::Cancel), Msg::OverlayCancelMac);
         for l in Lang::ALL {
+            assert!(t(l, Msg::OverlayUploadMac).contains("(\u{2318}D)"));
             assert!(t(l, Msg::OverlaySaveMac).contains("(\u{2318}S)"));
             assert!(t(l, Msg::OverlayCopyMac).contains("(\u{2318}C)"));
             assert!(t(l, Msg::OverlayCancelMac).contains("(Esc)"));
             for m in [
+                Msg::OverlayUploadMac,
                 Msg::OverlaySaveMac,
                 Msg::OverlayCopyMac,
                 Msg::OverlayCancelMac,
@@ -791,6 +861,18 @@ mod tests {
             key_action(31, Some("s"), cmd, true, false),
             Some(Action::Save)
         );
+        assert_eq!(
+            key_action(2, Some("d"), cmd, true, false),
+            Some(Action::Upload)
+        );
+        assert_eq!(
+            key_action(2, Some("D"), cmd_shift, true, false),
+            Some(Action::Upload)
+        );
+        assert_eq!(key_action(2, Some("d"), cmd, false, false), None);
+        assert_eq!(key_action(2, Some("d"), cmd, true, true), None);
+        assert_eq!(key_action(2, Some("d"), none, true, false), None);
+        assert_eq!(key_action(2, Some("d"), cmd_opt, true, false), None);
         assert_eq!(key_action(1, Some("o"), cmd, true, false), None);
         // Không có vùng, đang kéo, thiếu ⌘, thêm Option/Control: không làm gì.
         assert_eq!(key_action(1, Some("s"), cmd, false, false), None);
@@ -922,7 +1004,7 @@ mod tests {
         m.drag(pt(500, 300), t0);
         m.release(pt(500, 300), t0);
         let (_, bar) = m.bar().unwrap();
-        let c = bar_button_rect(bar, m.dpi(0), 1);
+        let c = bar_button_rect(bar, m.dpi(0), 2);
         m.hover(0, pt(c.x + 1, c.y + 1), t0);
         assert_eq!(m.view_state(0).hover, Some(Action::Copy));
         // Trỏ ở màn hình khác: không có nút nào được trỏ.

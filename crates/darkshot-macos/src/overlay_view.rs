@@ -314,6 +314,12 @@ fn icon(c: Option<&CGContext>, cell: Rect, dpi: u32, action: Action, color: Rgb)
     CGContext::set_line_width(c, 1.8 * k);
     let p = |pts: &[(f64, f64)]| polyline(c, pts, ox, oy, k);
     match action {
+        Action::Upload => {
+            // Mũi tên lên trên khay.
+            p(&[(12.0, 15.0), (12.0, 3.5)]);
+            p(&[(7.0, 8.5), (12.0, 3.5), (17.0, 8.5)]);
+            p(&[(4.0, 15.0), (4.0, 20.0), (20.0, 20.0), (20.0, 15.0)]);
+        }
         Action::Save => {
             p(&[(12.0, 3.5), (12.0, 15.0)]);
             p(&[(7.0, 10.0), (12.0, 15.0), (17.0, 10.0)]);

@@ -13,6 +13,10 @@
 //! (`OpenReason::NeedsR2`). Lưu: `config::save` (khóa vào Keychain) rồi cập nhật cấu hình đang chạy;
 //! đóng cửa sổ (mọi đường) đăng ký lại phím tắt.
 //!
+//! Tải lên R2 (`upload`, Task 108): nút Tải lên của lớp phủ và phím `UploadFull` cùng đi qua
+//! `start_upload`; lượt vào sổ `PendingUploads` trước khi chạy, và `quit` lưu các lượt còn dở vào
+//! thư mục lưu (không mạng) trong hạn chót `EXIT_BUDGET`.
+//!
 //! Phím tắt toàn cục (`hotkey`, Task 106) đi qua cùng cổng chụp với menu (`GateEvent::Hotkey`):
 //! chụp vùng mở lớp phủ; lưu/tải lên toàn màn hình lấy màn hình chứa con trỏ rồi chạy hành động
 //! trên luồng nền; cổng về rảnh ngay khi đã có ảnh.
@@ -30,9 +34,10 @@ use crate::options_model::persist;
 use crate::overlay::{self, Outcome};
 use crate::secret::{self, KeychainStore};
 use crate::tray::Tray;
+use crate::upload;
 use crate::{hotkey, lang, paths, timeutil};
 use darkshot_core::actions::{run_action, Action, Ctx, NoticeKind, Notifier};
-use darkshot_core::app_flow::OpenReason;
+use darkshot_core::app_flow::{OpenReason, EXIT_BUDGET};
 use darkshot_core::app_state::{self, AppState, ConfigNotice};
 use darkshot_core::capture_gate::{
     gate_step, next_kind, CaptureGate, CaptureKind, GateAction, GateEvent,
@@ -49,12 +54,11 @@ use std::cell::{Cell, RefCell};
 use std::fs::File;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Chờ menu thanh trạng thái tắt hẳn rồi mới chụp (như `MENU_CAPTURE_DELAY_MS` của Windows).
 const MENU_CAPTURE_DELAY: Duration = Duration::from_millis(250);
-/// Thời gian tối đa chờ các lượt lưu/chép đang chạy khi thoát.
-const QUIT_BUDGET: Duration = Duration::from_secs(3);
 /// Tham số dòng lệnh: in tên service Keychain của hồ sơ hiện tại rồi thoát (cho `demo-macos.sh`).
 pub const ARG_KEYCHAIN_SERVICE: &str = "--keychain-service";
 /// Tham số dòng lệnh: hiện lớp phủ trên ảnh tổng hợp (không chụp, không cần quyền, không đọc cấu
@@ -160,8 +164,7 @@ pub fn startup_hotkeys(
 pub fn full_screen_action(kind: CaptureKind) -> Option<Action> {
     match kind {
         CaptureKind::SaveFull => Some(Action::Save),
-        // Chưa có tải lên trên Mac (Task 108): `run_action` không có `uploader` nên lưu ảnh vào
-        // máy và báo "chưa cấu hình" qua đường sẵn có của core.
+        // Cùng đường tải lên với nút Tải lên của lớp phủ (`act_in_background`, Task 108).
         CaptureKind::UploadFull => Some(Action::Upload),
         CaptureKind::Region | CaptureKind::RepeatLast => None,
     }
@@ -622,32 +625,28 @@ fn report_capture_error(e: &CaptureError) {
     finish_capture();
 }
 
-/// Cắt vùng `rect` (pixel) của `image` rồi chạy `actions::run_action` trên luồng nền (mã hóa PNG,
-/// ghi tệp, clipboard không chạy trên luồng chính); kết quả báo bằng thông báo của `run_action`.
+/// Làm `action` trên vùng `rect` (pixel) của `image`, không chặn luồng chính. Lưu/chép: cắt rồi
+/// `actions::run_action` trên luồng `darkshot-action`. Tải lên: `start_upload`.
 fn act_in_background(action: Action, image: Image, rect: Rect) {
-    let Some((save_dir, expiry, upload_format, jpeg_quality)) = STATE.with(|s| {
-        s.borrow().as_ref().map(|a| {
-            (
-                a.config.save_dir.clone(),
-                a.config.expiry,
-                a.config.upload_format,
-                a.config.jpeg_quality,
-            )
-        })
-    }) else {
+    let Some(config) = STATE.with(|s| s.borrow().as_ref().map(|a| a.config.clone())) else {
+        // Không có cấu hình: không thể biết thư mục lưu; báo thay vì im lặng làm mất ảnh.
+        notify_error(
+            t(lang::current(), Msg::SaveFailedTitle),
+            t(lang::current(), Msg::StepsWorkerFailed),
+        );
         return;
     };
     let lang = lang::current();
-    // Tải lên mà chưa có R2: ảnh vẫn được lưu vào máy (`run_action`), đồng thời mở thẳng tab R2.
-    if action == Action::Upload
-        && !STATE.with(|s| {
-            s.borrow()
-                .as_ref()
-                .is_some_and(|a| a.config.r2.is_complete())
-        })
-    {
-        open_options(OpenReason::NeedsR2);
+    if action == Action::Upload {
+        start_upload(&config, image, rect, lang);
+        return;
     }
+    let (save_dir, expiry, upload_format, jpeg_quality) = (
+        config.save_dir.clone(),
+        config.expiry,
+        config.upload_format,
+        config.jpeg_quality,
+    );
     IN_FLIGHT.fetch_add(1, Ordering::SeqCst);
     let spawned = std::thread::Builder::new()
         .name("darkshot-action".into())
@@ -684,14 +683,44 @@ fn act_in_background(action: Action, image: Image, rect: Rect) {
     }
 }
 
-/// Thoát sạch: chờ các lượt lưu đang chạy (tối đa `QUIT_BUDGET`), bỏ biểu tượng, rồi kết thúc.
+/// Tải lên (luồng chính chỉ cắt ảnh và ghi sổ; mạng, mã hóa và ghi tệp ở luồng `darkshot-upload`).
+/// Ảnh vào sổ `PendingUploads` trước khi chạy, nên thoát giữa chừng vẫn lưu được (`quit`).
+/// Chưa cấu hình R2: `run_action` lưu ảnh vào máy và báo; sau đó luồng nhờ luồng chính mở Tùy chọn
+/// tab R2 (`needs_settings`).
+fn start_upload(config: &Config, image: Image, rect: Rect, lang: Lang) {
+    let image = Arc::new(upload::image_for_upload(image, rect));
+    let deps = upload::Deps {
+        uploader: upload::uploader_for(config),
+        clipboard: Arc::new(PasteboardClipboard),
+        notifier: Arc::new(MacNotifier),
+        clock: timeutil::local_now,
+        lang,
+        // Chạy trên luồng tải lên: AppKit chỉ chạm ở luồng chính qua hàng đợi chính.
+        on_needs_settings: Box::new(|| {
+            DispatchQueue::main().exec_async(|| open_options(OpenReason::NeedsR2));
+        }),
+    };
+    let _ = upload::start(
+        &upload::registry(),
+        upload::UploadParams::from_config(config),
+        deps,
+        image,
+    );
+}
+
+/// Thoát sạch, trong một hạn chót chung `EXIT_BUDGET`. Thứ tự: (1) lưu ảnh của mọi lượt tải lên
+/// còn dở vào thư mục lưu (`upload::save_on_exit`: chỉ ghi tệp, KHÔNG mạng, không chờ tải lên);
+/// (2) chờ các lượt lưu/chép đang chạy tới hạn chót; (3) bỏ biểu tượng và kết thúc. Việc (1) chạy
+/// trước và không bị cắt bởi hạn chót: ghi PNG cục bộ là cách duy nhất để không mất ảnh.
 fn quit() {
+    let deadline = Instant::now() + EXIT_BUDGET;
     overlay::cancel();
     hotkey::unregister_all();
-    let deadline = Instant::now() + QUIT_BUDGET;
-    while IN_FLIGHT.load(Ordering::SeqCst) > 0 && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(20));
+    let saved = upload::save_on_exit(&upload::registry(), timeutil::local_now(), lang::current());
+    if saved > 0 {
+        eprintln!("darkshot: saved {saved} unfinished upload(s) to the save folder");
     }
+    upload::wait_idle(deadline, || IN_FLIGHT.load(Ordering::SeqCst) > 0);
     // Không hủy `Tray` ở đây: hàm này chạy bên trong phương thức của đích menu (`MenuTarget`),
     // hủy đích lúc đó là dùng-sau-giải-phóng. Tiến trình kết thúc ngay sau đó.
     TRAY.with(|t| {
