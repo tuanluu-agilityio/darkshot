@@ -7,18 +7,26 @@
 //!
 //! "Chụp" mở lớp phủ chọn vùng (`overlay`, Task 105) trên ảnh của mọi màn hình; cổng chụp chỉ
 //! về rảnh khi lớp phủ đóng (mọi đường đóng đều gọi `on_overlay_closed`).
+//!
+//! Phím tắt toàn cục (`hotkey`, Task 106) đi qua cùng cổng chụp với menu (`GateEvent::Hotkey`):
+//! chụp vùng mở lớp phủ; lưu/tải lên toàn màn hình lấy màn hình chứa con trỏ rồi chạy hành động
+//! trên luồng nền; cổng về rảnh ngay khi đã có ảnh.
 
 use crate::capture::{self, CaptureError, DisplayShot};
 use crate::clipboard::PasteboardClipboard;
 use crate::coords::{cocoa_to_top_left, RectF};
+use crate::keymap::{mac_default_hotkeys, mac_kind, mac_taken_notice};
 use crate::notify::{self, MacNotifier};
 use crate::overlay::{self, Outcome};
 use crate::secret::{self, KeychainStore};
 use crate::tray::Tray;
-use crate::{lang, paths, timeutil};
+use crate::{hotkey, lang, paths, timeutil};
 use darkshot_core::actions::{run_action, Action, Ctx, NoticeKind, Notifier};
 use darkshot_core::app_state::{self, AppState, ConfigNotice};
-use darkshot_core::capture_gate::{gate_step, CaptureGate, GateAction, GateEvent};
+use darkshot_core::capture_gate::{
+    gate_step, next_kind, CaptureGate, CaptureKind, GateAction, GateEvent,
+};
+use darkshot_core::config::{HotkeyRole, Hotkeys};
 use darkshot_core::geometry::Rect;
 use darkshot_core::i18n::{t, Lang, Msg};
 use darkshot_core::image::Image;
@@ -48,6 +56,8 @@ static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
 thread_local! {
     static STATE: RefCell<Option<AppState>> = const { RefCell::new(None) };
     static GATE: Cell<CaptureGate> = const { Cell::new(CaptureGate::Idle) };
+    /// Loại của lượt chụp mà cổng đã nhận gần nhất (`next_kind`).
+    static KIND: Cell<CaptureKind> = const { Cell::new(CaptureKind::Region) };
     static TRAY: RefCell<Option<Tray>> = const { RefCell::new(None) };
     /// Đã gọi `CGRequestScreenCaptureAccess` trong lần chạy này (chỉ hỏi một lần).
     static PERMISSION_ASKED: Cell<bool> = const { Cell::new(false) };
@@ -115,6 +125,53 @@ pub fn startup_notice(
     }
 }
 
+/// Phím tắt dùng lúc khởi động. Chưa có tệp cấu hình, hoặc tệp hỏng/không đọc được (core đã thay
+/// bằng `Config::defaults`, dùng PrintScreen): bộ mặc định Mac (quyết định 139). Tệp đọc được
+/// (kể cả khi mất khóa R2): đúng phím người dùng đã lưu. Không ghi tệp.
+pub fn startup_hotkeys(
+    config_file_exists: bool,
+    notice: Option<ConfigNotice>,
+    loaded: Hotkeys,
+) -> Hotkeys {
+    match notice {
+        _ if !config_file_exists => mac_default_hotkeys(),
+        Some(ConfigNotice::Corrupt | ConfigNotice::Unreadable) => mac_default_hotkeys(),
+        None | Some(ConfigNotice::SecretLost) => loaded,
+    }
+}
+
+/// Hành động của một lượt chụp toàn màn hình; `None` với loại không phải toàn màn hình.
+pub fn full_screen_action(kind: CaptureKind) -> Option<Action> {
+    match kind {
+        CaptureKind::SaveFull => Some(Action::Save),
+        // Chưa có tải lên trên Mac (Task 108): `run_action` không có `uploader` nên lưu ảnh vào
+        // máy và báo "chưa cấu hình" qua đường sẵn có của core.
+        CaptureKind::UploadFull => Some(Action::Upload),
+        CaptureKind::Region | CaptureKind::RepeatLast => None,
+    }
+}
+
+/// Màn hình cho lượt chụp toàn màn hình: màn hình chứa con trỏ (ngoài mọi màn hình thì màn hình
+/// gần nhất, như `pick_display`); không đọc được con trỏ thì màn hình chính, rồi màn hình đầu.
+pub fn full_screen_index(
+    displays: &[(u32, RectF)],
+    cursor: Option<(f64, f64)>,
+    main_id: u32,
+) -> Option<usize> {
+    capture::pick_display(displays, cursor, main_id)
+        .or_else(|| capture::pick_display(displays, None, main_id))
+}
+
+/// Đăng ký lại phím tắt theo `keys` (lúc khởi động; Task 107 gọi khi cấu hình đổi) và báo **một**
+/// thông báo nêu các phím bị chiếm. Trả về các dòng không đăng ký được. Chỉ gọi trên luồng chính.
+pub fn apply_hotkeys(keys: &Hotkeys) -> Vec<HotkeyRole> {
+    let failed = hotkey::apply(keys);
+    if let Some((title, body)) = mac_taken_notice(lang::current(), keys, &failed) {
+        MacNotifier.notify(NoticeKind::Error, title, &body);
+    }
+    failed
+}
+
 /// Điểm vào. Trả mã thoát của tiến trình.
 pub fn run(args: &[String]) -> i32 {
     let profile = paths::profile_override();
@@ -148,12 +205,19 @@ pub fn run(args: &[String]) -> i32 {
     notify::init();
 
     let config_path = paths::config_path();
-    let state = app_state::startup(
+    let config_file_exists = config_path.exists();
+    let mut state = app_state::startup(
         &config_path,
         &KeychainStore::for_profile(profile.as_deref()),
         &paths::default_save_dir(),
         lang::os_default(),
     );
+    state.config.hotkeys = startup_hotkeys(
+        config_file_exists,
+        state.config_notice,
+        state.config.hotkeys,
+    );
+    let hotkeys = state.config.hotkeys;
     lang::set(state.config.language);
     notify::set_show_success(state.config.show_success_notices);
     let first_notice = startup_notice(
@@ -166,6 +230,8 @@ pub fn run(args: &[String]) -> i32 {
     if let Some((title, body)) = first_notice {
         MacNotifier.notify(NoticeKind::Info, title, &body);
     }
+    hotkey::init(on_hotkey);
+    apply_hotkeys(&hotkeys);
 
     app.run();
     0
@@ -245,27 +311,37 @@ fn selftest_closed(outcome: Outcome) {
 
 fn on_command(cmd: MenuCommand) {
     match cmd {
-        MenuCommand::Capture => request(GateEvent::MenuCapture),
+        MenuCommand::Capture => request(GateEvent::MenuCapture, CaptureKind::Region),
         MenuCommand::Quit => quit(),
         // Lệnh chưa làm trên Mac không có trong menu (`tray::implemented`).
         _ => {}
     }
 }
 
-/// Lối vào duy nhất của cổng chụp (trên luồng chính).
-fn request(ev: GateEvent) {
+/// Phím tắt toàn cục đã bấm (luồng chính, trong bộ xử lý sự kiện Carbon). `RepeatLast` không
+/// bao giờ được đăng ký trên Mac (`keymap::mac_kind`, quyết định 135); nếu có cũng bỏ qua.
+fn on_hotkey(role: HotkeyRole) {
+    if let Some(kind) = mac_kind(role) {
+        request(GateEvent::Hotkey, kind);
+    }
+}
+
+/// Lối vào duy nhất của cổng chụp (trên luồng chính). `kind` là loại chụp đang yêu cầu; chỉ khi
+/// cổng nhận yêu cầu thì loại của lượt chụp mới đổi (`next_kind`).
+fn request(ev: GateEvent, kind: CaptureKind) {
     let (next, act) = gate_step(GATE.with(|g| g.get()), ev);
     GATE.with(|g| g.set(next));
+    KIND.with(|k| k.set(next_kind(k.get(), kind, act)));
     match act {
         GateAction::StartTimer => {
             let when = DispatchTime::NOW.time(MENU_CAPTURE_DELAY.as_nanos() as i64);
             // Khối chạy trên luồng chính khi tới giờ.
             if DispatchQueue::main()
-                .after(when, || request(GateEvent::TimerFired))
+                .after(when, || request(GateEvent::TimerFired, CaptureKind::Region))
                 .is_err()
             {
                 // Không hẹn được giờ: chụp ngay thay vì để cổng kẹt ở PendingMenu.
-                request(GateEvent::TimerFired);
+                request(GateEvent::TimerFired, CaptureKind::Region);
             }
         }
         GateAction::CaptureNow => start_capture(),
@@ -304,11 +380,15 @@ fn start_capture() {
     // Vị trí con trỏ lúc cổng cho chụp (không phải lúc chụp xong) chọn màn hình nhận phím trước.
     let cursor = capture::cursor_location();
     let main_id = capture::main_display_id();
+    let full = full_screen_action(KIND.with(|k| k.get()));
     let spawned = std::thread::Builder::new()
         .name("darkshot-capture".into())
         .spawn(move || {
             let result = capture::capture_displays(include_cursor);
-            DispatchQueue::main().exec_async(move || on_captured(result, cursor, main_id));
+            DispatchQueue::main().exec_async(move || match full {
+                Some(action) => on_full_captured(result, cursor, main_id, action),
+                None => on_captured(result, cursor, main_id),
+            });
         });
     if let Err(e) = spawned {
         eprintln!("darkshot: cannot start the capture thread ({e})");
@@ -346,6 +426,42 @@ fn on_captured(
     if let Err(e) = overlay::open(mtm, shots, focus, on_overlay_closed) {
         report_capture_error(&CaptureError::Failed(format!("overlay: {e:?}")));
     }
+}
+
+/// Kết quả chụp của lượt toàn màn hình, trên luồng chính: lấy màn hình chứa con trỏ lúc yêu cầu,
+/// cổng về rảnh, rồi chạy `action` trên luồng nền.
+fn on_full_captured(
+    result: Result<Vec<DisplayShot>, CaptureError>,
+    cursor: Option<(f64, f64)>,
+    main_id: u32,
+    action: Action,
+) {
+    let mut shots = match result {
+        Ok(s) if !s.is_empty() => s,
+        Ok(_) => {
+            report_capture_error(&CaptureError::NoDisplay);
+            return;
+        }
+        Err(e) => {
+            report_capture_error(&e);
+            return;
+        }
+    };
+    let displays: Vec<(u32, RectF)> = shots.iter().map(|s| (s.display_id, s.frame_pt)).collect();
+    let Some(i) = full_screen_index(&displays, cursor, main_id).filter(|i| *i < shots.len()) else {
+        report_capture_error(&CaptureError::NoDisplay);
+        return;
+    };
+    let image = shots.swap_remove(i).image;
+    drop(shots);
+    finish_capture();
+    let rect = Rect {
+        x: 0,
+        y: 0,
+        w: i32::try_from(image.width).unwrap_or(i32::MAX),
+        h: i32::try_from(image.height).unwrap_or(i32::MAX),
+    };
+    act_in_background(action, image, rect);
 }
 
 /// Lớp phủ đã đóng (mọi đường): cổng về rảnh, rồi làm hành động trên luồng nền.
@@ -425,6 +541,7 @@ fn act_in_background(action: Action, image: Image, rect: Rect) {
 /// Thoát sạch: chờ các lượt lưu đang chạy (tối đa `QUIT_BUDGET`), bỏ biểu tượng, rồi kết thúc.
 fn quit() {
     overlay::cancel();
+    hotkey::unregister_all();
     let deadline = Instant::now() + QUIT_BUDGET;
     while IN_FLIGHT.load(Ordering::SeqCst) > 0 && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(20));
@@ -525,6 +642,83 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn startup_hotkeys_use_mac_defaults_without_a_readable_file() {
+        let mut saved = Hotkeys::default();
+        saved.save_full.enabled = true;
+        // Chưa có tệp: bộ mặc định Mac, dù core trả gì.
+        assert_eq!(startup_hotkeys(false, None, saved), mac_default_hotkeys());
+        // Tệp hỏng / không đọc được: core đã thay bằng mặc định Windows (PrintScreen).
+        for n in [ConfigNotice::Corrupt, ConfigNotice::Unreadable] {
+            assert_eq!(startup_hotkeys(true, Some(n), saved), mac_default_hotkeys());
+        }
+        // Tệp đọc được (kể cả khi mất khóa R2): giữ đúng phím đã lưu, kể cả PrintScreen.
+        assert_eq!(startup_hotkeys(true, None, saved), saved);
+        assert_eq!(
+            startup_hotkeys(true, Some(ConfigNotice::SecretLost), saved),
+            saved
+        );
+    }
+
+    #[test]
+    fn full_screen_kinds_map_to_actions() {
+        assert_eq!(
+            full_screen_action(CaptureKind::SaveFull),
+            Some(Action::Save)
+        );
+        assert_eq!(
+            full_screen_action(CaptureKind::UploadFull),
+            Some(Action::Upload)
+        );
+        assert_eq!(full_screen_action(CaptureKind::Region), None);
+        assert_eq!(full_screen_action(CaptureKind::RepeatLast), None);
+    }
+
+    #[test]
+    fn full_screen_picks_the_cursor_display_or_main() {
+        let r = |x: f64| RectF {
+            x,
+            y: 0.0,
+            w: 100.0,
+            h: 100.0,
+        };
+        let displays = [(7, r(0.0)), (9, r(100.0))];
+        assert_eq!(
+            full_screen_index(&displays, Some((150.0, 50.0)), 7),
+            Some(1)
+        );
+        assert_eq!(full_screen_index(&displays, Some((10.0, 50.0)), 9), Some(0));
+        // Con trỏ ngoài mọi màn hình: màn hình gần nhất; không đọc được con trỏ: màn hình chính.
+        assert_eq!(
+            full_screen_index(&displays, Some((-500.0, 0.0)), 9),
+            Some(0)
+        );
+        assert_eq!(full_screen_index(&displays, None, 9), Some(1));
+        // Không thấy màn hình chính: màn hình đầu.
+        assert_eq!(full_screen_index(&displays, None, 42), Some(0));
+        assert_eq!(full_screen_index(&[], Some((0.0, 0.0)), 7), None);
+    }
+
+    /// Phím tắt và menu dùng chung cổng: phím khi đang chụp (lớp phủ mở) bị bỏ qua và không đổi
+    /// loại của lượt đang chạy; phím khi menu đang chờ thì chụp ngay theo loại của phím.
+    #[test]
+    fn hotkeys_share_the_gate_with_the_menu() {
+        use CaptureGate::*;
+        let (s, a) = gate_step(Idle, GateEvent::Hotkey);
+        assert_eq!((s, a), (Capturing, GateAction::CaptureNow));
+        let kind = next_kind(CaptureKind::Region, CaptureKind::SaveFull, a);
+        assert_eq!(kind, CaptureKind::SaveFull);
+        let (s2, a2) = gate_step(s, GateEvent::Hotkey);
+        assert_eq!((s2, a2), (Capturing, GateAction::Ignore));
+        assert_eq!(
+            next_kind(kind, CaptureKind::Region, a2),
+            CaptureKind::SaveFull
+        );
+        let (s, a) = gate_step(PendingMenu, GateEvent::Hotkey);
+        assert_eq!((s, a), (Capturing, GateAction::CaptureNow));
+        assert_eq!(gate_step(s, GateEvent::TimerFired).1, GateAction::Ignore);
     }
 
     #[test]
