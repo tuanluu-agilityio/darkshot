@@ -1239,11 +1239,18 @@ fn draw_style_panel(
     }
     // Hàng ô: Nền, Viền, Không nền. Đúng một trong Nền/Không nền bật.
     let highlight = view.kind.is_highlight();
-    let focus = chip_focus(target, view.fill);
-    let chips = if highlight {
-        Vec::new()
-    } else {
-        vec![
+    let focus = chip_focus(view.kind, target, view.fill);
+    let mut chips = Vec::new();
+    if !highlight {
+        if view.kind == StyleKind::Label {
+            chips.push((
+                l.text_chip,
+                Msg::StyleTextColor,
+                focus.text,
+                StyleCell::Target(StyleTarget::Text),
+            ));
+        }
+        chips.extend([
             (
                 l.fill_chip,
                 Msg::StyleFill,
@@ -1262,8 +1269,8 @@ fn draw_style_panel(
                 focus.no_fill,
                 StyleCell::NoFill,
             ),
-        ]
-    };
+        ]);
+    }
     for (r, msg, on, cell) in chips {
         style_button(c, r, on, hover == Some(cell), dpi);
         text_in(r, lang::tr(msg), &small, true, dpi);
@@ -1284,6 +1291,7 @@ fn draw_style_panel(
         _ if highlight => Some(view.stroke),
         StyleTarget::Fill => view.fill,
         StyleTarget::Border => Some(view.stroke),
+        StyleTarget::Text => Some(view.text),
     };
     for (i, color) in PALETTE.iter().enumerate() {
         let Some(cell) = l.cells.get(i).copied() else {

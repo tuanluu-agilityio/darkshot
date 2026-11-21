@@ -135,6 +135,43 @@ fn rect_edge_hit(a: Pt, b: Pt, width: f32, p: Pt, tol: f32) -> bool {
     d <= width / 2.0 + tol
 }
 
+/// Gần viền NGOÀI khung a–b (viền dày `bw` nằm ngoài khung): ngoài khung cách <= bw + tol, trong
+/// khung cách mép <= tol.
+fn rect_outer_edge_hit(a: Pt, b: Pt, bw: f32, p: Pt, tol: f32) -> bool {
+    let (x0, y0, x1, y1) = norm_box(a, b);
+    if p.x >= x0 && p.x <= x1 && p.y >= y0 && p.y <= y1 {
+        (p.x - x0).min(x1 - p.x).min(p.y - y0).min(y1 - p.y) <= tol
+    } else {
+        let dx = (x0 - p.x).max(0.0).max(p.x - x1);
+        let dy = (y0 - p.y).max(0.0).max(p.y - y1);
+        dx.hypot(dy) <= bw + tol
+    }
+}
+
+/// Như `rect_outer_edge_hit` cho elip nội tiếp khung a–b.
+fn ellipse_outer_edge_hit(a: Pt, b: Pt, bw: f32, p: Pt, tol: f32) -> bool {
+    let (x0, y0, x1, y1) = norm_box(a, b);
+    let (rx, ry) = ((x1 - x0) / 2.0, (y1 - y0) / 2.0);
+    if rx < 1.0 || ry < 1.0 {
+        return seg_dist(p, a, b) <= bw + tol;
+    }
+    let (cx, cy) = (x0 + rx, y0 + ry);
+    let (u, v) = ((p.x - cx) / rx, (p.y - cy) / ry);
+    let k = (u * u + v * v).sqrt();
+    // Khoảng cách xấp xỉ bậc một tới elip: (k - 1) chia độ lớn gradient của k.
+    let g = ((u / rx).powi(2) + (v / ry).powi(2)).sqrt();
+    let d = if k > 1e-6 && g > 0.0 {
+        (k - 1.0) * k / g
+    } else {
+        -rx.min(ry)
+    };
+    if d >= 0.0 {
+        d <= bw + tol
+    } else {
+        -d <= tol
+    }
+}
+
 /// Gần viền elip nội tiếp khung a–b.
 fn ellipse_edge_hit(a: Pt, b: Pt, width: f32, p: Pt, tol: f32) -> bool {
     let (x0, y0, x1, y1) = norm_box(a, b);
@@ -178,9 +215,10 @@ pub fn hit_shape(shape: &Shape, bounds: Rect, p: Pt, tol: f32) -> bool {
             let filled = style.fill.is_some() && style.opacity > 0.0;
             let w = style.border_width();
             if *oval {
-                (filled && inside_ellipse(*a, *b, p)) || ellipse_edge_hit(*a, *b, w, p, tol)
+                (filled && inside_ellipse(*a, *b, p)) || ellipse_outer_edge_hit(*a, *b, w, p, tol)
             } else {
-                (filled && in_rect(rect_of(*a, *b), p, 0.0)) || rect_edge_hit(*a, *b, w, p, tol)
+                (filled && in_rect(rect_of(*a, *b), p, 0.0))
+                    || rect_outer_edge_hit(*a, *b, w, p, tol)
             }
         }
         Shape::Highlight { a, b, opacity, .. } => {
@@ -237,6 +275,7 @@ pub fn handles(shape: &Shape, bounds: Rect) -> Vec<(Grip, Pt)> {
         | Shape::Ellipse { a, b, .. }
         | Shape::Blur { a, b, .. }
         | Shape::Box { a, b, .. }
+        | Shape::Label { a, b, .. }
         | Shape::Highlight { a, b, .. } => {
             let (x0, y0, x1, y1) = norm_box(*a, *b);
             box_handles(x0, y0, x1, y1)
@@ -245,7 +284,7 @@ pub fn handles(shape: &Shape, bounds: Rect) -> Vec<(Grip, Pt)> {
             Some((x0, y0, x1, y1)) => corner_handles(x0, y0, x1, y1),
             None => Vec::new(),
         },
-        Shape::Text { .. } | Shape::Label { .. } => {
+        Shape::Text { .. } => {
             let (x0, y0, x1, y1) = rect_f(bounds);
             corner_handles(x0, y0, x1, y1)
         }
@@ -318,6 +357,7 @@ fn transform_box(
         | Shape::Ellipse { a, b, .. }
         | Shape::Blur { a, b, .. }
         | Shape::Box { a, b, .. }
+        | Shape::Label { a, b, .. }
         | Shape::Highlight { a, b, .. } => (*a, *b),
         _ => return g.original.clone(),
     };
@@ -391,6 +431,23 @@ fn transform_box(
             b: nb,
             color: *color,
             opacity: *opacity,
+        },
+        // Đổi khung chữ chỉ đổi rộng/cao; cỡ chữ giữ nguyên.
+        Shape::Label {
+            text,
+            size,
+            color,
+            align,
+            style,
+            ..
+        } => Shape::Label {
+            a: na,
+            b: nb,
+            text: text.clone(),
+            size: *size,
+            color: *color,
+            align: *align,
+            style: *style,
         },
         other => other.clone(),
     }
@@ -476,7 +533,7 @@ fn transform_points(g: &Gesture, h: Handle, to: Pt, shift: bool, min_extent: f32
 
 fn transform_scaled(g: &Gesture, h: Handle, to: Pt) -> Shape {
     let (bx, lo, hi) = match &g.original {
-        Shape::Text { size, .. } | Shape::Label { size, .. } => {
+        Shape::Text { size, .. } => {
             let (x0, y0, x1, y1) = rect_f(g.original_bounds);
             (
                 (x0, y0, x1, y1),
@@ -529,21 +586,6 @@ fn transform_scaled(g: &Gesture, h: Handle, to: Pt) -> Shape {
             text: text.clone(),
             size: size * k,
             color: *color,
-        },
-        Shape::Label {
-            origin,
-            text,
-            size,
-            color,
-            align,
-            style,
-        } => Shape::Label {
-            origin: scale(*origin),
-            text: text.clone(),
-            size: size * k,
-            color: *color,
-            align: *align,
-            style: *style,
         },
         Shape::Step {
             center,
@@ -680,14 +722,16 @@ fn transform_move(g: &Gesture, to: Pt, img: &Image) -> Shape {
             opacity: *opacity,
         },
         Shape::Label {
-            origin,
+            a,
+            b,
             text,
             size,
             color,
             align,
             style,
         } => Shape::Label {
-            origin: mv(origin),
+            a: mv(a),
+            b: mv(b),
             text: text.clone(),
             size: *size,
             color: *color,
@@ -718,13 +762,12 @@ pub fn transform(g: &Gesture, to: Pt, shift: bool, min_extent: f32, img: &Image)
             | Shape::Ellipse { .. }
             | Shape::Blur { .. }
             | Shape::Box { .. }
+            | Shape::Label { .. }
             | Shape::Highlight { .. } => transform_box(g, h, to, shift, min_extent, img),
             Shape::Pen { .. } | Shape::Marker { .. } => {
                 transform_points(g, h, to, shift, min_extent)
             }
-            Shape::Text { .. } | Shape::Label { .. } | Shape::Step { .. } => {
-                transform_scaled(g, h, to)
-            }
+            Shape::Text { .. } | Shape::Step { .. } => transform_scaled(g, h, to),
             _ => g.original.clone(),
         },
     }
@@ -1647,7 +1690,8 @@ mod tests {
 
     fn label() -> Shape {
         Shape::Label {
-            origin: p(10.0, 10.0),
+            a: p(10.0, 10.0),
+            b: p(70.0, 40.0),
             text: "ab".into(),
             size: 20.0,
             color: RED,
@@ -1660,7 +1704,7 @@ mod tests {
     }
 
     #[test]
-    fn label_behaves_like_text_for_hit_handles_move_and_scale() {
+    fn label_frame_hit_handles_move_and_free_resize_keep_the_font_size() {
         let l = label();
         let bounds = Rect {
             x: 10,
@@ -1670,7 +1714,11 @@ mod tests {
         };
         assert!(hit_shape(&l, bounds, p(30.0, 20.0), 2.0));
         assert!(!hit_shape(&l, bounds, p(300.0, 20.0), 2.0));
-        assert_eq!(handles(&l, bounds).len(), 4);
+        // Tám tay nắm trên khung a..b (không phải bốn góc của hộp bao).
+        let hs = handles(&l, bounds);
+        assert_eq!(hs.len(), 8);
+        assert_eq!(hs[0], (Grip::Box(Handle::NW), p(10.0, 10.0)));
+        assert_eq!(hs[4], (Grip::Box(Handle::SE), p(70.0, 40.0)));
         let img = Image {
             width: 1,
             height: 1,
@@ -1683,14 +1731,37 @@ mod tests {
             original: l.clone(),
             original_bounds: bounds,
         };
+        // Kéo góc: rộng và cao đổi tự do, cỡ chữ không đổi.
         match transform(&g, p(130.0, 70.0), false, 6.0, &img) {
             Shape::Label {
-                size, align, style, ..
+                a,
+                b,
+                size,
+                align,
+                style,
+                ..
             } => {
-                assert!(near_f(size, 40.0), "{size}");
+                assert_eq!((a, b), (p(10.0, 10.0), p(130.0, 70.0)));
+                assert_eq!(size, 20.0);
                 assert_eq!(align, crate::annotate::Align::Center);
                 assert_eq!(Some(style), l.style());
             }
+            other => panic!("{other:?}"),
+        }
+        // Tay nắm cạnh chỉ đổi một chiều.
+        let ge = Gesture {
+            grip: Grip::Box(Handle::E),
+            ..g.clone()
+        };
+        match transform(&ge, p(200.0, 99.0), false, 6.0, &img) {
+            Shape::Label { a, b, size, .. } => {
+                assert_eq!((a, b, size), (p(10.0, 10.0), p(200.0, 40.0), 20.0));
+            }
+            other => panic!("{other:?}"),
+        }
+        // Kéo ngược qua cạnh đối: khung chuẩn hóa.
+        match transform(&g, p(0.0, 5.0), false, 6.0, &img) {
+            Shape::Label { a, b, .. } => assert!(a.x <= b.x && a.y <= b.y, "{a:?} {b:?}"),
             other => panic!("{other:?}"),
         }
         let mv = Gesture {
@@ -1699,13 +1770,26 @@ mod tests {
             ..g
         };
         match transform(&mv, p(3.0, 4.0), false, 6.0, &img) {
-            Shape::Label { origin, .. } => assert_eq!(origin, p(13.0, 14.0)),
+            Shape::Label { a, b, .. } => assert_eq!((a, b), (p(13.0, 14.0), p(73.0, 44.0))),
             other => panic!("{other:?}"),
         }
     }
 
-    fn near_f(a: f32, b: f32) -> bool {
-        (a - b).abs() < 0.01
+    #[test]
+    fn box_border_is_outside_the_frame_for_hits_and_handles() {
+        // Viền 4: khung a..b = (10,10)-(60,40); viền chiếm 4 px bên ngoài.
+        let hollow = styled_box(false, None);
+        assert!(hit_shape(&hollow, Z, p(8.0, 25.0), 0.5), "trong viền ngoài");
+        assert!(!hit_shape(&hollow, Z, p(4.0, 25.0), 0.5), "quá viền ngoài");
+        assert!(hit_shape(&hollow, Z, p(11.0, 25.0), 1.5), "sát mép trong");
+        assert!(!hit_shape(&hollow, Z, p(20.0, 25.0), 1.5), "lòng rỗng");
+        let oval = styled_box(true, None);
+        assert!(hit_shape(&oval, Z, p(8.0, 25.0), 0.5));
+        assert!(!hit_shape(&oval, Z, p(1.0, 25.0), 0.5));
+        // Tay nắm nằm trên khung nền a..b chứ không trên đường ngoài của viền.
+        let hs = handles(&hollow, Z);
+        assert_eq!(hs[0].1, p(10.0, 10.0));
+        assert_eq!(hs[4].1, p(60.0, 40.0));
     }
 
     #[test]

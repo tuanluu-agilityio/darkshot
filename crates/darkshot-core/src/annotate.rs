@@ -312,6 +312,187 @@ pub fn align_offsets(align: Align, widths: &[f32]) -> (f32, Vec<f32>) {
     (w, offs)
 }
 
+/// Chuẩn hóa hai góc khung: (trên trái, dưới phải); kéo ngược chiều cho cùng kết quả.
+pub fn normalize_frame(a: Pt, b: Pt) -> (Pt, Pt) {
+    (
+        Pt {
+            x: a.x.min(b.x),
+            y: a.y.min(b.y),
+        },
+        Pt {
+            x: a.x.max(b.x),
+            y: a.y.max(b.y),
+        },
+    )
+}
+
+/// Chiều rộng khung chữ mặc định khi nhấp đơn (bội số cỡ chữ).
+pub const LABEL_DEFAULT_W_EM: f32 = 8.0;
+/// Chiều cao một dòng ước lượng (bội số cỡ chữ) để tính khung mặc định một dòng.
+pub const LABEL_DEFAULT_LINE_EM: f32 = 1.4;
+
+/// Khung mặc định khi nhấp đơn tại `at`: `at` là góc trên trái, rộng `LABEL_DEFAULT_W_EM` em, cao
+/// đúng một dòng cộng đệm hai phía.
+pub fn label_default_frame(at: Pt, size: f32) -> (Pt, Pt) {
+    let pad = LABEL_PAD_EM * size;
+    (
+        at,
+        Pt {
+            x: at.x + LABEL_DEFAULT_W_EM * size,
+            y: at.y + LABEL_DEFAULT_LINE_EM * size + 2.0 * pad,
+        },
+    )
+}
+
+/// Một dòng đã ngắt của khung chữ.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LabelLine {
+    /// Chỉ số ký tự đầu dòng trong chữ gốc.
+    pub start: usize,
+    /// Chỉ số ký tự cuối dòng (không gồm): dòng cứng dừng trước '\n', dòng mềm gồm cả khoảng trắng
+    /// cuối dòng nên dòng sau bắt đầu đúng chỗ này.
+    pub end: usize,
+    /// Chữ hiển thị (đã bỏ khoảng trắng cuối dòng).
+    pub text: String,
+    /// X bắt đầu chữ (đã căn ngang trong khung, có đệm).
+    pub x: f32,
+    /// Y mép trên của dòng.
+    pub y: f32,
+}
+
+fn span_text(chars: &[char], s: usize, e: usize) -> String {
+    chars[s..e].iter().collect()
+}
+
+/// Ngắt `chars[s..e]` (một đoạn không chứa '\n') theo chiều rộng `max_w`: ngắt theo từ; từ dài hơn
+/// chiều rộng thì ngắt theo ký tự (mỗi dòng ít nhất một ký tự). Trả các khoảng `(đầu, cuối)` liền
+/// nhau phủ kín `s..e`.
+fn wrap_span(
+    chars: &[char],
+    s: usize,
+    e: usize,
+    max_w: f32,
+    measure: &dyn Fn(&str) -> f32,
+) -> Vec<(usize, usize)> {
+    let width = |from: usize, to: usize| measure(&span_text(chars, from, to));
+    let mut out = Vec::new();
+    let (mut line_start, mut i) = (s, s);
+    while i < e {
+        let mut j = i;
+        while j < e && chars[j] != ' ' {
+            j += 1;
+        }
+        let mut k = j;
+        while k < e && chars[k] == ' ' {
+            k += 1;
+        }
+        if width(line_start, j) <= max_w {
+            i = k;
+        } else if line_start < i {
+            out.push((line_start, i));
+            line_start = i;
+        } else {
+            // Từ đứng đầu dòng mà vẫn dài hơn khung: ngắt theo ký tự.
+            let mut m = i + 1;
+            while m < j && width(i, m + 1) <= max_w {
+                m += 1;
+            }
+            out.push((i, m));
+            line_start = m;
+            i = m;
+        }
+    }
+    if line_start < e || out.is_empty() {
+        out.push((line_start, e));
+    }
+    out
+}
+
+/// Ngắt dòng toàn bộ chữ: dòng cứng ('\n') rồi ngắt mềm theo chiều rộng `max_w`. Trả các khoảng
+/// ký tự `(đầu, cuối)`; chữ rỗng cho đúng một khoảng rỗng.
+pub fn wrap_label(text: &str, max_w: f32, measure: &dyn Fn(&str) -> f32) -> Vec<(usize, usize)> {
+    let chars: Vec<char> = text.chars().collect();
+    let max_w = if max_w.is_finite() {
+        max_w.max(0.0)
+    } else {
+        0.0
+    };
+    let mut out = Vec::new();
+    let mut s = 0;
+    loop {
+        let e = chars[s..]
+            .iter()
+            .position(|c| *c == '\n')
+            .map_or(chars.len(), |p| s + p);
+        out.extend(wrap_span(&chars, s, e, max_w, measure));
+        if e >= chars.len() {
+            break;
+        }
+        s = e + 1;
+    }
+    out
+}
+
+/// Bố cục chữ trong khung `a`..`b`: ngắt dòng theo chiều rộng khung trừ đệm hai bên, từng dòng căn
+/// ngang theo `align`, cả khối căn GIỮA theo chiều dọc (nhiều dòng thì cả khối ở giữa; khối cao hơn
+/// khung thì tràn đối xứng). `line_h`: chiều cao một dòng; `measure`: bề rộng chữ của một chuỗi.
+pub fn label_layout(
+    a: Pt,
+    b: Pt,
+    text: &str,
+    size: f32,
+    align: Align,
+    line_h: f32,
+    measure: &dyn Fn(&str) -> f32,
+) -> Vec<LabelLine> {
+    let (a, b) = normalize_frame(a, b);
+    let pad = LABEL_PAD_EM * size;
+    let inner = ((b.x - a.x) - 2.0 * pad).max(0.0);
+    let chars: Vec<char> = text.chars().collect();
+    let spans = wrap_label(text, inner, measure);
+    let top = (a.y + b.y) / 2.0 - spans.len() as f32 * line_h / 2.0;
+    spans
+        .iter()
+        .enumerate()
+        .map(|(i, &(s, e))| {
+            let mut te = e;
+            while te > s && chars[te - 1] == ' ' {
+                te -= 1;
+            }
+            let shown = span_text(&chars, s, te);
+            let w = measure(&shown);
+            let off = match align {
+                Align::Left => 0.0,
+                Align::Center => (inner - w) / 2.0,
+                Align::Right => inner - w,
+            };
+            LabelLine {
+                start: s,
+                end: e,
+                text: shown,
+                x: a.x + pad + off,
+                y: top + i as f32 * line_h,
+            }
+        })
+        .collect()
+}
+
+/// Vị trí con trỏ (x, y mép trên dòng) ở ký tự `caret` trong bố cục `lines` của `text`.
+pub fn label_caret_pos(
+    lines: &[LabelLine],
+    text: &str,
+    caret: usize,
+    measure: &dyn Fn(&str) -> f32,
+) -> Option<(f32, f32)> {
+    let line = lines.iter().rev().find(|l| l.start <= caret)?;
+    let chars: Vec<char> = text.chars().collect();
+    let upto = caret.min(chars.len()).max(line.start);
+    Some((
+        line.x + measure(&span_text(&chars, line.start, upto)),
+        line.y,
+    ))
+}
+
 /// Hai chế độ của công cụ Highlight (Task 113): nét tự do hoặc hình chữ nhật tô màu.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum HighlightMode {
@@ -394,10 +575,12 @@ pub enum Shape {
         color: Rgb,
         opacity: f32,
     },
-    /// Khối chữ có kiểu. `origin`: góc trên trái của KHỐI (gồm đệm `LABEL_PAD_EM * size`); chữ màu
-    /// `color`, viền/nền theo `style`. Chỉ bản macOS tạo ra.
+    /// Khung chữ có kiểu. `a`, `b`: hai góc của KHUNG do người dùng định (vùng nền; viền nằm ngoài
+    /// khung); chữ màu `color` cỡ `size` ngắt dòng theo chiều rộng khung, căn ngang theo `align`,
+    /// luôn ở giữa theo chiều dọc và bị cắt theo khung. Chỉ bản macOS tạo ra.
     Label {
-        origin: Pt,
+        a: Pt,
+        b: Pt,
         text: String,
         size: f32,
         color: Rgb,
@@ -434,7 +617,8 @@ pub fn arrow_min_head(width: f32) -> f32 {
 
 impl Shape {
     /// Hộp bao (tọa độ ảnh, làm tròn ra ngoài) gồm nửa độ dày nét, đầu mũi tên, +1 px khử răng cưa.
-    /// `None` với Text (cần đo chữ: lớp Windows tính) và với danh sách điểm rỗng.
+    /// `None` với Text (cần đo chữ: lớp hệ điều hành tính) và với danh sách điểm rỗng. Box và
+    /// Label: khung nới đúng độ dày viền ngoài.
     pub fn bounds(&self) -> Option<Rect> {
         match self {
             Shape::Pen { points, width, .. } => bounds_of(points, width / 2.0 + 1.0),
@@ -462,11 +646,11 @@ impl Shape {
                     h: r.h.saturating_add(2),
                 })
             }
-            Shape::Text { .. } | Shape::Label { .. } => None,
-            Shape::Box { a, b, style, .. } => bounds_of(
-                &[*a, *b],
-                style.border_width() / 2.0 * std::f32::consts::SQRT_2 + 1.0,
-            ),
+            Shape::Text { .. } => None,
+            // Viền nằm NGOÀI khung a..b: nới đúng độ dày viền (+1 px khử răng cưa).
+            Shape::Box { a, b, style, .. } | Shape::Label { a, b, style, .. } => {
+                bounds_of(&[*a, *b], style.border_width() + 1.0)
+            }
             Shape::Ellipse { a, b, width, .. } => bounds_of(&[*a, *b], width / 2.0 + 1.0),
             Shape::Highlight { a, b, .. } => bounds_of(&[*a, *b], 1.0),
             Shape::Step { center, radius, .. } => {
@@ -1040,6 +1224,11 @@ impl TextEdit {
         self.size
     }
 
+    /// Màu chữ hiện tại.
+    pub fn color(&self) -> Rgb {
+        self.color
+    }
+
     pub fn caret(&self) -> usize {
         self.caret
     }
@@ -1155,16 +1344,16 @@ impl TextEdit {
 }
 
 impl TextEdit {
-    /// Như `to_shape` nhưng thành `Shape::Label` có kiểu và căn lề; `None` khi chỉ có khoảng trắng.
-    pub fn to_label(&self, align: Align, style: Style) -> Option<Shape> {
+    /// Như `to_shape` nhưng thành `Shape::Label` trong khung `a`..`b` (chuẩn hóa: góc trên trái,
+    /// dưới phải) có kiểu và căn lề; `None` khi chỉ có khoảng trắng.
+    pub fn to_label(&self, a: Pt, b: Pt, align: Align, style: Style) -> Option<Shape> {
+        let (a, b) = normalize_frame(a, b);
         match self.to_shape()? {
             Shape::Text {
-                origin,
-                text,
-                size,
-                color,
+                text, size, color, ..
             } => Some(Shape::Label {
-                origin,
+                a,
+                b,
                 text,
                 size,
                 color,
@@ -2085,8 +2274,9 @@ mod tests {
         );
         let (t, k) = (thin.bounds().unwrap(), thick.bounds().unwrap());
         assert!(k.w > t.w && k.h > t.h);
-        // Góc nhọn của viền dày nằm trong hộp bao.
-        assert!(contains(k, 10.0 - 8.0, 10.0 - 8.0) && contains(k, 50.0 + 8.0, 40.0 + 8.0));
+        // Viền dày 16 nằm NGOÀI khung 10..50 x 10..40: hộp bao nới đúng 16 (+1 khử răng cưa).
+        assert!(contains(k, 10.0 - 16.0, 10.0 - 16.0) && contains(k, 50.0 + 16.0, 40.0 + 16.0));
+        assert_eq!((k.x, k.w), (-7, 74));
         let oval = boxed(
             p(10.0, 10.0),
             p(50.0, 40.0),
@@ -2106,16 +2296,26 @@ mod tests {
     }
 
     #[test]
-    fn label_bounds_need_measuring_like_text() {
+    fn label_bounds_come_from_the_frame_plus_the_outer_border() {
         let l = Shape::Label {
-            origin: p(1.0, 1.0),
+            a: p(1.0, 1.0),
+            b: p(41.0, 31.0),
             text: "x".into(),
             size: 18.0,
             color: DEFAULT_COLOR,
             align: Align::Center,
             style: Style::new(DEFAULT_COLOR, 0.0),
         };
-        assert_eq!(l.bounds(), None);
+        // Không viền: khung + 1 px khử răng cưa.
+        assert_eq!(
+            l.bounds(),
+            Some(Rect {
+                x: 0,
+                y: 0,
+                w: 42,
+                h: 32
+            })
+        );
         assert_eq!(l.align(), Some(Align::Center));
         assert_eq!(l.with_align(Align::Right).align(), Some(Align::Right));
     }
@@ -2209,7 +2409,12 @@ mod tests {
     fn to_label_keeps_text_origin_size_and_adds_style() {
         let mut e = TextEdit::new(p(3.0, 4.0), 24.0, DEFAULT_COLOR);
         assert_eq!(
-            e.to_label(Align::Left, Style::new(DEFAULT_COLOR, 0.0)),
+            e.to_label(
+                p(0.0, 0.0),
+                p(9.0, 9.0),
+                Align::Left,
+                Style::new(DEFAULT_COLOR, 0.0)
+            ),
             None
         );
         e.insert("a\nbb");
@@ -2219,16 +2424,19 @@ mod tests {
             opacity: 3.0,
             ..Style::new(PALETTE[2], 2.0)
         };
-        match e.to_label(Align::Right, st) {
+        match e.to_label(p(80.0, 60.0), p(10.0, 20.0), Align::Right, st) {
             Some(Shape::Label {
-                origin,
+                a,
+                b,
                 text,
                 size,
                 color,
                 align,
                 style,
             }) => {
-                assert_eq!((origin, text.as_str(), size), (p(3.0, 4.0), "a\nbb", 24.0));
+                // Kéo ngược chiều cho cùng khung chuẩn hóa.
+                assert_eq!((a, b), (p(10.0, 20.0), p(80.0, 60.0)));
+                assert_eq!((text.as_str(), size), ("a\nbb", 24.0));
                 assert_eq!((color, align), (DEFAULT_COLOR, Align::Right));
                 assert_eq!(style.opacity, 1.0);
                 assert_eq!(style.fill, Some(PALETTE[1]));
@@ -2296,6 +2504,8 @@ mod tests {
         let without = mk(true).bounds().unwrap();
         assert!(without.w < with.w && without.h < with.h);
         assert_eq!((without.x, without.y), (9, 9), "chỉ còn 1 px khử răng cưa");
+        // Đổi độ dày viền chỉ nới hộp bao ra ngoài, khung nền a..b (10..60) vẫn nằm trong.
+        assert_eq!((with.x, with.y), (-3, -3));
     }
 
     #[test]
@@ -2308,5 +2518,127 @@ mod tests {
         };
         let st = styled_from_stroke(&raw, None, 1.0).style().unwrap();
         assert_eq!((st.radius, st.no_border), (0.0, false));
+    }
+
+    // ---- Task 115: viền ngoài, khung chữ
+
+    fn m(s: &str) -> f32 {
+        // Đo giả: mỗi ký tự rộng 10.
+        s.chars().count() as f32 * 10.0
+    }
+
+    #[test]
+    fn border_thickness_never_changes_the_frame_only_the_bounds() {
+        let mk = |w| Shape::Box {
+            a: p(10.0, 10.0),
+            b: p(60.0, 40.0),
+            oval: false,
+            style: Style::new(DEFAULT_COLOR, w),
+        };
+        let (thin, thick) = (mk(2.0), mk(10.0));
+        let (Shape::Box { a, b, .. }, Shape::Box { a: a2, b: b2, .. }) = (&thin, &thick) else {
+            panic!()
+        };
+        assert_eq!((a, b), (a2, b2));
+        let (t, k) = (thin.bounds().unwrap(), thick.bounds().unwrap());
+        assert_eq!((t.x, t.w), (7, 56));
+        assert_eq!((k.x, k.w), (-1, 72));
+    }
+
+    #[test]
+    fn wrap_breaks_by_word_then_by_character() {
+        // Rộng 50 = 5 ký tự.
+        let w = |t: &str| wrap_label(t, 50.0, &m);
+        assert_eq!(w(""), vec![(0, 0)]);
+        assert_eq!(w("ab cd"), vec![(0, 5)]);
+        // "ab cdef" = 7 ký tự: ngắt tại khoảng trắng; khoảng trắng nằm cuối dòng trên.
+        assert_eq!(w("ab cdef"), vec![(0, 3), (3, 7)]);
+        // Từ quá dài: ngắt theo ký tự.
+        assert_eq!(w("abcdefghijkl"), vec![(0, 5), (5, 10), (10, 12)]);
+        // Dòng cứng.
+        assert_eq!(w("ab\ncd"), vec![(0, 2), (3, 5)]);
+        assert_eq!(w("ab\n"), vec![(0, 2), (3, 3)]);
+        // Khung hẹp hơn một ký tự vẫn mỗi dòng ít nhất một ký tự, không lặp vô hạn.
+        assert_eq!(wrap_label("abc", 1.0, &m), vec![(0, 1), (1, 2), (2, 3)]);
+    }
+
+    #[test]
+    fn label_layout_centres_the_block_vertically() {
+        let (a, b) = (p(0.0, 100.0), p(200.0, 200.0));
+        let lay = |t: &str, al| label_layout(a, b, t, 10.0, al, 20.0, &m);
+        // Một dòng: top = giữa - nửa cao.
+        let one = lay("ab", Align::Left);
+        assert_eq!(one.len(), 1);
+        assert!(near(one[0].y, 150.0 - 10.0));
+        // Hai dòng: khối cao 40 ở giữa.
+        let two = lay("ab\ncd", Align::Left);
+        assert!(near(two[0].y, 130.0) && near(two[1].y, 150.0));
+        // Năm dòng: cao 100, top = 100.
+        let five = lay("1\n2\n3\n4\n5", Align::Left);
+        assert!(near(five[0].y, 100.0) && near(five[4].y, 180.0));
+    }
+
+    #[test]
+    fn label_layout_aligns_each_line_inside_the_padding() {
+        // size 10: đệm 3; khung rộng 200: lòng 194.
+        let (a, b) = (p(0.0, 0.0), p(200.0, 100.0));
+        let t = "ab\nabcd";
+        let go = |al| label_layout(a, b, t, 10.0, al, 20.0, &m);
+        let l = go(Align::Left);
+        assert!(near(l[0].x, 3.0) && near(l[1].x, 3.0));
+        let c = go(Align::Center);
+        assert!(near(c[0].x, 3.0 + (194.0 - 20.0) / 2.0));
+        assert!(near(c[1].x, 3.0 + (194.0 - 40.0) / 2.0));
+        let r = go(Align::Right);
+        assert!(near(r[0].x, 3.0 + 194.0 - 20.0));
+        assert!(near(r[1].x, 3.0 + 194.0 - 40.0));
+    }
+
+    #[test]
+    fn label_layout_wraps_to_the_frame_width_and_overflows_symmetrically() {
+        // Lòng 44 = 4 ký tự; "aaaa bbbb cccc" thành 3 dòng, cao 60 > khung cao 30.
+        let (a, b) = (p(0.0, 0.0), p(50.0, 30.0));
+        let lay = label_layout(a, b, "aaaa bbbb cccc", 10.0, Align::Left, 20.0, &m);
+        assert_eq!(lay.len(), 3);
+        assert_eq!(lay[0].text, "aaaa");
+        // Tràn đối xứng: phần thừa trên = phần thừa dưới.
+        let over_top = 0.0 - lay[0].y;
+        let over_bottom = lay[2].y + 20.0 - 30.0;
+        assert!(near(over_top, over_bottom), "{over_top} {over_bottom}");
+        // Đổi khung không đổi cỡ chữ: cỡ chữ không nằm trong khung.
+        let wide = label_layout(
+            a,
+            p(500.0, 30.0),
+            "aaaa bbbb cccc",
+            10.0,
+            Align::Left,
+            20.0,
+            &m,
+        );
+        assert_eq!(wide.len(), 1);
+    }
+
+    #[test]
+    fn caret_follows_the_wrapped_layout() {
+        let (a, b) = (p(0.0, 0.0), p(50.0, 100.0));
+        let text = "ab cdef";
+        let lay = label_layout(a, b, text, 10.0, Align::Left, 20.0, &m);
+        assert_eq!(lay.len(), 2);
+        let (x0, y0) = label_caret_pos(&lay, text, 2, &m).unwrap();
+        assert!(near(x0, 3.0 + 20.0) && near(y0, lay[0].y));
+        // Đầu dòng sau.
+        let (x1, y1) = label_caret_pos(&lay, text, 3, &m).unwrap();
+        assert!(near(x1, 3.0) && near(y1, lay[1].y));
+        let (x2, _) = label_caret_pos(&lay, text, 7, &m).unwrap();
+        assert!(near(x2, 3.0 + 40.0));
+    }
+
+    #[test]
+    fn default_frame_is_one_line_tall_and_normalize_orders_corners() {
+        let (a, b) = label_default_frame(p(10.0, 20.0), 20.0);
+        assert_eq!(a, p(10.0, 20.0));
+        assert!(near(b.x - a.x, 160.0) && b.y - a.y > 20.0 && b.y - a.y < 60.0);
+        let (n, f) = normalize_frame(p(9.0, 1.0), p(3.0, 7.0));
+        assert_eq!((n, f), (p(3.0, 1.0), p(9.0, 7.0)));
     }
 }
