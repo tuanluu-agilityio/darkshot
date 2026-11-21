@@ -1490,4 +1490,111 @@ mod tests {
         rev.reverse();
         assert_ne!(render(60, 50, 90, &rev), a);
     }
+
+    /// Chạy tay (an toàn, chỉ ghi một tệp PNG vào thư mục tạm): ảnh mẫu có mọi loại hình để xem bằng
+    /// mắt. Lệnh: `cargo test -p darkshot-macos --bin darkshot-macos -- --ignored annotate_sample
+    /// --test-threads=1`.
+    #[test]
+    #[ignore = "chạy tay: ghi PNG mẫu vào thư mục tạm"]
+    fn annotate_sample() {
+        let (w, h) = (640u32, 420u32);
+        let mut bgra = Vec::new();
+        for y in 0..h {
+            for x in 0..w {
+                // Nền dải màu nhẹ để thấy marker trong suốt và vùng che.
+                bgra.extend_from_slice(&[(200 - y / 4) as u8, (170 + x / 10) as u8, 210, 255]);
+            }
+        }
+        let mut img = Image {
+            width: w,
+            height: h,
+            bgra,
+        };
+        let shapes = vec![
+            Shape::Pen {
+                points: vec![
+                    pt(30.0, 60.0),
+                    pt(60.0, 30.0),
+                    pt(90.0, 70.0),
+                    pt(130.0, 35.0),
+                    pt(160.0, 60.0),
+                ],
+                width: 4.0,
+                color: RED,
+            },
+            Shape::Line {
+                a: pt(200.0, 30.0),
+                b: pt(320.0, 80.0),
+                width: 4.0,
+                color: BLUE,
+            },
+            Shape::Arrow {
+                a: pt(360.0, 80.0),
+                b: pt(500.0, 30.0),
+                width: 4.0,
+                color: RED,
+            },
+            Shape::Rect {
+                a: pt(30.0, 110.0),
+                b: pt(170.0, 200.0),
+                width: 4.0,
+                color: Rgb(0, 150, 0),
+            },
+            Shape::Ellipse {
+                a: pt(200.0, 110.0),
+                b: pt(340.0, 200.0),
+                width: 4.0,
+                color: Rgb(160, 0, 160),
+            },
+            Shape::Marker {
+                points: vec![pt(370.0, 140.0), pt(560.0, 140.0)],
+                width: 24.0,
+                color: YELLOW,
+            },
+            text(pt(380.0, 120.0), "Marker trên chữ", 22.0, Rgb(20, 20, 20)),
+            Shape::Blur {
+                a: pt(30.0, 230.0),
+                b: pt(170.0, 290.0),
+                color: Rgb(60, 60, 60),
+            },
+            text(pt(40.0, 240.0), "Che sau, chữ trước", 20.0, YELLOW),
+            text(pt(200.0, 230.0), "Việt Nam\nHai dòng 😀", 26.0, RED),
+            Shape::Step {
+                center: pt(60.0, 350.0),
+                radius: 22.0,
+                n: 1,
+                color: RED,
+            },
+            Shape::Step {
+                center: pt(130.0, 350.0),
+                radius: 22.0,
+                n: 2,
+                color: BLUE,
+            },
+            Shape::Step {
+                center: pt(200.0, 350.0),
+                radius: 22.0,
+                n: 12,
+                color: YELLOW,
+            },
+            Shape::Rect {
+                a: pt(420.0, 260.0),
+                b: pt(600.0, 380.0),
+                width: 12.0,
+                color: RED,
+            },
+            Shape::Rect {
+                a: pt(450.0, 290.0),
+                b: pt(630.0, 400.0),
+                width: 12.0,
+                color: BLUE,
+            },
+        ];
+        let crop = full(&img);
+        burn(&mut img, &shapes, crop).expect("burn");
+        let png = darkshot_core::image::encode_png(&img).expect("png");
+        let path = std::env::temp_dir().join("darkshot-annotate-sample.png");
+        std::fs::write(&path, png).expect("write");
+        println!("annotate_sample: {}", path.display());
+    }
 }
