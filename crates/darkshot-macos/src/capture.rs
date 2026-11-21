@@ -32,8 +32,17 @@ pub enum CaptureError {
 
 /// Tiêu đề và nội dung thông báo cho một lỗi chụp (theo `lang`).
 pub fn capture_error_notice(lang: Lang, e: &CaptureError) -> (&'static str, &'static str) {
-    let _ = (lang, e);
-    ("", "") // STUB
+    let body = match e {
+        CaptureError::PermissionDenied => {
+            return (
+                t(lang, Msg::MacScreenPermissionTitle),
+                t(lang, Msg::MacScreenPermissionBody),
+            )
+        }
+        CaptureError::NoDisplay => Msg::MacNoDisplayBody,
+        CaptureError::Failed(_) => Msg::MacCaptureFailedBody,
+    };
+    (t(lang, Msg::CaptureFailedTitle), t(lang, body))
 }
 
 /// Thứ tự thành phần trong một pixel 32 bit (theo từ 32 bit, trước khi xét thứ tự byte).
@@ -70,8 +79,33 @@ pub fn layout_from_cg(
     bits_per_component: usize,
     bits_per_pixel: usize,
 ) -> Option<PixelLayout> {
-    let _ = (alpha_info, bitmap_info, bits_per_component, bits_per_pixel);
-    None // STUB
+    const ALPHA_MASK: u32 = 0x1F;
+    const FLOAT_COMPONENTS: u32 = 1 << 8;
+    const ORDER_MASK: u32 = 0x7000;
+    const ORDER_DEFAULT: u32 = 0;
+    const ORDER_32_LITTLE: u32 = 2 << 12;
+    const ORDER_32_BIG: u32 = 4 << 12;
+    if bits_per_component != 8 || bits_per_pixel != 32 || bitmap_info & FLOAT_COMPONENTS != 0 {
+        return None;
+    }
+    let alpha = match alpha_info & ALPHA_MASK {
+        1 => AlphaKind::PremultipliedLast,
+        2 => AlphaKind::PremultipliedFirst,
+        3 => AlphaKind::Last,
+        4 => AlphaKind::First,
+        5 => AlphaKind::NoneSkipLast,
+        6 => AlphaKind::NoneSkipFirst,
+        _ => return None,
+    };
+    let little_endian = match bitmap_info & ORDER_MASK {
+        ORDER_32_LITTLE => true,
+        ORDER_DEFAULT | ORDER_32_BIG => false,
+        _ => return None,
+    };
+    Some(PixelLayout {
+        alpha,
+        little_endian,
+    })
 }
 
 /// Đổi bộ đệm pixel của `CGImage` (mỗi hàng `bytes_per_row` byte, từ trên xuống) sang `Image`
@@ -83,14 +117,83 @@ pub fn to_bgra(
     bytes_per_row: usize,
     layout: PixelLayout,
 ) -> Result<Image, String> {
-    let _ = (buf, width, height, bytes_per_row, layout);
-    Err("stub".into()) // STUB
+    if width == 0 || height == 0 {
+        return Err("empty image".into());
+    }
+    let row_bytes = width
+        .checked_mul(4)
+        .ok_or_else(|| "image too large".to_string())?;
+    if bytes_per_row < row_bytes {
+        return Err("row stride shorter than the image width".into());
+    }
+    // Hàng cuối chỉ cần đủ pixel, không cần phần đệm.
+    let needed = (height - 1)
+        .checked_mul(bytes_per_row)
+        .and_then(|n| n.checked_add(row_bytes))
+        .ok_or_else(|| "image too large".to_string())?;
+    if buf.len() < needed {
+        return Err("pixel buffer is shorter than the image".into());
+    }
+    let total = row_bytes
+        .checked_mul(height)
+        .ok_or_else(|| "image too large".to_string())?;
+    let (w, h) = match (u32::try_from(width), u32::try_from(height)) {
+        (Ok(w), Ok(h)) => (w, h),
+        _ => return Err("image too large".into()),
+    };
+    // Vị trí của A, R, G, B (theo thứ tự thành phần trong từ 32 bit); `None` là không có alpha.
+    let (a, r, g, b) = match layout.alpha {
+        AlphaKind::PremultipliedFirst | AlphaKind::First => (Some(0), 1, 2, 3),
+        AlphaKind::NoneSkipFirst => (None, 1, 2, 3),
+        AlphaKind::PremultipliedLast | AlphaKind::Last => (Some(3), 0, 1, 2),
+        AlphaKind::NoneSkipLast => (None, 0, 1, 2),
+    };
+    // Little-endian: byte thứ i trong bộ nhớ là thành phần thứ 3 - i.
+    let at = |i: usize| if layout.little_endian { 3 - i } else { i };
+    let premultiplied = matches!(
+        layout.alpha,
+        AlphaKind::PremultipliedFirst | AlphaKind::PremultipliedLast
+    );
+    let mut bgra = Vec::with_capacity(total);
+    for row in buf.chunks(bytes_per_row).take(height) {
+        for px in row[..row_bytes].chunks_exact(4) {
+            let alpha = a.map_or(255, |i| px[at(i)]);
+            let mut c = [px[at(b)], px[at(g)], px[at(r)]];
+            if premultiplied && alpha < 255 {
+                for v in &mut c {
+                    *v = unpremultiply(*v, alpha);
+                }
+            }
+            bgra.extend_from_slice(&[c[0], c[1], c[2], alpha]);
+        }
+    }
+    Ok(Image {
+        width: w,
+        height: h,
+        bgra,
+    })
+}
+
+/// Bỏ nhân alpha: `c * 255 / a`, làm tròn, kẹp ở 255; `a = 0` cho 0.
+fn unpremultiply(c: u8, a: u8) -> u8 {
+    if a == 0 {
+        return 0;
+    }
+    let (c, a) = (u32::from(c), u32::from(a));
+    ((c * 255 + a / 2) / a).min(255) as u8
 }
 
 /// Kích thước pixel vật lý của màn hình có khung `frame_pt` (điểm) và hệ số `scale`.
 pub fn pixel_size(frame_pt: RectF, scale: f64) -> Option<(u32, u32)> {
-    let _ = (frame_pt, scale, pt_to_px(0.0, 1.0));
-    None // STUB
+    let ok = |v: f64| v.is_finite() && v > 0.0;
+    if !ok(scale) || !ok(frame_pt.w) || !ok(frame_pt.h) {
+        return None;
+    }
+    let (w, h) = (pt_to_px(frame_pt.w, scale), pt_to_px(frame_pt.h, scale));
+    match (u32::try_from(w), u32::try_from(h)) {
+        (Ok(w), Ok(h)) if w > 0 && h > 0 => Some((w, h)),
+        _ => None,
+    }
 }
 
 /// Dựng `DisplayShot` từ ảnh và khung màn hình. Ảnh khác kích thước dự kiến (ví dụ hệ số báo sai)
@@ -101,15 +204,48 @@ pub fn shot_from_frame(
     scale: f64,
     display_id: u32,
 ) -> Result<DisplayShot, CaptureError> {
-    let _ = (image, frame_pt, scale, display_id);
-    Err(CaptureError::NoDisplay) // STUB
+    if !image.is_valid() {
+        return Err(CaptureError::Failed("invalid display image".into()));
+    }
+    if !(frame_pt.w.is_finite() && frame_pt.w > 0.0 && frame_pt.h.is_finite() && frame_pt.h > 0.0) {
+        return Err(CaptureError::Failed("invalid display frame".into()));
+    }
+    let scale = if pixel_size(frame_pt, scale) == Some((image.width, image.height)) {
+        scale
+    } else {
+        f64::from(image.width) / frame_pt.w
+    };
+    Ok(DisplayShot {
+        image,
+        frame_pt,
+        scale,
+        display_id,
+    })
 }
 
 /// Chỉ số màn hình chứa điểm `(x, y)` (toạ độ toàn cục gốc trên trái, điểm); ngoài mọi màn
 /// hình thì màn hình gần nhất; danh sách rỗng thì `None`.
 pub fn display_at(frames: &[RectF], x: f64, y: f64) -> Option<usize> {
-    let _ = (frames, x, y);
-    None // STUB
+    let inside = |f: &RectF| x >= f.x && x < f.x + f.w && y >= f.y && y < f.y + f.h;
+    if let Some(i) = frames.iter().position(inside) {
+        return Some(i);
+    }
+    // Bình phương khoảng cách tới khung; NaN coi như rất xa.
+    let dist = |f: &RectF| {
+        let dx = (f.x - x).max(0.0).max(x - (f.x + f.w));
+        let dy = (f.y - y).max(0.0).max(y - (f.y + f.h));
+        let d = dx * dx + dy * dy;
+        if d.is_nan() {
+            f64::INFINITY
+        } else {
+            d
+        }
+    };
+    frames
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| dist(a).total_cmp(&dist(b)))
+        .map(|(i, _)| i)
 }
 
 #[cfg(test)]

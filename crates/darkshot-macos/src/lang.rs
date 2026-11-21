@@ -30,8 +30,12 @@ pub fn tr(m: Msg) -> &'static str {
 /// Thẻ ngôn ngữ BCP 47 của macOS (`vi`, `vi-VN`, `en-US`, …) sang `Lang`: tiếng Việt khi mã
 /// ngôn ngữ chính là `vi` (không phân biệt hoa thường, `-` hay `_`); còn lại là English.
 pub fn lang_from_locale(tag: &str) -> Lang {
-    let _ = tag;
-    Lang::En // STUB
+    let primary = tag.trim().split(['-', '_']).next().unwrap_or("");
+    if primary.eq_ignore_ascii_case("vi") {
+        Lang::Vi
+    } else {
+        Lang::En
+    }
 }
 
 /// Ngôn ngữ ưu tiên đầu tiên của người dùng (`NSLocale.preferredLanguages`); danh sách rỗng thì

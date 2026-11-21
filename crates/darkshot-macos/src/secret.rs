@@ -26,15 +26,21 @@ pub const ACCOUNT: &str = "r2-secret-access-key";
 
 /// Băm FNV-1a 64 bit của đường dẫn (chữ thường), như tên mutex cách ly của lớp Windows.
 pub fn profile_hash(p: &Path) -> u64 {
-    let _ = p;
-    0 // STUB
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in p.to_string_lossy().to_lowercase().bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    h
 }
 
 /// Service Keychain cho hồ sơ: không có hồ sơ cách ly thì `darkshot`; có thì
 /// `darkshot-sandbox-<16 chữ số hex của profile_hash>`.
 pub fn service_for_profile(profile: Option<&Path>) -> String {
-    let _ = profile;
-    SERVICE.to_string() // STUB
+    match profile {
+        None => SERVICE.to_string(),
+        Some(p) => format!("{SANDBOX_SERVICE_PREFIX}{:016x}", profile_hash(p)),
+    }
 }
 
 /// Nơi cất khóa thật (Keychain, hoặc bản giả trong kiểm thử).

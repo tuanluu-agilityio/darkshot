@@ -7,20 +7,39 @@ use darkshot_core::tray_logic::{MenuCommand, MenuEntry};
 
 /// Lệnh đã làm trên bản Mac. Lệnh trả `false` không xuất hiện trong menu.
 pub fn implemented(cmd: MenuCommand) -> bool {
-    let _ = cmd;
-    true // STUB
+    matches!(cmd, MenuCommand::Capture | MenuCommand::Quit)
 }
 
 /// Nhãn cố định của một lệnh menu; `None` cho nhãn có tham số (bản mới, số bước, số ảnh ghim),
 /// bên gọi dựng bằng hàm của `i18n`.
 pub fn menu_msg(cmd: MenuCommand) -> Option<Msg> {
-    let _ = cmd;
-    None // STUB
+    match cmd {
+        MenuCommand::Capture => Some(Msg::TrayCapture),
+        MenuCommand::RepeatLast => Some(Msg::MenuRepeatLast),
+        MenuCommand::History => Some(Msg::TrayHistory),
+        MenuCommand::StepsStart => Some(Msg::TrayStepsStart),
+        MenuCommand::Options => Some(Msg::TrayOptions),
+        MenuCommand::About => Some(Msg::TrayAbout),
+        MenuCommand::Help => Some(Msg::TrayHelp),
+        MenuCommand::Quit => Some(Msg::MacMenuQuit),
+        MenuCommand::OpenUpdate | MenuCommand::StepsReview | MenuCommand::ClosePins => None,
+    }
 }
 
 /// Các dòng menu sẽ hiện: bỏ lệnh chưa làm; vạch ngăn không đứng đầu, cuối hay liền nhau.
 pub fn visible_menu(layout: Vec<MenuEntry>) -> Vec<MenuEntry> {
-    layout // STUB
+    let mut out: Vec<MenuEntry> = Vec::with_capacity(layout.len());
+    for e in layout {
+        match e {
+            MenuEntry::Item(c) | MenuEntry::Grayed(c) if !implemented(c) => {}
+            MenuEntry::Separator if matches!(out.last(), None | Some(MenuEntry::Separator)) => {}
+            e => out.push(e),
+        }
+    }
+    if out.last() == Some(&MenuEntry::Separator) {
+        out.pop();
+    }
+    out
 }
 
 #[cfg(test)]
