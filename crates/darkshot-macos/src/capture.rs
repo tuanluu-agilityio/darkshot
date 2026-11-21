@@ -11,7 +11,7 @@ use darkshot_core::image::Image;
 use objc2::rc::{autoreleasepool, Retained};
 use objc2::AnyThread;
 use objc2_core_graphics::{
-    kCGColorSpaceSRGB, CGDataProvider, CGDisplayBounds, CGEvent, CGImage,
+    kCGColorSpaceSRGB, CGDataProvider, CGDisplayBounds, CGEvent, CGImage, CGMainDisplayID,
     CGPreflightScreenCaptureAccess, CGRequestScreenCaptureAccess,
 };
 use objc2_foundation::{NSArray, NSError};
@@ -261,6 +261,29 @@ pub fn display_at(frames: &[RectF], x: f64, y: f64) -> Option<usize> {
         .enumerate()
         .min_by(|(_, a), (_, b)| dist(a).total_cmp(&dist(b)))
         .map(|(i, _)| i)
+}
+
+/// Màn hình để lưu: chứa (hoặc gần nhất) vị trí con trỏ lúc yêu cầu chụp; không đọc được con
+/// trỏ thì màn hình chính (`main_id`, theo `CGMainDisplayID`); không thấy màn hình chính thì màn
+/// hình đầu tiên. `displays` là `(display_id, frame_pt)`; rỗng thì `None`.
+pub fn pick_display(
+    displays: &[(u32, RectF)],
+    cursor: Option<(f64, f64)>,
+    main_id: u32,
+) -> Option<usize> {
+    if displays.is_empty() {
+        return None;
+    }
+    if let Some((x, y)) = cursor {
+        let frames: Vec<RectF> = displays.iter().map(|d| d.1).collect();
+        return display_at(&frames, x, y);
+    }
+    Some(displays.iter().position(|d| d.0 == main_id).unwrap_or(0))
+}
+
+/// `CGDirectDisplayID` của màn hình chính (có thanh menu).
+pub fn main_display_id() -> u32 {
+    CGMainDisplayID()
 }
 
 /// Thời gian chờ tối đa cho mỗi lời gọi ScreenCaptureKit.
@@ -714,6 +737,28 @@ mod tests {
         assert_eq!(display_at(&frames, 5000.0, 0.0), Some(1));
         assert_eq!(display_at(&[], 0.0, 0.0), None);
         assert_eq!(display_at(&frames[..1], f64::NAN, 0.0), Some(0));
+    }
+
+    #[test]
+    fn pick_display_uses_cursor_then_main_display() {
+        // Màn hình phụ bên trái (gốc âm) và phía trên (y âm); màn hình chính không đứng đầu.
+        let displays = [
+            (5, r(-1440.0, 82.0, 1440.0, 900.0)),
+            (9, r(0.0, -1440.0, 2560.0, 1440.0)),
+            (1, r(0.0, 0.0, 1512.0, 982.0)),
+        ];
+        assert_eq!(pick_display(&displays, Some((-10.0, 500.0)), 1), Some(0));
+        assert_eq!(pick_display(&displays, Some((100.0, -5.0)), 1), Some(1));
+        assert_eq!(pick_display(&displays, Some((100.0, 100.0)), 1), Some(2));
+        // Con trỏ ngoài mọi màn hình: gần nhất, không phải màn hình chính.
+        assert_eq!(pick_display(&displays, Some((-3000.0, 500.0)), 1), Some(0));
+        // Không có con trỏ: màn hình chính, không phải chỉ số 0.
+        assert_eq!(pick_display(&displays, None, 1), Some(2));
+        assert_eq!(pick_display(&displays, None, 9), Some(1));
+        // Màn hình chính không có trong danh sách: màn hình đầu tiên.
+        assert_eq!(pick_display(&displays, None, 42), Some(0));
+        assert_eq!(pick_display(&[], None, 1), None);
+        assert_eq!(pick_display(&[], Some((0.0, 0.0)), 1), None);
     }
 
     #[test]

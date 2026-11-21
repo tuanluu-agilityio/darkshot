@@ -221,12 +221,14 @@ fn start_capture() {
     }
     let include_cursor = STATE.with(|s| s.borrow().as_ref().map(|a| a.config.include_cursor));
     let include_cursor = include_cursor.unwrap_or(false);
+    // Vị trí con trỏ lúc cổng cho chụp (không phải lúc chụp xong) chọn màn hình sẽ lưu.
+    let cursor = capture::cursor_location();
+    let main_id = capture::main_display_id();
     let spawned = std::thread::Builder::new()
         .name("darkshot-capture".into())
         .spawn(move || {
             let result = capture::capture_displays(include_cursor);
-            let cursor = capture::cursor_location();
-            DispatchQueue::main().exec_async(move || on_captured(result, cursor));
+            DispatchQueue::main().exec_async(move || on_captured(result, cursor, main_id));
         });
     if let Err(e) = spawned {
         eprintln!("darkshot: cannot start the capture thread ({e})");
@@ -238,7 +240,11 @@ fn start_capture() {
 }
 
 /// Kết quả chụp, trên luồng chính.
-fn on_captured(result: Result<Vec<DisplayShot>, CaptureError>, cursor: Option<(f64, f64)>) {
+fn on_captured(
+    result: Result<Vec<DisplayShot>, CaptureError>,
+    cursor: Option<(f64, f64)>,
+    main_id: u32,
+) {
     let shots = match result {
         Ok(s) if !s.is_empty() => s,
         Ok(_) => {
@@ -250,11 +256,9 @@ fn on_captured(result: Result<Vec<DisplayShot>, CaptureError>, cursor: Option<(f
             return;
         }
     };
-    let frames: Vec<RectF> = shots.iter().map(|s| s.frame_pt).collect();
-    let idx = cursor
-        .and_then(|(x, y)| capture::display_at(&frames, x, y))
-        .unwrap_or(0);
-    let shot = shots.into_iter().nth(idx);
+    let displays: Vec<(u32, RectF)> = shots.iter().map(|s| (s.display_id, s.frame_pt)).collect();
+    let shot =
+        capture::pick_display(&displays, cursor, main_id).and_then(|i| shots.into_iter().nth(i));
     finish_capture();
     if let Some(shot) = shot {
         save_in_background(shot.image);
