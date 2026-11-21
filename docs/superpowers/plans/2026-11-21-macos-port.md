@@ -14,12 +14,12 @@ Thiết kế: `docs/superpowers/specs/2026-11-21-macos-port-design.md`. Nhánh t
 | M2c-4 | 102d | `tray.rs` và `app.rs`: bố cục menu, hàng đợi thông báo, sổ tải lên (`tray_logic`, `app_state`) | builder / sonnet | trung bình |
 | M2c-5 | 102e | Hàm thuần còn lại của `windows_main.rs` (`notices`/`app_flow`) | builder / sonnet | thấp |
 | (hoãn) | – | `history_layout`, `history_service`, `snap`, `pin`, `ocr*`, `steps_*`, `annotate_draw`, `theme`: chuyển đúng lúc làm M5–M7 (quyết định 133) | – | – |
-| M3a | 103 | `coords.rs`, `Dirs`, đường dẫn dữ liệu, `SecretStore` bằng Keychain, `Clipboard`, `Notifier` | specialist / opus (bảo mật khóa) | cao |
-| M3b | 104 | Thanh menu, ScreenCaptureKit, kiểm quyền Screen Recording | specialist / opus | cao |
-| M3c | 105 | Lớp phủ chọn vùng một màn hình Retina, lưu PNG, chép clipboard | specialist / opus | cao |
+| M3a | 103 | `darkshot-macos` nền móng: `cfg` phụ thuộc, `paths.rs`, `coords.rs` (thuần, test), `timeutil.rs`, `secret.rs` (Keychain, quyết định 136), `clipboard.rs` (`NSPasteboard`) | builder / opus; rà soát reviewer / fable | cao (khóa bí mật, FFI) |
+| M3b | 104 | Vỏ ứng dụng: `.app` + ký ổn định (`scripts/bundle-macos.sh`), `NSStatusItem` + menu từ `tray_logic`, thông báo, chụp từng màn hình bằng ScreenCaptureKit, kiểm quyền, nối cấu hình, `scripts/demo-macos.sh` | builder / opus; rà soát reviewer / fable | cao (quyền hệ thống, luồng chính) |
+| M3c | 105 | Lớp phủ chọn vùng (mỗi màn hình một cửa sổ), `Selection` của core, thanh Lưu/Chép/Hủy, `run_action` | builder / opus; rà soát reviewer / fable | cao (vẽ, sự kiện, Retina) |
 | M4a | 106 | Phím tắt toàn cục, đa màn hình, tải lên R2, link có hạn | builder / sonnet | trung bình |
 | M4b | 107 | Cửa sổ Tùy chọn (3 tab), i18n, giao diện tối | builder / sonnet | trung bình |
-| M4c | 108 | Đóng gói `.app`, ký ad-hoc, `scripts/demo-macos.sh`, README, website, memory bank | scaffolder / sonnet | thấp |
+| M4c | 108 | `scripts/demo-macos.sh` (đã có từ Task 104) bổ sung, biểu tượng `.icns`, README, website, memory bank (đóng gói `.app` và ký đã làm ở Task 104) | scaffolder / sonnet | thấp |
 | M5–M7 | 109+ | Đánh dấu, Ghim, Lịch sử, bắt cửa sổ, OCR, Chụp từng bước, tự khởi động, kiểm tra bản mới: tách từng task sau khi M-A được duyệt | — | — |
 
 Cổng mỗi task: `scripts/check.sh` (Mac) phải in `ALL CHECKS PASSED`; task chạm lớp Windows (100, 101, 102a–102e) phải qua job `windows` của `.github/workflows/check.yml` (chạy `scripts/check.ps1` trên runner `windows-latest`) trước khi gộp vào `main`, vì chủ dự án không có máy Windows (2026-11-21). Không gộp `main` khi job đó chưa xanh; cần đẩy nhánh lên `origin` để chạy.
@@ -43,3 +43,9 @@ Như mục cùng tên của `docs/superpowers/plans/2026-11-18-step-capture.md` 
 3. Core vẫn sạch: không crate cấm, không `cfg` theo hệ điều hành, không API thời gian hệ điều hành, không `\` cứng trong test.
 4. Phạm vi: không chuyển hàm ngoài bảng của gói task; hàm gắn Win32 giữ nguyên chỗ.
 5. Ghi tệp nguyên tử, không panic, không chuỗi tiếng Việt viết cứng.
+
+## Ghi chú M3 (2026-11-21)
+
+- Chủ dự án muốn hoàn thiện trên macOS trước, **chưa gộp `main`** (nhánh `feat/macos-port` ở lại). Mọi gói M3 tách `task/10N-…` từ `feat/macos-port` và gộp lại vào đó.
+- Gói 103–105 làm tuần tự (103 → 104 → 105). Ba gói đều cần người dùng thử thật trên máy (quyền Screen Recording, chụp, lớp phủ); QA không giả lập chuột/phím (quyết định 126).
+- Reviewer dùng `fable` (mạnh hơn builder `opus`) vì khóa bí mật, FFI `unsafe` và hành vi không kiểm tự động được.
