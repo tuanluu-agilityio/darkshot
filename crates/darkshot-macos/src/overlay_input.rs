@@ -517,33 +517,82 @@ mod tests {
 
     #[test]
     fn match_screens_by_frame() {
-        // Màn hình chính 1512×982; màn hình phụ bên trái thấp hơn.
+        // Màn hình chính 1512×982; màn hình phụ bên trái thấp hơn (gốc âm).
         let screens = [
             r(0.0, 0.0, 1512.0, 982.0),
             r(-1920.0, -98.0, 1920.0, 1080.0),
         ];
-        let main_tl = r(0.0, 0.0, 1512.0, 982.0);
-        let left_tl = r(-1920.0, 0.0, 1920.0, 1080.0);
+        let main_tl = (r(0.0, 0.0, 1512.0, 982.0), 3024 * 1964);
+        let left_tl = (r(-1920.0, 0.0, 1920.0, 1080.0), 1920 * 1080);
+        // Cặp (ảnh, màn hình) theo thứ tự ảnh, đúng cả khi thứ tự hai bên khác nhau.
         assert_eq!(
             match_screens(&[main_tl, left_tl], &screens),
-            Some(vec![0, 1])
+            Some(vec![(0, 0), (1, 1)])
         );
         assert_eq!(
             match_screens(&[left_tl, main_tl], &screens),
-            Some(vec![1, 0])
+            Some(vec![(0, 1), (1, 0)])
         );
         // Lệch nhỏ hơn dung sai vẫn khớp.
-        let near = r(0.2, -0.2, 1512.0, 982.0);
-        assert_eq!(match_screens(&[near], &screens[..1]), Some(vec![0]));
-        // Thiếu màn hình, thừa màn hình, khung khác, trùng: không khớp.
+        let near = (r(0.2, -0.2, 1512.0, 982.0), 1);
+        assert_eq!(match_screens(&[near], &screens[..1]), Some(vec![(0, 0)]));
+        // Màn hình không có ảnh: không khớp (cấu hình đã đổi).
         assert_eq!(match_screens(&[main_tl], &screens), None);
-        assert_eq!(match_screens(&[main_tl, left_tl], &screens[..1]), None);
         assert_eq!(
-            match_screens(&[r(0.0, 0.0, 1920.0, 1080.0), left_tl], &screens),
+            match_screens(&[(r(0.0, 0.0, 1920.0, 1080.0), 1), left_tl], &screens),
             None
         );
         assert_eq!(match_screens(&[main_tl, main_tl], &screens), None);
         assert_eq!(match_screens(&[], &[]), None);
+        assert_eq!(match_screens(&[], &screens), None);
+        assert_eq!(match_screens(&[main_tl], &[]), None);
+    }
+
+    #[test]
+    fn mirrored_displays_keep_the_best_image_per_screen() {
+        // Phản chiếu màn hình: ScreenCaptureKit liệt kê hai display cùng khung với màn hình chính.
+        let screens = [r(0.0, 0.0, 1512.0, 982.0)];
+        let mirror_small = (r(0.0, 0.0, 1512.0, 982.0), 1512 * 982);
+        let mirror_big = (r(0.0, 0.0, 1512.0, 982.0), 3024 * 1964);
+        assert_eq!(
+            match_screens(&[mirror_small, mirror_big], &screens),
+            Some(vec![(1, 0)])
+        );
+        assert_eq!(
+            match_screens(&[mirror_big, mirror_small], &screens),
+            Some(vec![(0, 0)])
+        );
+        // Bằng nhau: giữ ảnh đầu.
+        assert_eq!(
+            match_screens(&[mirror_big, mirror_big], &screens),
+            Some(vec![(0, 0)])
+        );
+        // Nhiều display hơn NSScreen: ảnh không khớp màn hình nào (display gương khác cỡ) bị bỏ,
+        // mỗi màn hình vẫn có một ảnh.
+        let odd = (r(0.0, 0.0, 1920.0, 1080.0), 1920 * 1080);
+        assert_eq!(
+            match_screens(&[odd, mirror_big], &screens),
+            Some(vec![(1, 0)])
+        );
+    }
+
+    #[test]
+    fn mirrored_pair_plus_secondary_with_negative_origin() {
+        let screens = [
+            r(0.0, 0.0, 1512.0, 982.0),
+            r(-1920.0, -98.0, 1920.0, 1080.0),
+        ];
+        let left = (r(-1920.0, 0.0, 1920.0, 1080.0), 1920 * 1080);
+        let main_a = (r(0.0, 0.0, 1512.0, 982.0), 1512 * 982);
+        let main_b = (r(0.0, 0.0, 1512.0, 982.0), 3024 * 1964);
+        assert_eq!(
+            match_screens(&[left, main_a, main_b], &screens),
+            Some(vec![(0, 1), (2, 0)])
+        );
+        assert_eq!(
+            match_screens(&[main_b, left, main_a], &screens),
+            Some(vec![(0, 0), (1, 1)])
+        );
     }
 
     #[test]
