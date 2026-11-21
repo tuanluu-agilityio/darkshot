@@ -6,7 +6,9 @@
 //! một hình thuộc loại đó (không cần nút riêng trên thanh dọc, để không đổi bố cục dùng chung với
 //! Windows). Bảng dùng lại 48 màu của `PALETTE` cho ô màu.
 
-use darkshot_core::annotate::{dip_to_px, Align, Style, DEFAULT_COLOR, PALETTE, STROKE_DIP};
+use darkshot_core::annotate::{
+    dip_to_px, Align, HighlightMode, Style, DEFAULT_COLOR, PALETTE, STROKE_DIP,
+};
 use darkshot_core::geometry::{Point, Rect};
 use darkshot_core::overlay_layout::scaled;
 use darkshot_core::theme::Rgb;
@@ -18,6 +20,17 @@ pub enum StyleKind {
     Box,
     /// Chữ: nền, màu viền, độ dày viền, độ trong suốt, căn lề; màu chữ là màu của nút Màu.
     Label,
+    /// Highlight chế độ tự do (nét Bút dạ quang): màu, độ to nhỏ nét (Task 113).
+    MarkerFree,
+    /// Highlight chế độ hình chữ nhật: màu, độ trong suốt, không viền (Task 113).
+    MarkerRect,
+}
+
+impl StyleKind {
+    /// Bảng Highlight (có hàng chọn chế độ thay hàng Nền/Viền).
+    pub fn is_highlight(self) -> bool {
+        matches!(self, StyleKind::MarkerFree | StyleKind::MarkerRect)
+    }
 }
 
 /// Ô màu của bảng đang áp cho nền hay cho viền.
@@ -32,6 +45,8 @@ pub enum StyleTarget {
 pub enum StyleCell {
     Target(StyleTarget),
     NoFill,
+    /// Chuyển chế độ Highlight cho lần vẽ tiếp (không đổi nét đã vẽ).
+    Mode(HighlightMode),
     /// Chỉ số trong `PALETTE`.
     Color(usize),
     /// -1 giảm, +1 tăng.
@@ -54,6 +69,9 @@ pub enum StyleEdit {
 /// Độ dày viền nhỏ nhất và lớn nhất (dip) bảng cho chọn; bước 1 dip.
 pub const WIDTH_MIN_DIP: f32 = 0.0;
 pub const WIDTH_MAX_DIP: f32 = darkshot_core::annotate::STYLE_WIDTH_MAX_DIP;
+/// Độ dày nét Highlight tự do nhỏ nhất và lớn nhất (dip) bảng cho chọn; bước 2 dip.
+pub const MARKER_WIDTH_MIN_DIP: f32 = 4.0;
+pub const MARKER_WIDTH_MAX_DIP: f32 = 48.0;
 /// Độ trong suốt nhỏ nhất bảng cho chọn (0 là vô hình); bước 10%.
 pub const OPACITY_MIN: f32 = 0.1;
 
@@ -116,6 +134,21 @@ pub fn clamp_width(w: f32) -> f32 {
     }
 }
 
+/// Độ dày nét Highlight (dip) kẹp vào [`MARKER_WIDTH_MIN_DIP`, `MARKER_WIDTH_MAX_DIP`]; không phải
+/// số thì mức nhỏ nhất.
+pub fn clamp_marker_width(w: f32) -> f32 {
+    if w.is_nan() {
+        MARKER_WIDTH_MIN_DIP
+    } else {
+        w.clamp(MARKER_WIDTH_MIN_DIP, MARKER_WIDTH_MAX_DIP)
+    }
+}
+
+/// Bước độ dày nét Highlight: `dir` = -1 hoặc +1, mỗi bước 2 dip, kẹp.
+pub fn step_marker_width(dip: f32, dir: i32) -> f32 {
+    clamp_marker_width(dip.round() + 2.0 * dir as f32)
+}
+
 /// Độ trong suốt kẹp vào [`OPACITY_MIN`, 1]; không phải số thì 1.
 pub fn clamp_opacity(o: f32) -> f32 {
     if o.is_nan() {
@@ -150,6 +183,8 @@ pub struct StyleView {
     pub width_dip: f32,
     pub opacity: f32,
     pub align: Option<Align>,
+    /// Chế độ Highlight sẽ dùng cho lần vẽ tiếp (chỉ bảng Highlight).
+    pub mode: Option<HighlightMode>,
 }
 
 // ---------------------------------------------------------------- bố cục (đơn vị 96 DPI)
@@ -172,6 +207,9 @@ pub struct StyleLayout {
     pub fill_chip: Rect,
     pub border_chip: Rect,
     pub no_fill: Rect,
+    /// Hai ô chọn chế độ (chỉ bảng Highlight; khi đó ba ô trên không có, kích thước 0).
+    pub modes: Option<[Rect; 2]>,
+    pub kind: StyleKind,
     pub cells: Vec<Rect>,
     pub width_label: Rect,
     pub width_minus: Rect,
@@ -220,7 +258,20 @@ pub fn layout(panel: Rect, kind: StyleKind, dpi: u32) -> StyleLayout {
     let chip_w = (inner - 2 * 4) / 3;
     let mut y = PAD;
     let chip = |i: i32| rect(PAD + i * (chip_w + 4), y, chip_w, ROW_H, dpi);
-    let (fill_chip, border_chip, no_fill) = (chip(0), chip(1), chip(2));
+    let (mut fill_chip, mut border_chip, mut no_fill) = (chip(0), chip(1), chip(2));
+    let mode_w = (inner - 4) / 2;
+    let modes = kind
+        .is_highlight()
+        .then(|| [0, 1].map(|i| rect(PAD + i * (mode_w + 4), y, mode_w, ROW_H, dpi)));
+    if modes.is_some() {
+        let none = Rect {
+            x: 0,
+            y: 0,
+            w: 0,
+            h: 0,
+        };
+        (fill_chip, border_chip, no_fill) = (none, none, none);
+    }
     y += ROW_H + SECTION_GAP;
     let cells: Vec<Rect> = (0..PALETTE.len() as i32)
         .map(|i| {
@@ -258,6 +309,8 @@ pub fn layout(panel: Rect, kind: StyleKind, dpi: u32) -> StyleLayout {
         fill_chip: at(fill_chip),
         border_chip: at(border_chip),
         no_fill: at(no_fill),
+        modes: modes.map(|m| m.map(at)),
+        kind,
         cells: cells.into_iter().map(at).collect(),
         width_label: at(width_label),
         width_minus: at(width_minus),
@@ -276,6 +329,11 @@ pub fn cell_at(l: &StyleLayout, p: Point) -> Option<StyleCell> {
     if !l.panel.contains(p) {
         return None;
     }
+    if let Some(m) = &l.modes {
+        if let Some(i) = m.iter().position(|r| r.contains(p)) {
+            return Some(StyleCell::Mode(HighlightMode::ALL[i]));
+        }
+    }
     if l.fill_chip.contains(p) {
         return Some(StyleCell::Target(StyleTarget::Fill));
     }
@@ -288,16 +346,21 @@ pub fn cell_at(l: &StyleLayout, p: Point) -> Option<StyleCell> {
     if let Some(i) = l.cells.iter().position(|c| c.contains(p)) {
         return Some(StyleCell::Color(i));
     }
-    if l.width_minus.contains(p) {
+    // Bảng Highlight chỉ có một bộ nút tăng giảm, tùy chế độ.
+    let (use_width, use_opacity) = (
+        l.kind != StyleKind::MarkerRect,
+        l.kind != StyleKind::MarkerFree,
+    );
+    if use_width && l.width_minus.contains(p) {
         return Some(StyleCell::Width(-1));
     }
-    if l.width_plus.contains(p) {
+    if use_width && l.width_plus.contains(p) {
         return Some(StyleCell::Width(1));
     }
-    if l.opacity_minus.contains(p) {
+    if use_opacity && l.opacity_minus.contains(p) {
         return Some(StyleCell::Opacity(-1));
     }
-    if l.opacity_plus.contains(p) {
+    if use_opacity && l.opacity_plus.contains(p) {
         return Some(StyleCell::Opacity(1));
     }
     let aligns = l.aligns.as_ref()?;
@@ -470,5 +533,91 @@ mod tests {
         let (_, hb) = panel_size(StyleKind::Box, 96);
         let (_, hl) = panel_size(StyleKind::Label, 96);
         assert!(hl > hb);
+    }
+
+    // ---- Task 113: Highlight hai chế độ
+
+    #[test]
+    fn marker_width_steps_by_two_inside_the_range() {
+        assert_eq!(step_marker_width(16.0, 1), 18.0);
+        assert_eq!(step_marker_width(16.0, -1), 14.0);
+        assert_eq!(
+            step_marker_width(MARKER_WIDTH_MIN_DIP, -1),
+            MARKER_WIDTH_MIN_DIP
+        );
+        assert_eq!(
+            step_marker_width(MARKER_WIDTH_MAX_DIP, 1),
+            MARKER_WIDTH_MAX_DIP
+        );
+        assert_eq!(clamp_marker_width(f32::NAN), MARKER_WIDTH_MIN_DIP);
+        assert_eq!(clamp_marker_width(500.0), MARKER_WIDTH_MAX_DIP);
+        assert_eq!(clamp_marker_width(-3.0), MARKER_WIDTH_MIN_DIP);
+    }
+
+    #[test]
+    fn highlight_panels_hit_modes_colors_and_only_their_own_stepper() {
+        for dpi in [96, 144, 192] {
+            for kind in [StyleKind::MarkerFree, StyleKind::MarkerRect] {
+                let l = at(kind, dpi);
+                assert_eq!(panel_size(kind, dpi), panel_size(StyleKind::Box, dpi));
+                let m = l.modes.expect("hàng chọn chế độ");
+                assert_eq!(
+                    cell_at(&l, centre(m[0])),
+                    Some(StyleCell::Mode(HighlightMode::Freehand))
+                );
+                assert_eq!(
+                    cell_at(&l, centre(m[1])),
+                    Some(StyleCell::Mode(HighlightMode::Rect))
+                );
+                for (i, c) in l.cells.iter().enumerate() {
+                    assert_eq!(cell_at(&l, centre(*c)), Some(StyleCell::Color(i)));
+                }
+                // Không có Nền/Viền/Không nền ở bảng Highlight.
+                assert_eq!((l.fill_chip.w, l.border_chip.w, l.no_fill.w), (0, 0, 0));
+                let (w, o) = (
+                    cell_at(&l, centre(l.width_plus)),
+                    cell_at(&l, centre(l.opacity_plus)),
+                );
+                if kind == StyleKind::MarkerFree {
+                    assert_eq!((w, o), (Some(StyleCell::Width(1)), None));
+                } else {
+                    assert_eq!((w, o), (None, Some(StyleCell::Opacity(1))));
+                }
+                assert!(l.aligns.is_none());
+                // Mọi ô nằm trong bảng và không chồng nhau.
+                let mut rs: Vec<Rect> = m.to_vec();
+                rs.extend(l.cells.iter().copied());
+                rs.extend([
+                    l.width_minus,
+                    l.width_value,
+                    l.width_plus,
+                    l.opacity_minus,
+                    l.opacity_value,
+                    l.opacity_plus,
+                ]);
+                for r in &rs {
+                    assert!(
+                        r.x >= l.panel.x
+                            && r.y >= l.panel.y
+                            && r.right() <= l.panel.right()
+                            && r.bottom() <= l.panel.bottom()
+                    );
+                }
+                for (i, a) in rs.iter().enumerate() {
+                    for b in &rs[i + 1..] {
+                        assert!(
+                            a.right() <= b.x
+                                || b.right() <= a.x
+                                || a.bottom() <= b.y
+                                || b.bottom() <= a.y,
+                            "{a:?} chồng {b:?}"
+                        );
+                    }
+                }
+            }
+        }
+        // Bảng Hình, Chữ không có hàng chế độ.
+        assert!(at(StyleKind::Box, 96).modes.is_none());
+        assert!(at(StyleKind::Label, 96).modes.is_none());
     }
 }

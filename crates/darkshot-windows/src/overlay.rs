@@ -6617,6 +6617,7 @@ mod tests {
                 Shape::Step { .. } => "Step",
                 Shape::Box { .. } => "Box",
                 Shape::Label { .. } => "Label",
+                Shape::Highlight { .. } => "Highlight",
             })
             .collect()
     }

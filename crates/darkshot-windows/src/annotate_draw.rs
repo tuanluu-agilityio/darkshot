@@ -287,8 +287,9 @@ pub fn draw_shapes(dc: HDC, shapes: &[Shape], ox: i32, oy: i32, clip: Rect) -> b
 /// Vẽ một hình; false khi không tạo được đối tượng GDI+ hoặc GDI+ báo lỗi.
 fn draw_one(g: *mut GpGraphics, s: &Shape, text: &mut Option<TextStyle>) -> bool {
     match s {
-        // Hình có kiểu và khối chữ chỉ do bản macOS tạo (Task 112); Windows không bao giờ gặp.
-        Shape::Box { .. } | Shape::Label { .. } => true,
+        // Hình có kiểu, khối chữ và Highlight hình chữ nhật chỉ do bản macOS tạo (Task 112, 113);
+        // Windows không bao giờ gặp.
+        Shape::Box { .. } | Shape::Label { .. } | Shape::Highlight { .. } => true,
         Shape::Pen {
             points,
             width,

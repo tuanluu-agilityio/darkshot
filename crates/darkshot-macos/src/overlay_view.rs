@@ -5,7 +5,7 @@
 
 use crate::annotate_draw;
 use crate::annotate_style::{
-    layout as style_layout, opacity_percent, StyleCell, StyleLayout, StyleTarget,
+    layout as style_layout, opacity_percent, StyleCell, StyleKind, StyleLayout, StyleTarget,
 };
 use crate::annotate_ui::{
     flyout_rect_for, flyout_tip_rect, palette_cell_rect, side_tip_rect, style_rect_for, Annot,
@@ -18,7 +18,7 @@ use crate::overlay_input::{
     bar_button_rect, bar_layout, bar_tip, hint_rect, label_rect, size_label, tip_rect, Mods,
 };
 use darkshot_core::actions::Action;
-use darkshot_core::annotate::{Align, SizeLevel, Tool, PALETTE};
+use darkshot_core::annotate::{Align, HighlightMode, SizeLevel, Tool, PALETTE};
 use darkshot_core::color_picker::size_dot;
 use darkshot_core::edit::{frame, handles};
 use darkshot_core::geometry::Rect;
@@ -1187,32 +1187,49 @@ fn draw_style_panel(
     let target = a.style_target();
     let t = scaled(MARK, dpi).max(1);
     // Hàng ô: Nền, Viền, Không nền.
-    let chips = [
-        (
-            l.fill_chip,
-            Msg::StyleFill,
-            target == StyleTarget::Fill,
-            StyleCell::Target(StyleTarget::Fill),
-        ),
-        (
-            l.border_chip,
-            Msg::StyleBorder,
-            target == StyleTarget::Border,
-            StyleCell::Target(StyleTarget::Border),
-        ),
-        (
-            l.no_fill,
-            Msg::StyleNoFill,
-            view.fill.is_none(),
-            StyleCell::NoFill,
-        ),
-    ];
+    let highlight = view.kind.is_highlight();
+    let chips = if highlight {
+        Vec::new()
+    } else {
+        vec![
+            (
+                l.fill_chip,
+                Msg::StyleFill,
+                target == StyleTarget::Fill,
+                StyleCell::Target(StyleTarget::Fill),
+            ),
+            (
+                l.border_chip,
+                Msg::StyleBorder,
+                target == StyleTarget::Border,
+                StyleCell::Target(StyleTarget::Border),
+            ),
+            (
+                l.no_fill,
+                Msg::StyleNoFill,
+                view.fill.is_none(),
+                StyleCell::NoFill,
+            ),
+        ]
+    };
     for (r, msg, on, cell) in chips {
         style_button(c, r, on, hover == Some(cell), dpi);
         text_in(r, lang::tr(msg), &small, true, dpi);
     }
+    // Bảng Highlight: hai chế độ thay hàng Nền/Viền.
+    if let (Some(modes), Some(cur)) = (l.modes, view.mode) {
+        for (m, r) in HighlightMode::ALL.iter().zip(modes) {
+            style_button(c, r, cur == *m, hover == Some(StyleCell::Mode(*m)), dpi);
+            let msg = match m {
+                HighlightMode::Freehand => Msg::HighlightFreehand,
+                HighlightMode::Rect => Msg::HighlightRect,
+            };
+            text_in(r, lang::tr(msg), &small, true, dpi);
+        }
+    }
     // 48 màu: ô đang áp cho nền hoặc viền có viền trắng rồi `ACCENT`.
     let active = match target {
+        _ if highlight => Some(view.stroke),
         StyleTarget::Fill => view.fill,
         StyleTarget::Border => Some(view.stroke),
     };
@@ -1250,6 +1267,20 @@ fn draw_style_panel(
         ),
     ];
     for (label, msg, minus, value, text, plus) in rows {
+        // Bảng Highlight chỉ hiện bộ nút tăng giảm của chế độ đang dùng.
+        let own = !matches!(
+            (view.kind, minus.1),
+            (StyleKind::MarkerFree, StyleCell::Opacity(_))
+                | (StyleKind::MarkerRect, StyleCell::Width(_))
+        );
+        if !own {
+            continue;
+        }
+        let msg = if view.kind == StyleKind::MarkerFree {
+            Msg::HighlightSize
+        } else {
+            msg
+        };
         text_in(label, lang::tr(msg), &small, false, dpi);
         for (r, cell) in [minus, plus] {
             style_button(c, r, false, hover == Some(cell), dpi);
