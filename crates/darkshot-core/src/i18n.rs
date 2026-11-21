@@ -465,6 +465,9 @@ messages! {
     OverlaySaveMac => ("Lưu vào máy (⌘S)", "Save to disk (⌘S)"),
     OverlayCopyMac => ("Chép ảnh (⌘C)", "Copy image (⌘C)"),
     OverlayCancelMac => ("Hủy (Esc)", "Cancel (Esc)"),
+    // Hoàn tác và Làm lại của thanh công cụ đánh dấu bản macOS (Task 111): phím tắt kiểu Mac.
+    ToolUndoMac => ("Hoàn tác (⌘Z)", "Undo (⌘Z)"),
+    ToolRedoMac => ("Làm lại (⇧⌘Z)", "Redo (⇧⌘Z)"),
     // Cửa sổ Tùy chọn bản macOS (Task 107).
     MacHotkeyStatusTaken => ("Đang bị ứng dụng khác dùng", "In use by another app"),
     MacHotkeyStatusUnsupported => (

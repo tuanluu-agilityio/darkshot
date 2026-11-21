@@ -5,12 +5,18 @@
 //! Không gọi Objective-C: kiểm thử chạy được trên máy không có GUI. Mọi toạ độ của mô hình là
 //! pixel của ảnh màn hình đang xét, gốc trên trái (như core).
 
+use crate::annotate_ui::{Annot, CursorKind, Down, Layout, Prefs};
 use crate::coords::{cocoa_to_top_left, pt_to_px, RectF};
 use darkshot_core::actions::Action;
-use darkshot_core::geometry::{place_toolbar, Point, Rect, Selection};
+use darkshot_core::annotate::{press_mode, PressMode, Shape};
+use darkshot_core::geometry::{place_side_toolbar, place_toolbar, Hit, Point, Rect, Selection};
 use darkshot_core::i18n::Msg;
-use darkshot_core::overlay_layout::{clamp_x, scaled, BUTTON, GAP, HANDLE_HIT};
+use darkshot_core::image::Image;
+use darkshot_core::overlay_layout::{
+    clamp_x, scaled, side_layout_for, BarItem, BarLayout, BUTTON, GAP, HANDLE_HIT, SIDE_SEP,
+};
 use darkshot_core::snap;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 /// Lưới an toàn: không có tương tác (chuột, phím) trong chừng này thì lớp phủ tự hủy, để một lỗi
@@ -20,11 +26,14 @@ pub const IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 pub const IDLE_CHECK_EVERY: Duration = Duration::from_secs(5);
 /// `kVK_Escape`.
 pub const KEY_ESCAPE: u16 = 53;
-/// Các nút của thanh hành động, trái sang phải.
+/// `kVK_Delete` (phím Xóa lùi) và `kVK_ForwardDelete`.
+pub const KEY_DELETE: u16 = 51;
+pub const KEY_FORWARD_DELETE: u16 = 117;
+/// Các nút hành động của thanh ngang, trái sang phải.
 ///
-/// Thứ tự như `bar_cells`/`BAR_CELLS` của core (Tải lên, Lưu, Chép, Hủy; Mac chưa có Hoàn tác, Ghim,
-/// Nhận dạng chữ). Nút Tải lên luôn hiện, như Windows: chưa cấu hình R2 thì bấm vào sẽ lưu ảnh
-/// và mở Tùy chọn tab R2 (`upload::route`), không ẩn nút.
+/// Thứ tự như `bar_cells`/`BAR_CELLS` của core (Tải lên, Lưu, Chép, Hủy; Mac chưa có Ghim, Nhận
+/// dạng chữ). Nút Tải lên luôn hiện, như Windows: chưa cấu hình R2 thì bấm vào sẽ lưu ảnh và mở
+/// Tùy chọn tab R2 (`upload::route`), không ẩn nút. Đứng sau Hoàn tác, Làm lại và một vạch ngăn.
 pub const MAC_BAR: [Action; 4] = [Action::Upload, Action::Save, Action::Copy, Action::Cancel];
 /// Khoảng chừa thêm (điểm ở 96 DPI) dưới mép trên cho viên nhắc, để không nằm dưới tai thỏ.
 pub const HINT_NOTCH_CLEAR: i32 = 40;
@@ -141,49 +150,89 @@ pub fn hint_rect(mon: Rect, text: (i32, i32), dpi: u32) -> Rect {
     r
 }
 
-/// Cạnh một nút của thanh hành động (pixel).
+/// Cạnh một nút của thanh ngang (pixel).
 pub fn bar_button_size(dpi: u32) -> i32 {
     scaled(BUTTON, dpi)
 }
 
-/// Thanh hành động cạnh vùng chọn `sel`, luôn nằm trong màn hình `mon`.
-pub fn bar_rect(sel: Rect, dpi: u32, mon: Rect) -> Rect {
-    let b = bar_button_size(dpi);
-    let w = b.saturating_mul(MAC_BAR.len() as i32);
-    place_toolbar(sel, (w, b), scaled(GAP, dpi), mon)
+/// Các ô của thanh ngang Mac: Hoàn tác, Làm lại | các nút hành động `MAC_BAR`; `None` là vạch ngăn.
+pub fn bar_cells() -> Vec<Option<BarItem>> {
+    let mut v = vec![Some(BarItem::Undo), Some(BarItem::Redo), None];
+    v.extend(MAC_BAR.iter().map(|a| Some(BarItem::Act(*a))));
+    v
 }
 
-/// Ô của nút thứ `i` trên thanh `bar`.
-pub fn bar_button_rect(bar: Rect, dpi: u32, i: usize) -> Rect {
-    let b = bar_button_size(dpi);
-    let i = i32::try_from(i).unwrap_or(i32::MAX);
-    Rect {
-        x: bar.x.saturating_add(b.saturating_mul(i)),
-        y: bar.y,
-        w: b,
-        h: b,
+/// Bố cục thanh ngang ở `dpi`: nút vuông `BUTTON` xếp liền, vạch ngăn rộng `SIDE_SEP`.
+pub fn bar_layout(dpi: u32) -> BarLayout {
+    let (b, sep) = (bar_button_size(dpi), scaled(SIDE_SEP, dpi));
+    let mut x = 0i32;
+    let cells = bar_cells()
+        .into_iter()
+        .map(|item| {
+            let w = if item.is_some() { b } else { sep };
+            let r = Rect { x, y: 0, w, h: b };
+            x = x.saturating_add(w);
+            (item, r)
+        })
+        .collect();
+    BarLayout {
+        size: (x, b),
+        cells,
     }
 }
 
-/// Nút của thanh `bar` dưới điểm `p`.
-pub fn bar_action_at(bar: Rect, p: Point, dpi: u32) -> Option<Action> {
-    if !bar.contains(p) {
+/// Thanh ngang cạnh vùng chọn `sel`, luôn nằm trong màn hình `mon`.
+pub fn bar_rect(sel: Rect, dpi: u32, mon: Rect) -> Rect {
+    place_toolbar(sel, bar_layout(dpi).size, scaled(GAP, dpi), mon)
+}
+
+/// Thanh dọc cạnh vùng chọn `sel`, tránh thanh ngang `bar`.
+pub fn side_rect(sel: Rect, bar: Rect, dpi: u32, mon: Rect) -> Rect {
+    let size = side_layout_for(mon, dpi).size;
+    place_side_toolbar(sel, size, scaled(GAP, dpi), mon, Some(bar))
+}
+
+/// Ô của mục `item` trên thanh `bar`.
+pub fn bar_button_rect(bar: Rect, dpi: u32, item: BarItem) -> Option<Rect> {
+    bar_layout(dpi)
+        .cells
+        .iter()
+        .find(|(i, _)| *i == Some(item))
+        .map(|(_, r)| Rect {
+            x: bar.x.saturating_add(r.x),
+            y: bar.y.saturating_add(r.y),
+            ..*r
+        })
+}
+
+/// Mục của thanh `bar` dưới điểm `p`; vạch ngăn và ngoài thanh trả `None`.
+pub fn bar_item_at(bar: Rect, p: Point, dpi: u32) -> Option<BarItem> {
+    if bar.w <= 0 || !bar.contains(p) {
         return None;
     }
-    MAC_BAR
+    bar_layout(dpi)
+        .cells
         .iter()
-        .enumerate()
-        .find(|(i, _)| bar_button_rect(bar, dpi, *i).contains(p))
-        .map(|(_, a)| *a)
+        .find(|(_, r)| {
+            Rect {
+                x: bar.x.saturating_add(r.x),
+                y: bar.y.saturating_add(r.y),
+                ..*r
+            }
+            .contains(p)
+        })
+        .and_then(|(i, _)| *i)
 }
 
-/// Gợi ý của một nút (phím tắt kiểu Mac).
-pub fn bar_tip(a: Action) -> Msg {
-    match a {
-        Action::Upload => Msg::OverlayUploadMac,
-        Action::Save => Msg::OverlaySaveMac,
-        Action::Copy => Msg::OverlayCopyMac,
-        _ => Msg::OverlayCancelMac,
+/// Gợi ý của một mục thanh ngang (phím tắt kiểu Mac).
+pub fn bar_tip(item: BarItem) -> Msg {
+    match item {
+        BarItem::Undo => Msg::ToolUndoMac,
+        BarItem::Redo => Msg::ToolRedoMac,
+        BarItem::Act(Action::Upload) => Msg::OverlayUploadMac,
+        BarItem::Act(Action::Save) => Msg::OverlaySaveMac,
+        BarItem::Act(Action::Copy) => Msg::OverlayCopyMac,
+        BarItem::Act(_) => Msg::OverlayCancelMac,
     }
 }
 
@@ -232,10 +281,12 @@ pub struct ScreenPx {
 pub struct ViewState {
     /// Vùng chọn trên màn hình này (pixel).
     pub rect: Option<Rect>,
-    /// Thanh hành động (khi có vùng chọn và không đang kéo).
+    /// Thanh ngang (khi có vùng chọn và không đang kéo).
     pub bar: Option<Rect>,
-    pub hover: Option<Action>,
-    pub pressed: Option<Action>,
+    /// Thanh dọc công cụ (cùng điều kiện).
+    pub side: Option<Rect>,
+    pub hover: Option<BarItem>,
+    pub pressed: Option<BarItem>,
     /// Viên nhắc (khi chưa có vùng chọn ở đâu cả).
     pub hint: bool,
 }
@@ -246,21 +297,55 @@ impl ViewState {
         ViewState {
             rect: None,
             bar: None,
+            side: None,
             hover: None,
             pressed: None,
             hint: false,
         }
     }
+
+    /// Cùng vùng chọn, thanh và viên nhắc (chỉ khác nút đang trỏ/nhấn): vẽ lại cục bộ là đủ.
+    pub fn same_layout(&self, other: &ViewState) -> bool {
+        self.rect == other.rect
+            && self.bar == other.bar
+            && self.side == other.side
+            && self.hint == other.hint
+    }
+}
+
+/// Kết quả của một phím: hành động (hủy, lưu...), có chuyển cho bộ gõ (`interpretKeyEvents:`) và
+/// có cần dán chữ từ clipboard vào ô chữ không.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct KeyOutcome {
+    pub action: Option<Action>,
+    pub ime: bool,
+    pub paste: bool,
+}
+
+impl KeyOutcome {
+    fn act(a: Option<Action>) -> KeyOutcome {
+        KeyOutcome {
+            action: a,
+            ..KeyOutcome::default()
+        }
+    }
 }
 
 /// Trạng thái lớp phủ trên mọi màn hình. Chỉ một màn hình "đang chọn" giữ `Selection`; bấm sang
-/// màn hình khác thì bỏ vùng cũ (vùng chọn không vắt qua màn hình, quyết định 135).
+/// màn hình khác thì bỏ vùng cũ (vùng chọn không vắt qua màn hình, quyết định 135). Công cụ đánh
+/// dấu (`Annot`) gắn với màn hình đang chọn.
 pub struct Model {
     screens: Vec<ScreenPx>,
+    /// Ảnh gốc của từng màn hình (cùng thứ tự `screens`); chia sẻ với bên vẽ, trả lại khi đóng.
+    images: Vec<Rc<Image>>,
     active: Option<usize>,
     sel: Selection,
-    pressed: Option<Action>,
-    hover: Option<Action>,
+    annot: Annot,
+    pressed: Option<BarItem>,
+    hover: Option<BarItem>,
+    shift: bool,
+    /// Esc đã chuyển cho bộ gõ khi đang soạn dở; lần Esc kế tiếp mà vẫn còn soạn thì ép đóng.
+    esc_marked: bool,
     last_input: Instant,
 }
 
@@ -271,14 +356,41 @@ const EMPTY: Rect = Rect {
     h: 0,
 };
 
+/// Ảnh giữ chỗ (không có điểm ảnh) khi chưa có ảnh thật: `redact_color` trả `None` trên ảnh không
+/// hợp lệ nên vùng Làm mờ rơi về màu xám dự phòng.
+#[cfg(test)]
+fn placeholder(s: &ScreenPx) -> Rc<Image> {
+    Rc::new(Image {
+        width: u32::try_from(s.w).unwrap_or(0),
+        height: u32::try_from(s.h).unwrap_or(0),
+        bgra: Vec::new(),
+    })
+}
+
 impl Model {
+    #[cfg(test)]
     pub fn new(screens: Vec<ScreenPx>, now: Instant) -> Model {
+        let images = screens.iter().map(placeholder).collect();
+        Model::with_images(screens, images, Prefs::default(), now)
+    }
+
+    /// Mô hình với ảnh gốc thật của từng màn hình và lựa chọn công cụ nhớ từ lần trước.
+    pub fn with_images(
+        screens: Vec<ScreenPx>,
+        images: Vec<Rc<Image>>,
+        prefs: Prefs,
+        now: Instant,
+    ) -> Model {
         Model {
             screens,
+            images,
             active: None,
             sel: Selection::new(EMPTY),
+            annot: Annot::with_prefs(prefs),
             pressed: None,
             hover: None,
+            shift: false,
+            esc_marked: false,
             last_input: now,
         }
     }
@@ -296,6 +408,14 @@ impl Model {
         self.sel.is_dragging()
     }
 
+    pub fn annot(&self) -> &Annot {
+        &self.annot
+    }
+
+    pub fn annot_mut(&mut self) -> &mut Annot {
+        &mut self.annot
+    }
+
     /// Khung pixel của màn hình `i` (gốc 0, 0).
     pub fn bounds(&self, i: usize) -> Option<Rect> {
         self.screens.get(i).map(|s| Rect {
@@ -310,7 +430,7 @@ impl Model {
         self.screens.get(i).map_or(96, |s| dpi_of(s.scale))
     }
 
-    /// Thanh hành động trên màn hình đang chọn.
+    /// Thanh ngang trên màn hình đang chọn.
     pub fn bar(&self) -> Option<(usize, Rect)> {
         if self.is_dragging() {
             return None;
@@ -321,6 +441,40 @@ impl Model {
         Some((i, bar_rect(sel, self.dpi(i), mon)))
     }
 
+    /// Thanh dọc công cụ trên màn hình đang chọn (tránh thanh ngang).
+    pub fn side(&self) -> Option<(usize, Rect)> {
+        let (i, bar) = self.bar()?;
+        let sel = self.rect()?;
+        let mon = self.bounds(i)?;
+        Some((i, side_rect(sel, bar, self.dpi(i), mon)))
+    }
+
+    /// Bố cục của ngữ cảnh một sự kiện trên màn hình đang chọn `screen`: vùng chọn, màn hình, DPI,
+    /// thanh ngang và thanh dọc (hai thanh `None` khi đang kéo vùng chọn).
+    pub fn layout(&self, screen: usize) -> Option<Layout> {
+        if self.active != Some(screen) {
+            return None;
+        }
+        let sel = self.rect()?;
+        let mon = self.bounds(screen)?;
+        Some(Layout {
+            sel,
+            mon,
+            dpi: self.dpi(screen),
+            bar: self.bar().map(|(_, b)| b),
+            side: self.side().map(|(_, s)| s),
+        })
+    }
+
+    /// Vùng thanh dọc, thanh ngang và bảng cần vẽ lại khi bố cục của chúng đổi (rê chuột, chọn
+    /// công cụ, mở bảng).
+    pub fn chrome_rects(&self, screen: usize) -> Vec<Rect> {
+        let (Some(lay), Some(img)) = (self.layout(screen), self.images.get(screen)) else {
+            return Vec::new();
+        };
+        self.annot.chrome_rects(&lay.env(img))
+    }
+
     pub fn view_state(&self, i: usize) -> ViewState {
         if i >= self.screens.len() {
             return ViewState::default_hidden();
@@ -329,6 +483,7 @@ impl Model {
         ViewState {
             rect: if mine { self.rect() } else { None },
             bar: self.bar().filter(|(s, _)| *s == i).map(|(_, b)| b),
+            side: self.side().filter(|(s, _)| *s == i).map(|(_, b)| b),
             hover: if mine { self.hover } else { None },
             pressed: if mine { self.pressed } else { None },
             hint: self.rect().is_none(),
@@ -338,12 +493,48 @@ impl Model {
     /// Nhấn chuột trái ở `p` (pixel của màn hình `screen`).
     pub fn press(&mut self, screen: usize, p: Point, now: Instant) {
         self.last_input = now;
+        // Một cú nhấn mới khi nét hay cử chỉ vẫn đang giữ nghĩa là đã mất `mouseUp` (nhả ngoài cửa
+        // sổ, mất key): chốt cái cũ trước, để lớp phủ không bao giờ kẹt ở trạng thái "đang kéo".
+        if self.annot.capturing() || self.annot.press_pending() {
+            self.lost_capture(now);
+        }
         let Some(bounds) = self.bounds(screen) else {
             return;
         };
-        if let Some((s, bar)) = self.bar() {
-            if s == screen && bar.contains(p) {
-                self.pressed = bar_action_at(bar, p, self.dpi(s));
+        if self.active == Some(screen) && self.rect().is_some() {
+            // Vùng công cụ: chữ, bảng, thanh, hình, rồi mới tới vùng chọn (`press_mode`).
+            let rad = self
+                .screens
+                .get(screen)
+                .map_or(1, |s| handle_radius(s.scale));
+            let hit = self.sel.hit_test(p, rad);
+            let Some(lay) = self.layout(screen) else {
+                return;
+            };
+            let Some(img) = self.images.get(screen) else {
+                return;
+            };
+            let env = lay.env(img);
+            match self.annot.down(&env, p, hit) {
+                Down::Bar(item) => {
+                    self.pressed = Some(item);
+                    return;
+                }
+                Down::Handled | Down::Capture => {
+                    self.pressed = None;
+                    return;
+                }
+                Down::Selection => {}
+            }
+        } else if self.active.is_some_and(|a| a != screen) {
+            // Màn hình khác: hình đã vẽ ở màn hình cũ giữ vùng cũ (như `press_mode`: ngoài vùng
+            // khi đã có hình, hoặc đang có công cụ, thì bỏ qua); không thì chuyển vùng chọn.
+            let dpi = self.active.map_or(96, |a| self.dpi(a));
+            self.annot.close_text(true);
+            let _ = dpi;
+            if press_mode(self.annot.tool(), self.annot.has_marks(), Hit::Outside)
+                != PressMode::Selection
+            {
                 return;
             }
         }
@@ -352,6 +543,7 @@ impl Model {
             self.active = Some(screen);
             self.sel = Selection::new(bounds);
             self.hover = None;
+            self.annot = Annot::with_prefs(self.annot.prefs());
         }
         let rad = self
             .screens
@@ -366,15 +558,58 @@ impl Model {
         if self.pressed.is_some() {
             return;
         }
-        self.sel.drag_to(p);
+        if self.annot.capturing() {
+            let shift = self.shift;
+            if let Some(screen) = self.active {
+                if let Some(lay) = self.layout(screen) {
+                    if let Some(img) = self.images.get(screen) {
+                        let env = lay.env(img);
+                        self.annot.moved(&env, p, shift);
+                    }
+                }
+            }
+            return;
+        }
+        if self.annot.press_pending() {
+            return;
+        }
+        if self.sel.is_dragging() {
+            self.sel.drag_to(p);
+        }
     }
 
-    /// Nhả chuột ở `p`; trả hành động khi nhấn và nhả trên cùng một nút của thanh.
+    /// Nhả chuột ở `p`; trả hành động khi nhấn và nhả trên cùng một nút của thanh ngang.
     pub fn release(&mut self, p: Point, now: Instant) -> Option<Action> {
         self.last_input = now;
-        if let Some(a) = self.pressed.take() {
+        if let Some(item) = self.pressed.take() {
             let (s, bar) = self.bar()?;
-            return (bar_action_at(bar, p, self.dpi(s)) == Some(a)).then_some(a);
+            let dpi = self.dpi(s);
+            if bar_item_at(bar, p, dpi) != Some(item) {
+                return None;
+            }
+            return match item {
+                BarItem::Undo => {
+                    self.annot.undo(dpi);
+                    None
+                }
+                BarItem::Redo => {
+                    self.annot.redo(dpi);
+                    None
+                }
+                BarItem::Act(a) => Some(a),
+            };
+        }
+        if self.annot.capturing() || self.annot.press_pending() {
+            let shift = self.shift;
+            if let Some(screen) = self.active {
+                if let Some(lay) = self.layout(screen) {
+                    if let Some(img) = self.images.get(screen) {
+                        let env = lay.env(img);
+                        self.annot.up(&env, p, shift);
+                    }
+                }
+            }
+            return None;
         }
         if self.sel.is_dragging() {
             self.sel.drag_to(p);
@@ -386,33 +621,191 @@ impl Model {
     /// Chuột di chuyển (không nhấn) trên màn hình `screen`.
     pub fn hover(&mut self, screen: usize, p: Point, now: Instant) {
         self.last_input = now;
-        self.hover = self
-            .bar()
-            .filter(|(s, _)| *s == screen)
-            .and_then(|(s, bar)| bar_action_at(bar, p, self.dpi(s)));
+        let bar = self.bar().filter(|(s, _)| *s == screen);
+        self.hover = bar.and_then(|(s, bar)| bar_item_at(bar, p, self.dpi(s)));
+        match (self.layout(screen), self.images.get(screen)) {
+            (Some(lay), Some(img)) => self.annot.hover(&lay.env(img), p),
+            // Chuột ở màn hình khác (hoặc chưa có vùng chọn): không mục nào được trỏ.
+            _ => self.annot.clear_hover(),
+        }
     }
 
-    /// Một phím xuống; trả hành động cần làm.
+    /// Con trỏ chuột ở `p` trên màn hình `screen` (không có vùng chọn: chữ thập chọn vùng).
+    pub fn cursor_at(&self, screen: usize, p: Point) -> CursorKind {
+        let Some(lay) = self.layout(screen) else {
+            return CursorKind::Cross;
+        };
+        let Some(img) = self.images.get(screen) else {
+            return CursorKind::Cross;
+        };
+        let env = lay.env(img);
+        let rad = self
+            .screens
+            .get(screen)
+            .map_or(1, |s| handle_radius(s.scale));
+        let hit = self.sel.hit_test(p, rad);
+        self.annot.cursor_at(&env, p, hit)
+    }
+
+    /// Shift đang giữ (đọc từ sự kiện chuột/phím) để kéo nét và hình có ràng buộc.
+    pub fn set_shift(&mut self, shift: bool) {
+        self.shift = shift;
+    }
+
+    /// Nhấn hoặc nhả Shift: cập nhật nét hay hình đang kéo ngay theo điểm chuột cuối.
+    pub fn shift_changed(&mut self, shift: bool, now: Instant) {
+        self.last_input = now;
+        self.shift = shift;
+        let Some(screen) = self.active else {
+            return;
+        };
+        if let Some(lay) = self.layout(screen) {
+            if let Some(img) = self.images.get(screen) {
+                let env = lay.env(img);
+                self.annot.shift_changed(&env, shift);
+            }
+        }
+    }
+
+    /// Mất chuột giữa chừng (cửa sổ mất key): chốt nét, cử chỉ và kéo vùng đang dở.
+    pub fn lost_capture(&mut self, now: Instant) {
+        self.last_input = now;
+        self.pressed = None;
+        if let Some(screen) = self.active {
+            if let Some(lay) = self.layout(screen) {
+                if let Some(img) = self.images.get(screen) {
+                    let env = lay.env(img);
+                    self.annot.lost_capture(&env);
+                }
+            }
+        }
+        if self.sel.is_dragging() {
+            self.sel.release();
+        }
+    }
+
+    /// Một phím xuống; `repeat`: lần lặp của phím đang giữ. `Esc` luôn thoát được: bỏ lần lượt
+    /// bảng, ô chữ, cử chỉ, hình đang chọn rồi hủy lớp phủ (mỗi lần `Esc` bỏ đúng một lớp).
     pub fn key(
         &mut self,
         key_code: u16,
         chars: Option<&str>,
         mods: Mods,
+        repeat: bool,
         now: Instant,
-    ) -> Option<Action> {
+    ) -> KeyOutcome {
         self.last_input = now;
-        key_action(
-            key_code,
-            chars,
-            mods,
-            self.rect().is_some(),
-            self.is_dragging(),
-        )
+        let esc = key_code == KEY_ESCAPE || chars == Some("\u{1b}");
+        let has_sel = self.rect().is_some();
+        let dragging = self.is_dragging();
+        let dpi = self.active.map_or(96, |a| self.dpi(a));
+        if esc {
+            if dragging {
+                return KeyOutcome::act(Some(Action::Cancel));
+            }
+            if self.annot.text_composing() {
+                // Bộ gõ giữ chuỗi soạn dở: Esc của bộ gõ hủy chuỗi. Nếu lần Esc kế tiếp mà vẫn
+                // còn soạn (bộ gõ không trả Esc) thì ép đóng ô chữ, không bao giờ kẹt.
+                if self.esc_marked {
+                    self.esc_marked = false;
+                    self.annot.force_close_text();
+                    return KeyOutcome::default();
+                }
+                self.esc_marked = true;
+                return KeyOutcome {
+                    ime: true,
+                    ..KeyOutcome::default()
+                };
+            }
+            self.esc_marked = false;
+            if has_sel && self.annot.escape(dpi) {
+                return KeyOutcome::default();
+            }
+            return KeyOutcome::act(Some(Action::Cancel));
+        }
+        self.esc_marked = false;
+        if !has_sel || dragging || self.annot.capturing() {
+            return KeyOutcome::default();
+        }
+        let cmd_only = mods.cmd && !mods.ctrl && !mods.opt;
+        let lower = chars
+            .and_then(|c| c.chars().next())
+            .map(|c| c.to_ascii_lowercase());
+        if self.annot.text().is_some() {
+            if !mods.cmd {
+                return KeyOutcome {
+                    ime: true,
+                    ..KeyOutcome::default()
+                };
+            }
+            if cmd_only {
+                match lower {
+                    Some('z') if !mods.shift => self.annot.undo(dpi),
+                    Some('v') => {
+                        return KeyOutcome {
+                            paste: true,
+                            ..KeyOutcome::default()
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            return KeyOutcome::act(key_action(key_code, chars, mods, has_sel, dragging));
+        }
+        if cmd_only {
+            match lower {
+                Some('z') => {
+                    if mods.shift {
+                        self.annot.redo(dpi);
+                    } else {
+                        self.annot.undo(dpi);
+                    }
+                    return KeyOutcome::default();
+                }
+                _ => return KeyOutcome::act(key_action(key_code, chars, mods, has_sel, dragging)),
+            }
+        }
+        if mods.cmd || mods.ctrl || mods.opt {
+            return KeyOutcome::act(key_action(key_code, chars, mods, has_sel, dragging));
+        }
+        // Phím trơn: Xóa bỏ hình đang chọn; chữ cái chọn công cụ, `[` `]` đổi cỡ.
+        if key_code == KEY_DELETE || key_code == KEY_FORWARD_DELETE {
+            self.annot.delete_selected(dpi);
+            return KeyOutcome::default();
+        }
+        if !repeat {
+            self.annot.tool_key(chars, dpi);
+        }
+        KeyOutcome::default()
+    }
+
+    /// Chốt mọi thứ đang dở và lấy hình đánh dấu để đốt vào ảnh (ô chữ vào CUỐI sổ, trên cùng).
+    pub fn take_shapes(&mut self) -> Vec<Shape> {
+        let dpi = self.active.map_or(96, |a| self.dpi(a));
+        self.annot.take_shapes(dpi)
+    }
+
+    /// Lựa chọn công cụ để nhớ cho lần mở sau.
+    pub fn prefs(&self) -> Prefs {
+        self.annot.prefs()
+    }
+
+    /// Lấy ảnh gốc của màn hình `i` ra khỏi mô hình (gọi sau khi đã bỏ các bên chia sẻ khác).
+    pub fn take_image(self, i: usize) -> Option<Image> {
+        self.images
+            .into_iter()
+            .nth(i)
+            .map(|rc| Rc::try_unwrap(rc).unwrap_or_else(|shared| (*shared).clone()))
     }
 
     /// Đã quá `IDLE_TIMEOUT` kể từ tương tác cuối.
     pub fn idle_expired(&self, now: Instant) -> bool {
         now.saturating_duration_since(self.last_input) >= IDLE_TIMEOUT
+    }
+
+    /// Ghi nhận một tương tác không đi qua hàm trên (chữ từ bộ gõ, dán, nháy không tính).
+    pub fn touch(&mut self, now: Instant) {
+        self.last_input = now;
     }
 }
 
@@ -447,6 +840,17 @@ mod tests {
             height: h,
             bgra,
         }
+    }
+
+    /// Hành động của một phím qua mô hình (bỏ cờ bộ gõ, dán).
+    fn act(
+        m: &mut Model,
+        code: u16,
+        chars: Option<&str>,
+        mods: Mods,
+        now: Instant,
+    ) -> Option<Action> {
+        m.key(code, chars, mods, false, now).action
     }
 
     const RETINA: ScreenPx = ScreenPx {
@@ -654,12 +1058,19 @@ mod tests {
     }
 
     #[test]
-    fn bar_is_four_buttons_from_core_constants() {
+    fn bar_is_undo_redo_separator_then_four_actions() {
         assert_eq!(bar_button_size(96), BUTTON);
         assert_eq!(bar_button_size(192), BUTTON * 2);
+        // Hoàn tác, Làm lại, vạch ngăn, rồi bốn nút hành động.
+        let cells = bar_cells();
+        assert_eq!(cells.len(), 7);
+        assert_eq!(cells[0], Some(BarItem::Undo));
+        assert_eq!(cells[1], Some(BarItem::Redo));
+        assert_eq!(cells[2], None);
         let mon = px(0, 0, 3024, 1964);
         let bar = bar_rect(px(100, 100, 400, 200), 192, mon);
-        assert_eq!((bar.w, bar.h), (4 * BUTTON * 2, BUTTON * 2));
+        let sep = scaled(SIDE_SEP, 192);
+        assert_eq!((bar.w, bar.h), (6 * BUTTON * 2 + sep, BUTTON * 2));
         // Đủ chỗ: dưới vùng, cách GAP, mép phải thẳng mép phải vùng.
         assert_eq!(bar.y, 300 + GAP * 2);
         assert_eq!(bar.right(), 500);
@@ -670,7 +1081,7 @@ mod tests {
         for (scale, mon) in [
             (2.0, px(0, 0, 3024, 1964)),
             (1.0, px(0, 0, 1920, 1080)),
-            (1.0, px(0, 0, 200, 150)),
+            (1.0, px(0, 0, 260, 150)),
         ] {
             let dpi = dpi_of(scale);
             let (w, h) = (mon.w, mon.h);
@@ -705,26 +1116,40 @@ mod tests {
     fn bar_hit_test() {
         let dpi = 192;
         let b = bar_button_size(dpi);
-        let bar = px(1000, 500, 4 * b, b);
-        for (i, a) in MAC_BAR.iter().enumerate() {
-            let cell = bar_button_rect(bar, dpi, i);
-            assert_eq!(cell, px(1000 + i as i32 * b, 500, b, b));
+        let l = bar_layout(dpi);
+        let bar = px(1000, 500, l.size.0, b);
+        let items: Vec<BarItem> = l.cells.iter().filter_map(|(i, _)| *i).collect();
+        assert_eq!(items.len(), 6);
+        for it in &items {
+            let cell = bar_button_rect(bar, dpi, *it).unwrap();
+            assert_eq!((cell.w, cell.h), (b, b));
             assert_eq!(
-                bar_action_at(bar, pt(cell.x + b / 2, cell.y + b / 2), dpi),
-                Some(*a)
+                bar_item_at(bar, pt(cell.x + b / 2, cell.y + b / 2), dpi),
+                Some(*it)
             );
-            assert_eq!(bar_action_at(bar, pt(cell.x, cell.y), dpi), Some(*a));
+            assert_eq!(bar_item_at(bar, pt(cell.x, cell.y), dpi), Some(*it));
+            assert_eq!(
+                bar_item_at(bar, pt(cell.right() - 1, cell.bottom() - 1), dpi),
+                Some(*it)
+            );
         }
-        assert_eq!(bar_action_at(bar, pt(999, 510), dpi), None);
-        assert_eq!(bar_action_at(bar, pt(1000 + 4 * b, 510), dpi), None);
-        assert_eq!(bar_action_at(bar, pt(1010, 500 + b), dpi), None);
+        // Vạch ngăn không phải nút; ngoài thanh không có nút.
+        let undo = bar_button_rect(bar, dpi, BarItem::Undo).unwrap();
+        let redo = bar_button_rect(bar, dpi, BarItem::Redo).unwrap();
+        let first_act = bar_button_rect(bar, dpi, BarItem::Act(Action::Upload)).unwrap();
+        assert_eq!(redo.x, undo.x + b);
+        assert!(first_act.x > redo.right());
+        assert_eq!(bar_item_at(bar, pt(redo.right() + 1, 510), dpi), None);
+        assert_eq!(bar_item_at(bar, pt(999, 510), dpi), None);
+        assert_eq!(bar_item_at(bar, pt(bar.right(), 510), dpi), None);
+        assert_eq!(bar_item_at(bar, pt(1010, 500 + b), dpi), None);
     }
 
     #[test]
     fn bar_order_follows_the_core_bar_cells() {
-        use darkshot_core::overlay_layout::{bar_cells, BarItem};
+        use darkshot_core::overlay_layout::bar_cells as core_cells;
         // Các nút Mac có, theo thứ tự của thanh ngang Windows (bỏ ô Mac chưa làm).
-        let from_core: Vec<Action> = bar_cells(false)
+        let from_core: Vec<Action> = core_cells(false)
             .into_iter()
             .flatten()
             .filter_map(|c| match c {
@@ -737,29 +1162,42 @@ mod tests {
             MAC_BAR,
             [Action::Upload, Action::Save, Action::Copy, Action::Cancel]
         );
+        // Hoàn tác và Làm lại đứng đầu, như thanh ngang của Windows.
+        assert_eq!(
+            &core_cells(false)[..3],
+            &[Some(BarItem::Undo), Some(BarItem::Redo), None]
+        );
+        assert_eq!(&bar_cells()[..3], &core_cells(false)[..3]);
     }
 
     #[test]
-    fn four_button_hit_test_at_retina_and_at_the_edges() {
+    fn bar_hit_test_at_retina_and_at_the_edges() {
         for dpi in [96, 144, 192, 288] {
+            let l = bar_layout(dpi);
             let b = bar_button_size(dpi);
-            let bar = px(40, 40, 4 * b, b);
-            for (i, a) in MAC_BAR.iter().enumerate() {
-                let c = bar_button_rect(bar, dpi, i);
-                // Pixel đầu và cuối của ô thuộc ô này; pixel liền kề thuộc ô bên cạnh hoặc ngoài thanh.
-                assert_eq!(bar_action_at(bar, pt(c.x, c.y), dpi), Some(*a));
+            let bar = px(40, 40, l.size.0, b);
+            let items: Vec<BarItem> = l.cells.iter().filter_map(|(i, _)| *i).collect();
+            for it in &items {
+                let c = bar_button_rect(bar, dpi, *it).unwrap();
+                // Pixel đầu và cuối của ô thuộc ô này.
+                assert_eq!(bar_item_at(bar, pt(c.x, c.y), dpi), Some(*it), "dpi {dpi}");
                 assert_eq!(
-                    bar_action_at(bar, pt(c.right() - 1, c.bottom() - 1), dpi),
-                    Some(*a)
+                    bar_item_at(bar, pt(c.right() - 1, c.bottom() - 1), dpi),
+                    Some(*it),
+                    "dpi {dpi}"
                 );
-                let next = MAC_BAR.get(i + 1).copied();
-                assert_eq!(bar_action_at(bar, pt(c.right(), c.y), dpi), next);
             }
-            assert_eq!(bar_action_at(bar, pt(bar.x - 1, bar.y), dpi), None);
-            assert_eq!(bar_action_at(bar, pt(bar.right(), bar.y), dpi), None);
-            assert_eq!(bar_action_at(bar, pt(bar.x, bar.bottom()), dpi), None);
+            // Hai nút hành động liền nhau: pixel liền kề thuộc ô bên cạnh.
+            let up = bar_button_rect(bar, dpi, BarItem::Act(Action::Upload)).unwrap();
+            assert_eq!(
+                bar_item_at(bar, pt(up.right(), up.y), dpi),
+                Some(BarItem::Act(Action::Save))
+            );
+            assert_eq!(bar_item_at(bar, pt(bar.x - 1, bar.y), dpi), None);
+            assert_eq!(bar_item_at(bar, pt(bar.right(), bar.y), dpi), None);
+            assert_eq!(bar_item_at(bar, pt(bar.x, bar.bottom()), dpi), None);
         }
-        // Vùng sát mép màn hình: thanh vẫn đủ bốn nút trong màn hình và mỗi nút bấm được.
+        // Vùng sát mép màn hình: thanh vẫn đủ nút trong màn hình và mỗi nút bấm được.
         let mon = px(0, 0, 3024, 1964);
         for sel in [
             px(0, 0, 30, 30),
@@ -769,13 +1207,14 @@ mod tests {
         ] {
             let bar = bar_rect(sel, 192, mon);
             assert!(bar.x >= 0 && bar.right() <= mon.right() && bar.bottom() <= mon.bottom());
-            assert_eq!(bar.w, 4 * bar_button_size(192));
-            for (i, a) in MAC_BAR.iter().enumerate() {
-                let c = bar_button_rect(bar, 192, i);
+            assert_eq!(bar.w, bar_layout(192).size.0);
+            for (it, _) in bar_layout(192).cells.iter().filter(|(i, _)| i.is_some()) {
+                let it = it.unwrap();
+                let c = bar_button_rect(bar, 192, it).unwrap();
                 assert_eq!(
-                    bar_action_at(bar, pt(c.x + c.w / 2, c.y + c.h / 2), 192),
-                    Some(*a),
-                    "{sel:?} nút {i}"
+                    bar_item_at(bar, pt(c.x + c.w / 2, c.y + c.h / 2), 192),
+                    Some(it),
+                    "{sel:?} {it:?}"
                 );
             }
         }
@@ -783,20 +1222,26 @@ mod tests {
 
     #[test]
     fn mac_tips_use_mac_shortcuts() {
-        assert_eq!(bar_tip(Action::Upload), Msg::OverlayUploadMac);
-        assert_eq!(bar_tip(Action::Save), Msg::OverlaySaveMac);
-        assert_eq!(bar_tip(Action::Copy), Msg::OverlayCopyMac);
-        assert_eq!(bar_tip(Action::Cancel), Msg::OverlayCancelMac);
+        assert_eq!(bar_tip(BarItem::Act(Action::Upload)), Msg::OverlayUploadMac);
+        assert_eq!(bar_tip(BarItem::Act(Action::Save)), Msg::OverlaySaveMac);
+        assert_eq!(bar_tip(BarItem::Act(Action::Copy)), Msg::OverlayCopyMac);
+        assert_eq!(bar_tip(BarItem::Act(Action::Cancel)), Msg::OverlayCancelMac);
+        assert_eq!(bar_tip(BarItem::Undo), Msg::ToolUndoMac);
+        assert_eq!(bar_tip(BarItem::Redo), Msg::ToolRedoMac);
         for l in Lang::ALL {
             assert!(t(l, Msg::OverlayUploadMac).contains("(\u{2318}D)"));
             assert!(t(l, Msg::OverlaySaveMac).contains("(\u{2318}S)"));
             assert!(t(l, Msg::OverlayCopyMac).contains("(\u{2318}C)"));
             assert!(t(l, Msg::OverlayCancelMac).contains("(Esc)"));
+            assert!(t(l, Msg::ToolUndoMac).contains("(\u{2318}Z)"));
+            assert!(t(l, Msg::ToolRedoMac).contains("(\u{21e7}\u{2318}Z)"));
             for m in [
                 Msg::OverlayUploadMac,
                 Msg::OverlaySaveMac,
                 Msg::OverlayCopyMac,
                 Msg::OverlayCancelMac,
+                Msg::ToolUndoMac,
+                Msg::ToolRedoMac,
             ] {
                 assert!(!t(l, m).contains("Ctrl"), "{m:?}");
             }
@@ -939,14 +1384,20 @@ mod tests {
         m.drag(pt(600, 400), t0);
         m.release(pt(600, 400), t0);
         assert_eq!(m.rect(), Some(px(100, 100, 500, 300)));
-        // 1x: cùng khoảng cách ngoài bán kính 6 px → bắt đầu vùng mới.
+        // 1x: cùng khoảng cách ngoài bán kính 6 px → bắt đầu vùng mới (điểm bấm chọn xa hai thanh
+        // công cụ, nằm dưới và bên phải vùng chọn).
         m.press(1, pt(100, 100), t0);
         m.drag(pt(500, 300), t0);
         m.release(pt(500, 300), t0);
-        m.press(1, pt(510, 310), t0);
-        m.drag(pt(600, 400), t0);
-        m.release(pt(600, 400), t0);
-        assert_eq!(m.rect(), Some(px(510, 310, 90, 90)));
+        m.press(1, pt(90, 90), t0);
+        m.drag(pt(200, 150), t0);
+        m.release(pt(200, 150), t0);
+        assert_eq!(m.rect(), Some(px(90, 90, 110, 60)));
+        // Cùng 1x nhưng sát góc (trong bán kính): đổi cỡ vùng cũ, không tạo vùng mới.
+        m.press(1, pt(205, 155), t0);
+        m.drag(pt(300, 200), t0);
+        m.release(pt(300, 200), t0);
+        assert_eq!(m.rect(), Some(px(90, 90, 210, 110)));
     }
 
     #[test]
@@ -974,24 +1425,32 @@ mod tests {
         let (screen, bar) = m.bar().unwrap();
         assert_eq!(screen, 0);
         let dpi = m.dpi(0);
-        let center = |i: usize| {
-            let c = bar_button_rect(bar, dpi, i);
+        let center = |it: BarItem| {
+            let c = bar_button_rect(bar, dpi, it).unwrap();
             pt(c.x + c.w / 2, c.y + c.h / 2)
         };
-        for (i, a) in MAC_BAR.iter().enumerate() {
-            m.press(0, center(i), t0);
-            assert_eq!(m.view_state(0).pressed, Some(*a));
+        for a in MAC_BAR {
+            let it = BarItem::Act(a);
+            m.press(0, center(it), t0);
+            assert_eq!(m.view_state(0).pressed, Some(it));
             // Nhấn nút không đổi vùng chọn.
             assert_eq!(m.rect(), Some(px(100, 100, 400, 200)));
             m.drag(pt(0, 0), t0);
             assert_eq!(m.rect(), Some(px(100, 100, 400, 200)));
-            assert_eq!(m.release(center(i), t0), Some(*a));
+            assert_eq!(m.release(center(it), t0), Some(a));
             assert_eq!(m.view_state(0).pressed, None);
         }
+        // Hoàn tác và Làm lại không đóng lớp phủ (không trả hành động).
+        for it in [BarItem::Undo, BarItem::Redo] {
+            m.press(0, center(it), t0);
+            assert_eq!(m.view_state(0).pressed, Some(it));
+            assert_eq!(m.release(center(it), t0), None);
+        }
         // Nhả ở nút khác hoặc ngoài thanh: không làm gì.
-        m.press(0, center(0), t0);
-        assert_eq!(m.release(center(1), t0), None);
-        m.press(0, center(1), t0);
+        let (save, copy) = (BarItem::Act(Action::Save), BarItem::Act(Action::Copy));
+        m.press(0, center(save), t0);
+        assert_eq!(m.release(center(copy), t0), None);
+        m.press(0, center(copy), t0);
         assert_eq!(m.release(pt(5, 5), t0), None);
         assert_eq!(m.rect(), Some(px(100, 100, 400, 200)));
     }
@@ -1004,9 +1463,9 @@ mod tests {
         m.drag(pt(500, 300), t0);
         m.release(pt(500, 300), t0);
         let (_, bar) = m.bar().unwrap();
-        let c = bar_button_rect(bar, m.dpi(0), 2);
+        let c = bar_button_rect(bar, m.dpi(0), BarItem::Act(Action::Copy)).unwrap();
         m.hover(0, pt(c.x + 1, c.y + 1), t0);
-        assert_eq!(m.view_state(0).hover, Some(Action::Copy));
+        assert_eq!(m.view_state(0).hover, Some(BarItem::Act(Action::Copy)));
         // Trỏ ở màn hình khác: không có nút nào được trỏ.
         m.hover(1, pt(c.x + 1, c.y + 1), t0);
         assert_eq!(m.view_state(0).hover, None);
@@ -1041,22 +1500,22 @@ mod tests {
             ..Mods::default()
         };
         // Chưa có vùng: ⌘S không làm gì, Esc hủy.
-        assert_eq!(m.key(1, Some("s"), cmd, t0), None);
+        assert_eq!(act(&mut m, 1, Some("s"), cmd, t0), None);
         assert_eq!(
-            m.key(KEY_ESCAPE, None, Mods::default(), t0),
+            act(&mut m, KEY_ESCAPE, None, Mods::default(), t0),
             Some(Action::Cancel)
         );
         m.press(0, pt(100, 100), t0);
         m.drag(pt(500, 300), t0);
         // Đang kéo: ⌘C không làm gì, Esc vẫn hủy.
-        assert_eq!(m.key(8, Some("c"), cmd, t0), None);
+        assert_eq!(act(&mut m, 8, Some("c"), cmd, t0), None);
         assert_eq!(
-            m.key(KEY_ESCAPE, None, Mods::default(), t0),
+            act(&mut m, KEY_ESCAPE, None, Mods::default(), t0),
             Some(Action::Cancel)
         );
         m.release(pt(500, 300), t0);
-        assert_eq!(m.key(8, Some("c"), cmd, t0), Some(Action::Copy));
-        assert_eq!(m.key(1, Some("s"), cmd, t0), Some(Action::Save));
+        assert_eq!(act(&mut m, 8, Some("c"), cmd, t0), Some(Action::Copy));
+        assert_eq!(act(&mut m, 1, Some("s"), cmd, t0), Some(Action::Save));
     }
 
     #[test]
@@ -1096,10 +1555,416 @@ mod tests {
         m.release(pt(50, 50), t4);
         assert!(!m.idle_expired(t4 + Duration::from_secs(119)));
         let t5 = t4 + Duration::from_secs(100);
-        m.key(0, Some("a"), Mods::default(), t5);
+        m.key(0, Some("a"), Mods::default(), false, t5);
         assert!(!m.idle_expired(t5 + Duration::from_secs(119)));
         assert!(m.idle_expired(t5 + IDLE_TIMEOUT));
         // Đồng hồ lùi (không thể với `Instant`, nhưng phòng hờ): không tính là hết hạn.
         assert!(!m.idle_expired(t0));
+    }
+
+    // ------------------------------------------------------------ công cụ đánh dấu qua mô hình
+
+    use crate::annotate_ui::{Flyout, TextCmd};
+    use darkshot_core::annotate::{Shape, Tool};
+    use darkshot_core::overlay_layout::{side_index, side_item_rect, SideItem};
+
+    /// Mô hình hai màn hình với vùng chọn (100, 100, 400, 200) trên màn hình Retina.
+    fn selected_model(t0: Instant) -> Model {
+        let mut m = two_screens(t0);
+        m.press(0, pt(100, 100), t0);
+        m.drag(pt(500, 300), t0);
+        m.release(pt(500, 300), t0);
+        assert_eq!(m.rect(), Some(px(100, 100, 400, 200)));
+        m
+    }
+
+    fn click(m: &mut Model, p: Point, t0: Instant) {
+        m.press(0, p, t0);
+        m.release(p, t0);
+    }
+
+    fn click_side(m: &mut Model, item: SideItem, t0: Instant) {
+        let (_, side) = m.side().unwrap();
+        let l = side_layout_for(m.bounds(0).unwrap(), m.dpi(0));
+        let r = side_item_rect(side, &l, side_index(item)).unwrap();
+        click(m, pt(r.x + r.w / 2, r.y + r.h / 2), t0);
+    }
+
+    /// Bật công cụ `t` (hình Đường, Mũi tên, Khung, Elip nằm trong bảng Hình nên chọn thẳng).
+    fn use_tool(m: &mut Model, t: Tool) {
+        let dpi = m.dpi(0);
+        m.annot_mut().use_tool(t, dpi);
+    }
+
+    fn draw(m: &mut Model, from: Point, to: Point, t0: Instant) {
+        m.press(0, from, t0);
+        m.drag(to, t0);
+        m.release(to, t0);
+    }
+
+    fn key(m: &mut Model, code: u16, chars: &str, mods: Mods, t0: Instant) -> KeyOutcome {
+        m.key(code, Some(chars), mods, false, t0)
+    }
+
+    const CMD: Mods = Mods {
+        cmd: true,
+        ctrl: false,
+        opt: false,
+        shift: false,
+    };
+    const CMD_SHIFT: Mods = Mods {
+        cmd: true,
+        ctrl: false,
+        opt: false,
+        shift: true,
+    };
+    const NONE: Mods = Mods {
+        cmd: false,
+        ctrl: false,
+        opt: false,
+        shift: false,
+    };
+
+    #[test]
+    fn side_bar_appears_with_the_bar_and_does_not_cover_it() {
+        let t0 = Instant::now();
+        let m = selected_model(t0);
+        let (_, bar) = m.bar().unwrap();
+        let (_, side) = m.side().unwrap();
+        assert!(m.view_state(0).side.is_some());
+        let overlap = side.x < bar.right()
+            && bar.x < side.right()
+            && side.y < bar.bottom()
+            && bar.y < side.bottom();
+        assert!(!overlap, "{bar:?} {side:?}");
+        // Màn hình khác và lúc đang kéo vùng: không có thanh dọc.
+        assert_eq!(m.view_state(1).side, None);
+        let mut m = two_screens(t0);
+        m.press(0, pt(100, 100), t0);
+        m.drag(pt(500, 300), t0);
+        assert_eq!(m.view_state(0).side, None);
+    }
+
+    #[test]
+    fn draw_with_a_tool_then_undo_and_redo_with_keys_and_buttons() {
+        let t0 = Instant::now();
+        let mut m = selected_model(t0);
+        use_tool(&mut m, Tool::Rect);
+        assert_eq!(m.annot().tool(), Some(Tool::Rect));
+        draw(&mut m, pt(200, 150), pt(400, 250), t0);
+        draw(&mut m, pt(220, 160), pt(420, 260), t0);
+        assert_eq!(m.annot().shapes().len(), 2);
+        // Vùng chọn không đổi khi vẽ.
+        assert_eq!(m.rect(), Some(px(100, 100, 400, 200)));
+        // ⌘Z và ⇧⌘Z.
+        assert_eq!(key(&mut m, 6, "z", CMD, t0), KeyOutcome::default());
+        assert_eq!(m.annot().shapes().len(), 1);
+        key(&mut m, 6, "z", CMD_SHIFT, t0);
+        assert_eq!(m.annot().shapes().len(), 2);
+        // Nút Hoàn tác / Làm lại của thanh ngang.
+        let (_, bar) = m.bar().unwrap();
+        for (item, want) in [(BarItem::Undo, 1), (BarItem::Undo, 0), (BarItem::Redo, 1)] {
+            let c = bar_button_rect(bar, m.dpi(0), item).unwrap();
+            let p = pt(c.x + c.w / 2, c.y + c.h / 2);
+            m.press(0, p, t0);
+            assert_eq!(m.release(p, t0), None, "không đóng lớp phủ");
+            assert_eq!(m.annot().shapes().len(), want);
+        }
+    }
+
+    #[test]
+    fn drawing_outside_the_selection_creates_no_shape_and_handles_still_work() {
+        let t0 = Instant::now();
+        let mut m = selected_model(t0);
+        use_tool(&mut m, Tool::Line);
+        // Bấm xa vùng chọn: không tạo hình, không tạo vùng mới.
+        draw(&mut m, pt(1500, 1500), pt(1800, 1700), t0);
+        assert!(m.annot().shapes().is_empty());
+        assert_eq!(m.rect(), Some(px(100, 100, 400, 200)));
+        assert!(!m.is_dragging());
+        // Tay nắm vùng chọn (góc dưới phải) vẫn đổi cỡ vùng dù đang có công cụ.
+        draw(&mut m, pt(500, 300), pt(600, 400), t0);
+        assert!(m.annot().shapes().is_empty());
+        assert_eq!(m.rect(), Some(px(100, 100, 500, 300)));
+        // Trong vùng chọn: vẽ.
+        draw(&mut m, pt(200, 150), pt(400, 250), t0);
+        assert_eq!(m.annot().shapes().len(), 1);
+    }
+
+    #[test]
+    fn a_selection_cannot_be_redrawn_elsewhere_once_shapes_exist() {
+        let t0 = Instant::now();
+        let mut m = selected_model(t0);
+        use_tool(&mut m, Tool::Rect);
+        draw(&mut m, pt(200, 150), pt(400, 250), t0);
+        key(&mut m, 15, "r", NONE, t0);
+        assert_eq!(m.annot().tool(), None);
+        // Không công cụ nhưng có hình: bấm ngoài vùng bị bỏ qua (cả trên màn hình kia).
+        draw(&mut m, pt(1500, 1500), pt(1800, 1700), t0);
+        assert_eq!(m.rect(), Some(px(100, 100, 400, 200)));
+        m.press(1, pt(50, 50), t0);
+        m.drag(pt(300, 300), t0);
+        m.release(pt(300, 300), t0);
+        assert_eq!(m.active(), Some(0));
+        assert_eq!(m.annot().shapes().len(), 1);
+        // Hoàn tác hết rồi thì chọn lại ở màn hình khác được; công cụ nhớ.
+        key(&mut m, 6, "z", CMD, t0);
+        m.press(1, pt(50, 50), t0);
+        m.drag(pt(300, 300), t0);
+        m.release(pt(300, 300), t0);
+        assert_eq!(m.active(), Some(1));
+        assert_eq!(m.rect(), Some(px(50, 50, 250, 250)));
+    }
+
+    #[test]
+    fn esc_unwinds_layers_but_always_ends_in_cancel() {
+        let t0 = Instant::now();
+        let mut m = selected_model(t0);
+        // Bảng màu mở: Esc đóng bảng (chưa hủy), Esc nữa hủy.
+        click_side(&mut m, SideItem::Color, t0);
+        assert_eq!(m.annot().flyout(), Flyout::Palette);
+        assert_eq!(key(&mut m, KEY_ESCAPE, "\u{1b}", NONE, t0).action, None);
+        assert_eq!(m.annot().flyout(), Flyout::None);
+        assert_eq!(
+            key(&mut m, KEY_ESCAPE, "\u{1b}", NONE, t0).action,
+            Some(Action::Cancel)
+        );
+        // Đang gõ chữ: Esc hủy ô, Esc nữa hủy lớp phủ.
+        click_side(&mut m, SideItem::Tool(Tool::Text), t0);
+        click(&mut m, pt(200, 150), t0);
+        assert!(m.annot().text().is_some());
+        assert_eq!(key(&mut m, KEY_ESCAPE, "\u{1b}", NONE, t0).action, None);
+        assert!(m.annot().text().is_none());
+        assert_eq!(
+            key(&mut m, KEY_ESCAPE, "\u{1b}", NONE, t0).action,
+            Some(Action::Cancel)
+        );
+        // Đang kéo nét: Esc hủy lớp phủ ngay.
+        click_side(&mut m, SideItem::Tool(Tool::Pen), t0);
+        m.press(0, pt(200, 150), t0);
+        m.drag(pt(250, 180), t0);
+        assert_eq!(
+            key(&mut m, KEY_ESCAPE, "\u{1b}", NONE, t0).action,
+            Some(Action::Cancel)
+        );
+        // Đang chọn một hình rồi kéo nó: Esc hủy cử chỉ, rồi bỏ chọn, rồi hủy.
+        let mut m = selected_model(t0);
+        use_tool(&mut m, Tool::Rect);
+        draw(&mut m, pt(200, 150), pt(400, 250), t0);
+        click_side(&mut m, SideItem::Tool(Tool::Select), t0);
+        m.press(0, pt(200, 200), t0);
+        m.drag(pt(230, 220), t0);
+        assert!(m.annot().capturing());
+        let mut presses = 0;
+        loop {
+            presses += 1;
+            assert!(presses < 8, "Esc phải luôn dẫn tới thoát");
+            if key(&mut m, KEY_ESCAPE, "\u{1b}", NONE, t0).action == Some(Action::Cancel) {
+                break;
+            }
+        }
+        assert_eq!(presses, 3);
+    }
+
+    #[test]
+    fn esc_while_the_input_method_composes_goes_to_it_then_forces_exit_of_the_box() {
+        let t0 = Instant::now();
+        let mut m = selected_model(t0);
+        click_side(&mut m, SideItem::Tool(Tool::Text), t0);
+        click(&mut m, pt(200, 150), t0);
+        m.annot_mut().text_marked("a");
+        assert!(m.annot().text_composing());
+        // Esc đầu: chuyển cho bộ gõ (hủy chuỗi soạn của nó), chưa đóng ô.
+        let o = key(&mut m, KEY_ESCAPE, "\u{1b}", NONE, t0);
+        assert!(o.ime && o.action.is_none());
+        assert!(m.annot().text().is_some());
+        // Bộ gõ không trả Esc (vẫn đang soạn): Esc kế ép đóng ô, không kẹt.
+        let o = key(&mut m, KEY_ESCAPE, "\u{1b}", NONE, t0);
+        assert!(!o.ime && o.action.is_none());
+        assert!(m.annot().text().is_none());
+        assert_eq!(
+            key(&mut m, KEY_ESCAPE, "\u{1b}", NONE, t0).action,
+            Some(Action::Cancel)
+        );
+        // Bộ gõ đã hủy soạn sau Esc đầu: Esc kế đóng ô bình thường.
+        click_side(&mut m, SideItem::Tool(Tool::Text), t0);
+        click_side(&mut m, SideItem::Tool(Tool::Text), t0);
+        click(&mut m, pt(200, 150), t0);
+        m.annot_mut().text_marked("a");
+        assert!(key(&mut m, KEY_ESCAPE, "\u{1b}", NONE, t0).ime);
+        m.annot_mut().text_unmark();
+        m.annot_mut().text_insert("");
+        let o = key(&mut m, KEY_ESCAPE, "\u{1b}", NONE, t0);
+        assert!(o.action.is_none() && !o.ime);
+    }
+
+    #[test]
+    fn keys_while_typing_go_to_the_input_method_and_cmd_keys_still_act() {
+        let t0 = Instant::now();
+        let mut m = selected_model(t0);
+        click_side(&mut m, SideItem::Tool(Tool::Text), t0);
+        click(&mut m, pt(200, 150), t0);
+        // Chữ cái, cả chữ của công cụ ('p'), đi vào bộ gõ chứ không đổi công cụ.
+        let o = key(&mut m, 35, "p", NONE, t0);
+        assert!(o.ime);
+        assert_eq!(m.annot().tool(), Some(Tool::Text));
+        // Mũi tên, Enter, Xóa cũng đi qua bộ gõ.
+        assert!(key(&mut m, 123, "\u{f702}", NONE, t0).ime);
+        assert!(key(&mut m, 36, "\r", NONE, t0).ime);
+        // ⌘V: dán; ⌘S: lưu (chốt chữ ở bước hoàn tất); ⌘Z khi có chữ: xóa ô.
+        assert!(key(&mut m, 9, "v", CMD, t0).paste);
+        m.annot_mut().text_insert("abc");
+        key(&mut m, 6, "z", CMD, t0);
+        assert!(m.annot().text().is_none());
+        click(&mut m, pt(200, 150), t0);
+        m.annot_mut().text_insert("xyz");
+        assert_eq!(key(&mut m, 1, "s", CMD, t0).action, Some(Action::Save));
+        // Hoàn tất: chữ đang gõ vào cuối sổ rồi mới lấy để đốt vào ảnh.
+        let shapes = m.take_shapes();
+        assert!(matches!(shapes.last(), Some(Shape::Text { .. })));
+        let _ = TextCmd::Newline;
+    }
+
+    #[test]
+    fn tool_letters_sizes_and_delete_work_without_modifiers() {
+        let t0 = Instant::now();
+        let mut m = selected_model(t0);
+        key(&mut m, 15, "r", NONE, t0);
+        assert_eq!(m.annot().tool(), Some(Tool::Rect));
+        // Phím lặp (giữ phím) không bật/tắt liên tục.
+        m.key(15, Some("r"), NONE, true, t0);
+        assert_eq!(m.annot().tool(), Some(Tool::Rect));
+        draw(&mut m, pt(200, 150), pt(400, 250), t0);
+        key(&mut m, 30, "]", NONE, t0);
+        assert_eq!(m.annot().size(), darkshot_core::annotate::SizeLevel::Large);
+        // Chọn hình rồi Xóa.
+        key(&mut m, 9, "v", NONE, t0);
+        m.press(0, pt(200, 170), t0);
+        m.release(pt(200, 170), t0);
+        assert_eq!(m.annot().selected(), Some(0));
+        key(&mut m, KEY_DELETE, "\u{7f}", NONE, t0);
+        assert!(m.annot().shapes().is_empty());
+        // ⌘D/⌘S/⌘C vẫn là hành động, ⌘Z không bao giờ trả hành động.
+        assert_eq!(key(&mut m, 2, "d", CMD, t0).action, Some(Action::Upload));
+        assert_eq!(key(&mut m, 8, "c", CMD, t0).action, Some(Action::Copy));
+        assert_eq!(key(&mut m, 6, "z", CMD, t0).action, None);
+    }
+
+    #[test]
+    fn keys_do_nothing_while_a_stroke_is_held_except_esc() {
+        let t0 = Instant::now();
+        let mut m = selected_model(t0);
+        click_side(&mut m, SideItem::Tool(Tool::Pen), t0);
+        m.press(0, pt(200, 150), t0);
+        m.drag(pt(250, 180), t0);
+        assert!(m.annot().capturing());
+        assert_eq!(key(&mut m, 1, "s", CMD, t0).action, None);
+        key(&mut m, 6, "z", CMD, t0);
+        key(&mut m, 15, "r", NONE, t0);
+        assert_eq!(m.annot().tool(), Some(Tool::Pen));
+        m.release(pt(300, 200), t0);
+        assert_eq!(m.annot().shapes().len(), 1);
+    }
+
+    #[test]
+    fn every_tool_interaction_counts_for_the_idle_safety_net() {
+        let t0 = Instant::now();
+        let mut m = selected_model(t0);
+        click_side(&mut m, SideItem::Tool(Tool::Pen), t0);
+        let t1 = t0 + Duration::from_secs(100);
+        m.press(0, pt(200, 150), t1);
+        let t2 = t1 + Duration::from_secs(100);
+        m.drag(pt(250, 180), t2);
+        assert!(!m.idle_expired(t2 + Duration::from_secs(119)));
+        let t3 = t2 + Duration::from_secs(100);
+        m.shift_changed(true, t3);
+        assert!(!m.idle_expired(t3 + Duration::from_secs(119)));
+        let t4 = t3 + Duration::from_secs(100);
+        m.touch(t4);
+        assert!(!m.idle_expired(t4 + Duration::from_secs(119)));
+        assert!(m.idle_expired(t4 + IDLE_TIMEOUT));
+    }
+
+    #[test]
+    fn shift_held_through_the_model_constrains_the_stroke() {
+        let t0 = Instant::now();
+        let mut m = selected_model(t0);
+        use_tool(&mut m, Tool::Rect);
+        m.press(0, pt(200, 150), t0);
+        m.set_shift(true);
+        m.drag(pt(400, 190), t0);
+        m.release(pt(400, 190), t0);
+        match &m.annot().shapes()[0] {
+            Shape::Rect { a, b, .. } => {
+                assert_eq!(b.x - a.x, b.y - a.y, "hình vuông khi giữ Shift");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn prefs_and_image_survive_to_the_end() {
+        let t0 = Instant::now();
+        let img = Rc::new(image(3024, 1964));
+        let mut m = Model::with_images(vec![RETINA], vec![img], Prefs::default(), t0);
+        m.press(0, pt(100, 100), t0);
+        m.drag(pt(500, 300), t0);
+        m.release(pt(500, 300), t0);
+        use_tool(&mut m, Tool::Ellipse);
+        assert_eq!(m.prefs().shape_tool, Tool::Ellipse);
+        let out = m.take_image(0).unwrap();
+        assert_eq!((out.width, out.height), (3024, 1964));
+        assert!(out.is_valid());
+    }
+
+    #[test]
+    fn a_missed_mouse_up_never_wedges_the_overlay() {
+        let t0 = Instant::now();
+        let mut m = selected_model(t0);
+        click_side(&mut m, SideItem::Tool(Tool::Pen), t0);
+        // Nét đang vẽ mà không có mouseUp (nhả ngoài cửa sổ).
+        m.press(0, pt(200, 150), t0);
+        m.drag(pt(250, 180), t0);
+        assert!(m.annot().capturing());
+        // Nhấn tiếp vào nút Hủy: nét cũ được chốt, nút hoạt động bình thường.
+        let (_, bar) = m.bar().unwrap();
+        let c = bar_button_rect(bar, m.dpi(0), BarItem::Act(Action::Cancel)).unwrap();
+        let p = pt(c.x + c.w / 2, c.y + c.h / 2);
+        m.press(0, p, t0);
+        assert!(!m.annot().capturing());
+        assert_eq!(m.annot().shapes().len(), 1);
+        assert_eq!(m.release(p, t0), Some(Action::Cancel));
+        // Mất key giữa lúc kéo: chốt nét.
+        let mut m = selected_model(t0);
+        click_side(&mut m, SideItem::Tool(Tool::Pen), t0);
+        m.press(0, pt(200, 150), t0);
+        m.drag(pt(250, 180), t0);
+        m.lost_capture(t0);
+        assert!(!m.annot().capturing());
+        assert_eq!(m.annot().shapes().len(), 1);
+    }
+
+    #[test]
+    fn hover_on_another_screen_clears_the_side_bar_highlight() {
+        let t0 = Instant::now();
+        let mut m = selected_model(t0);
+        let (_, side) = m.side().unwrap();
+        m.hover(0, pt(side.x + 2, side.y + 2), t0);
+        assert!(m.annot().side_hover().is_some());
+        m.hover(1, pt(side.x + 2, side.y + 2), t0);
+        assert_eq!(m.annot().side_hover(), None);
+    }
+
+    #[test]
+    fn tool_cursor_through_the_model() {
+        use crate::annotate_ui::CursorKind;
+        let t0 = Instant::now();
+        let mut m = selected_model(t0);
+        assert_eq!(m.cursor_at(0, pt(300, 200)), CursorKind::Move);
+        assert_eq!(m.cursor_at(0, pt(1500, 1500)), CursorKind::Cross);
+        click_side(&mut m, SideItem::Tool(Tool::Text), t0);
+        assert_eq!(m.cursor_at(0, pt(300, 200)), CursorKind::IBeam);
+        // Không có vùng chọn trên màn hình đó: chữ thập chọn vùng.
+        assert_eq!(m.cursor_at(1, pt(10, 10)), CursorKind::Cross);
     }
 }

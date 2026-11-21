@@ -7,16 +7,17 @@
 //! Đối tượng Objective-C của phiên đã đóng không hủy ngay (có thể ta đang ở trong phương thức của
 //! chính chúng) mà chờ tới lượt kế của hàng đợi chính.
 
+use crate::annotate_ui::{Annot, CursorKind, Layout, Prefs, TextCmd};
 use crate::capture::DisplayShot;
-use crate::coords::RectF;
+use crate::coords::{px_to_pt, RectF};
 use crate::overlay_input::{
-    cancel_after_key_loss, event_to_px, match_screens, Model, Mods, ScreenPx, ViewState,
-    IDLE_CHECK_EVERY,
+    cancel_after_key_loss, event_to_px, match_screens, KeyOutcome, Model, Mods, ScreenPx,
+    ViewState, IDLE_CHECK_EVERY,
 };
 use crate::overlay_view::{make_window, OverlayView, OverlayWindow};
 use darkshot_core::actions::Action;
 use darkshot_core::annotate::Shape;
-use darkshot_core::geometry::Rect;
+use darkshot_core::geometry::{Point, Rect};
 use darkshot_core::image::Image;
 use dispatch2::{DispatchQueue, DispatchTime};
 use objc2::rc::Retained;
@@ -31,9 +32,15 @@ use objc2_core_graphics::{
     kCGColorSpaceSRGB, CGBitmapInfo, CGColorRenderingIntent, CGColorSpace, CGDataProvider, CGImage,
     CGImageAlphaInfo, CGImageByteOrderInfo,
 };
-use objc2_foundation::{NSNotification, NSNotificationCenter, NSObject, NSObjectProtocol};
+use objc2_foundation::{
+    NSNotification, NSNotificationCenter, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize,
+};
 use std::cell::{Cell, RefCell};
-use std::time::Instant;
+use std::rc::Rc;
+use std::time::{Duration, Instant};
+
+/// Chu kỳ nháy con trỏ của ô chữ.
+const BLINK_EVERY: Duration = Duration::from_millis(530);
 
 /// Kết quả của một lần mở lớp phủ.
 #[derive(Debug)]
@@ -45,8 +52,8 @@ pub enum Outcome {
         action: Action,
         image: Image,
         rect: Rect,
-        /// Hình đánh dấu (tọa độ ảnh màn hình, từ dưới lên trên theo chỉ số); bên gọi đốt vào ảnh
-        /// đã cắt. Rỗng khi chưa có công cụ đánh dấu (Task 111).
+        /// Hình đánh dấu (tọa độ ảnh màn hình, từ dưới lên trên theo chỉ số: hình vẽ sau nằm phía
+        /// trước); bên gọi đốt vào ảnh đã cắt. Ô chữ đang gõ đã được chốt vào cuối.
         shapes: Vec<Shape>,
     },
 }
@@ -61,16 +68,18 @@ pub enum OpenError {
     Image,
 }
 
-/// Những gì view cần để vẽ một màn hình.
-pub struct Frame {
-    pub image: CFRetained<CGImage>,
+/// Những gì view cần để vẽ một màn hình (mượn từ phiên, không sao chép hình).
+pub struct Frame<'a> {
+    pub image: &'a CFRetained<CGImage>,
     pub w: i32,
     pub h: i32,
     pub scale: f64,
     pub dpi: u32,
     pub state: ViewState,
-    /// Hình đánh dấu của màn hình này (rỗng nếu màn hình không phải màn hình đang chọn).
-    pub shapes: Vec<Shape>,
+    /// Vùng chọn, màn hình, thanh ngang và thanh dọc của màn hình đang chọn (để tính bảng).
+    pub env: Option<Layout>,
+    /// Công cụ đánh dấu (rỗng/không dùng nếu màn hình không phải màn hình đang chọn).
+    pub annot: Option<&'a Annot>,
 }
 
 struct Slot {
@@ -85,12 +94,10 @@ struct Slot {
 
 struct Session {
     id: u64,
+    /// Mô hình thuần; giữ cả ảnh gốc của từng màn hình (cùng thứ tự `slots`) để cắt khi có hành
+    /// động và hình đánh dấu của màn hình đang chọn.
     model: Model,
-    /// Hình đánh dấu của phiên, thuộc màn hình đang chọn; chỉ số tăng dần là từ dưới lên trên.
-    shapes: Vec<Shape>,
     slots: Vec<Slot>,
-    /// Ảnh gốc của từng màn hình (cùng thứ tự `slots`), để cắt khi có hành động.
-    images: Vec<Image>,
     observer: Retained<OverlayObserver>,
     on_close: fn(Outcome),
 }
@@ -105,6 +112,8 @@ thread_local! {
     static SESSION: RefCell<Option<Session>> = const { RefCell::new(None) };
     static RETIRED: RefCell<Vec<Retired>> = const { RefCell::new(Vec::new()) };
     static NEXT_ID: Cell<u64> = const { Cell::new(1) };
+    /// Hình, cỡ, màu nhớ qua các lần mở (như Windows).
+    static PREFS: Cell<Prefs> = const { Cell::new(Prefs { shape_tool: darkshot_core::annotate::Tool::Arrow, size: darkshot_core::annotate::SizeLevel::Medium, color: darkshot_core::annotate::DEFAULT_COLOR }) };
 }
 
 define_class!(
@@ -135,6 +144,8 @@ define_class!(
         /// hoạt) nên `appResigned:` không bắn khi người dùng chuyển ứng dụng; kiểm ở lượt kế.
         #[unsafe(method(windowResignedKey:))]
         fn window_resigned_key(&self, _note: &NSNotification) {
+            // Mất key giữa lúc kéo: không còn `mouseUp:`, chốt nét/cử chỉ/vùng đang dở.
+            lost_capture();
             check_key_later();
         }
     }
@@ -256,15 +267,18 @@ pub fn open(
         });
     }
     let shots: Vec<DisplayShot> = kept.into_iter().map(|(s, _)| s).collect();
-    let model = Model::new(
-        shots
-            .iter()
-            .map(|s| ScreenPx {
-                w: s.image.width as i32,
-                h: s.image.height as i32,
-                scale: s.scale,
-            })
-            .collect(),
+    let screens_px: Vec<ScreenPx> = shots
+        .iter()
+        .map(|s| ScreenPx {
+            w: s.image.width as i32,
+            h: s.image.height as i32,
+            scale: s.scale,
+        })
+        .collect();
+    let model = Model::with_images(
+        screens_px,
+        shots.into_iter().map(|s| Rc::new(s.image)).collect(),
+        PREFS.with(Cell::get),
         Instant::now(),
     );
     let observer = OverlayObserver::new(mtm);
@@ -303,9 +317,7 @@ pub fn open(
     let session = Session {
         id,
         model,
-        shapes: Vec::new(),
         slots,
-        images: shots.into_iter().map(|s| s.image).collect(),
         observer,
         on_close,
     };
@@ -406,26 +418,89 @@ fn idle_tick(id: u64) {
     }
 }
 
-/// Áp một sự kiện vào phiên; vẽ lại các màn hình có trạng thái đổi; làm hành động nếu có.
-/// Trả `true` khi có hành động (lớp phủ đã đóng).
+/// Cách vẽ lại một màn hình sau một sự kiện.
+enum Redraw {
+    /// Cả màn hình (vùng chọn, thanh hay viên nhắc đổi).
+    Full,
+    /// Chỉ các hình chữ nhật này (pixel ảnh màn hình).
+    Rects(Vec<Rect>),
+}
+
+/// Việc vẽ lại của một sự kiện: view, hệ số điểm/pixel và cách vẽ.
+struct Dirty {
+    view: Retained<OverlayView>,
+    scale: f64,
+    how: Redraw,
+}
+
+fn invalidate(d: Dirty) {
+    match d.how {
+        Redraw::Full => d.view.setNeedsDisplay(true),
+        Redraw::Rects(rs) => {
+            for r in rs {
+                // Nới 1 điểm mỗi phía để không sót viền khi đổi pixel sang điểm.
+                let x = px_to_pt(r.x, d.scale) - 1.0;
+                let y = px_to_pt(r.y, d.scale) - 1.0;
+                let w = px_to_pt(r.w, d.scale) + 2.0;
+                let h = px_to_pt(r.h, d.scale) + 2.0;
+                d.view
+                    .setNeedsDisplayInRect(NSRect::new(NSPoint::new(x, y), NSSize::new(w, h)));
+            }
+        }
+    }
+}
+
+/// Áp một sự kiện vào phiên; vẽ lại các màn hình có trạng thái đổi (cục bộ khi chỉ hình đang vẽ
+/// hay thanh/bảng đổi); làm hành động nếu có. Trả `true` khi có hành động (lớp phủ đã đóng).
 fn input(f: impl FnOnce(&mut Session, Instant) -> Option<Action>) -> bool {
     let res = SESSION.with(|cell| {
         let mut b = cell.try_borrow_mut().ok()?;
         let s = b.as_mut()?;
         let n = s.slots.len();
         let before: Vec<ViewState> = (0..n).map(|i| s.model.view_state(i)).collect();
+        let sig_before = s.model.annot().chrome_sig();
+        let epoch_before = s.model.annot().text_epoch();
         let act = f(s, Instant::now());
-        let dirty: Vec<Retained<OverlayView>> = (0..n)
-            .filter(|&i| s.model.view_state(i) != before[i])
-            .map(|i| s.slots[i].view.clone())
-            .collect();
-        Some((act, dirty))
+        let sig_after = s.model.annot().chrome_sig();
+        let local = s.model.annot_mut().take_dirty();
+        let active = s.model.active();
+        let mut dirty = Vec::new();
+        for i in 0..n {
+            let after = s.model.view_state(i);
+            let how = if !after.same_layout(&before[i]) {
+                Some(Redraw::Full)
+            } else {
+                let mut rects = Vec::new();
+                if active == Some(i) {
+                    if after != before[i] || sig_after != sig_before {
+                        rects.extend(s.model.chrome_rects(i));
+                    }
+                    rects.extend(local.iter().copied());
+                }
+                (!rects.is_empty()).then_some(Redraw::Rects(rects))
+            };
+            if let Some(how) = how {
+                dirty.push(Dirty {
+                    view: s.slots[i].view.clone(),
+                    scale: s.slots[i].scale,
+                    how,
+                });
+            }
+        }
+        // Ô chữ mới mở: bắt đầu nhịp nháy con trỏ.
+        let blink = (s.model.annot().text_epoch() != epoch_before
+            && s.model.annot().text().is_some())
+        .then(|| (s.id, s.model.annot().text_epoch()));
+        Some((act, dirty, blink))
     });
-    let Some((act, dirty)) = res else {
+    let Some((act, dirty, blink)) = res else {
         return false;
     };
-    for v in dirty {
-        v.setNeedsDisplay(true);
+    for d in dirty {
+        invalidate(d);
+    }
+    if let Some((id, epoch)) = blink {
+        schedule_blink(id, epoch);
     }
     match act {
         Some(a) => {
@@ -436,32 +511,96 @@ fn input(f: impl FnOnce(&mut Session, Instant) -> Option<Action>) -> bool {
     }
 }
 
-fn px_of(s: &Session, i: usize, global: (f64, f64)) -> Option<darkshot_core::geometry::Point> {
+/// Hẹn nhịp nháy kế của ô chữ (đời `epoch` của phiên `id`); dừng khi ô đóng hay phiên đổi.
+fn schedule_blink(id: u64, epoch: u64) {
+    let when = DispatchTime::NOW.time(BLINK_EVERY.as_nanos() as i64);
+    if DispatchQueue::main()
+        .after(when, move || blink_tick(id, epoch))
+        .is_err()
+    {
+        eprintln!("darkshot: cannot schedule the caret blink");
+    }
+}
+
+fn blink_tick(id: u64, epoch: u64) {
+    let res = SESSION.with(|cell| {
+        let mut b = cell.try_borrow_mut().ok()?;
+        let s = b.as_mut().filter(|s| s.id == id)?;
+        if s.model.annot().text_epoch() != epoch || s.model.annot().text().is_none() {
+            return Some(None);
+        }
+        s.model.annot_mut().blink();
+        let local = s.model.annot_mut().take_dirty();
+        let i = s.model.active()?;
+        let slot = s.slots.get(i)?;
+        Some(Some(Dirty {
+            view: slot.view.clone(),
+            scale: slot.scale,
+            how: Redraw::Rects(local),
+        }))
+    });
+    match res {
+        // Còn ô chữ: nháy rồi hẹn tiếp.
+        Some(Some(d)) => {
+            invalidate(d);
+            schedule_blink(id, epoch);
+        }
+        // Ô đã đóng hoặc phiên khác: thôi. Không mượn được: thử lại.
+        Some(None) => {}
+        None => schedule_blink(id, epoch),
+    }
+}
+
+fn px_of(s: &Session, i: usize, global: (f64, f64)) -> Option<Point> {
     let slot = s.slots.get(i)?;
     Some(event_to_px(global, slot.frame, slot.scale))
 }
 
-pub fn mouse_down(i: usize, global: (f64, f64)) {
+/// Đặt con trỏ chuột theo ngữ cảnh ở điểm `global` của màn hình `i`.
+fn apply_cursor(i: usize, global: (f64, f64)) {
+    let kind = SESSION.with(|cell| {
+        let b = cell.try_borrow().ok()?;
+        let s = b.as_ref()?;
+        let p = px_of(s, i, global)?;
+        Some(s.model.cursor_at(i, p))
+    });
+    let Some(kind) = kind else {
+        return;
+    };
+    match kind {
+        CursorKind::Arrow => NSCursor::arrowCursor().set(),
+        CursorKind::Cross => NSCursor::crosshairCursor().set(),
+        CursorKind::IBeam => NSCursor::IBeamCursor().set(),
+        CursorKind::Move => NSCursor::openHandCursor().set(),
+    }
+}
+
+pub fn mouse_down(i: usize, global: (f64, f64), shift: bool) {
     input(|s, now| {
         let p = px_of(s, i, global)?;
+        s.model.set_shift(shift);
         s.model.press(i, p, now);
         None
     });
+    apply_cursor(i, global);
 }
 
-pub fn mouse_dragged(i: usize, global: (f64, f64)) {
+pub fn mouse_dragged(i: usize, global: (f64, f64), shift: bool) {
     input(|s, now| {
         let p = px_of(s, i, global)?;
+        s.model.set_shift(shift);
         s.model.drag(p, now);
         None
     });
 }
 
-pub fn mouse_up(i: usize, global: (f64, f64)) {
+pub fn mouse_up(i: usize, global: (f64, f64), shift: bool) {
     input(|s, now| {
         let p = px_of(s, i, global)?;
+        s.model.set_shift(shift);
         s.model.release(p, now)
     });
+    apply_cursor(i, global);
 }
 
 pub fn mouse_moved(i: usize, global: (f64, f64)) {
@@ -470,33 +609,136 @@ pub fn mouse_moved(i: usize, global: (f64, f64)) {
         s.model.hover(i, p, now);
         None
     });
+    apply_cursor(i, global);
 }
 
-/// Phím xuống; `true` khi phím được dùng (đã làm hành động).
-pub fn key_down(code: u16, chars: Option<&str>, mods: Mods) -> bool {
-    input(|s, now| s.model.key(code, chars, mods, now))
+/// Cửa sổ mất key (có thể giữa lúc kéo): chốt nét, cử chỉ và kéo vùng đang dở.
+fn lost_capture() {
+    input(|s, now| {
+        s.model.lost_capture(now);
+        None
+    });
 }
 
-/// Dữ liệu vẽ của màn hình `i`.
-pub fn frame(i: usize) -> Option<Frame> {
+/// Shift nhấn hoặc nhả (`flagsChanged:`): nét hay hình đang kéo cập nhật ràng buộc ngay.
+pub fn flags_changed(shift: bool) {
+    input(|s, now| {
+        s.model.shift_changed(shift, now);
+        None
+    });
+}
+
+/// Phím xuống. `action_done`: có hành động (lớp phủ đã đóng); `ime`: view phải chuyển phím cho bộ
+/// gõ (`interpretKeyEvents:`); `paste`: đã dán chữ từ clipboard vào ô chữ.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct KeyResult {
+    pub done: bool,
+    pub ime: bool,
+}
+
+pub fn key_down(code: u16, chars: Option<&str>, mods: Mods, repeat: bool) -> KeyResult {
+    let mut outcome = KeyOutcome::default();
+    let done = input(|s, now| {
+        outcome = s.model.key(code, chars, mods, repeat, now);
+        outcome.action
+    });
+    if outcome.paste && !done {
+        if let Some(text) = crate::clipboard::paste_text() {
+            text_paste(&text);
+        }
+    }
+    KeyResult {
+        done,
+        ime: outcome.ime && !done,
+    }
+}
+
+/// Chữ đã chốt từ bộ gõ (`insertText:`).
+pub fn text_insert(s: &str) {
+    text_op(|a| a.text_insert(s));
+}
+
+/// Chuỗi đang soạn của bộ gõ (`setMarkedText:`).
+pub fn text_marked(s: &str) {
+    text_op(|a| a.text_marked(s));
+}
+
+/// Bộ gõ chốt chuỗi đang soạn (`unmarkText`).
+pub fn text_unmark() {
+    text_op(Annot::text_unmark);
+}
+
+/// Dán chữ (đã đọc từ clipboard).
+pub fn text_paste(s: &str) {
+    text_op(|a| a.text_paste(s));
+}
+
+/// Lệnh soạn chữ (`doCommandBySelector:`).
+pub fn text_command(c: TextCmd) {
+    text_op(|a| a.text_command(c));
+}
+
+fn text_op(f: impl FnOnce(&mut Annot)) {
+    input(|s, now| {
+        s.model.touch(now);
+        if s.model.annot().text().is_some() {
+            f(s.model.annot_mut());
+        }
+        None
+    });
+}
+
+/// Ô chữ đang mở và bộ gõ đang soạn dở (`hasMarkedText`), số ký tự đang soạn, chỉ số con trỏ.
+pub fn text_state() -> Option<(usize, usize)> {
+    SESSION.with(|cell| {
+        let b = cell.try_borrow().ok()?;
+        let s = b.as_ref()?;
+        let t = s.model.annot().text()?;
+        Some((t.marked, t.edit.caret()))
+    })
+}
+
+/// Hình chữ nhật con trỏ của ô chữ (pixel ảnh màn hình `i`), cho cửa sổ gợi ý của bộ gõ.
+pub fn text_caret(i: usize) -> Option<Rect> {
+    SESSION.with(|cell| {
+        let b = cell.try_borrow().ok()?;
+        let s = b.as_ref()?;
+        if s.model.active() != Some(i) {
+            return None;
+        }
+        s.model.annot().text().map(|t| t.caret)
+    })
+}
+
+/// Hệ số pixel mỗi điểm của màn hình `i`.
+pub fn scale_of(i: usize) -> Option<f64> {
+    SESSION.with(|cell| {
+        let b = cell.try_borrow().ok()?;
+        b.as_ref()?.slots.get(i).map(|s| s.scale)
+    })
+}
+
+/// Dữ liệu vẽ của màn hình `i` (mượn trong lúc `f` chạy; không được gọi lại vào `overlay`).
+pub fn with_frame<R>(i: usize, f: impl FnOnce(&Frame) -> R) -> Option<R> {
     SESSION.with(|cell| {
         let b = cell.try_borrow().ok()?;
         let s = b.as_ref()?;
         let slot = s.slots.get(i)?;
-        let b = s.model.bounds(i)?;
-        Some(Frame {
-            image: slot.image.clone(),
-            w: b.w,
-            h: b.h,
+        let bounds = s.model.bounds(i)?;
+        let mine = s.model.active() == Some(i);
+        let state = s.model.view_state(i);
+        let env = s.model.layout(i);
+        let frame = Frame {
+            image: &slot.image,
+            w: bounds.w,
+            h: bounds.h,
             scale: slot.scale,
             dpi: s.model.dpi(i),
-            state: s.model.view_state(i),
-            shapes: if s.model.active() == Some(i) {
-                s.shapes.clone()
-            } else {
-                Vec::new()
-            },
-        })
+            state,
+            env,
+            annot: mine.then(|| s.model.annot()),
+        };
+        Some(f(&frame))
     })
 }
 
@@ -518,14 +760,20 @@ fn finish(action: Option<Action>) {
         }
     };
     let Session {
-        model,
-        shapes,
+        mut model,
         slots,
-        images,
         observer,
         on_close,
         ..
     } = session;
+    // Ô chữ đang gõ vào CUỐI sổ (trên cùng); lấy hình, nhớ lựa chọn công cụ cho lần mở sau.
+    let want_shapes = action.is_some_and(|a| a != Action::Cancel);
+    let shapes = if want_shapes {
+        model.take_shapes()
+    } else {
+        Vec::new()
+    };
+    PREFS.with(|p| p.set(model.prefs()));
     let target: &AnyObject = &observer;
     // SAFETY: gỡ đích đã đăng ký trong `open`; đích còn sống (giữ trong `Retired`).
     unsafe { NSNotificationCenter::defaultCenter().removeObserver(target) };
@@ -548,8 +796,9 @@ fn finish(action: Option<Action>) {
         // hoạt) thì ứng dụng trước vẫn active và lệnh này vô hại. `open` bỏ ẩn lại.
         NSApplication::sharedApplication(mtm).hide(None);
     }
-    let outcome = match (action, model.active(), model.rect()) {
-        (Some(a), Some(i), Some(rect)) if a != Action::Cancel => match images.into_iter().nth(i) {
+    let (active, rect) = (model.active(), model.rect());
+    let outcome = match (action, active, rect) {
+        (Some(a), Some(i), Some(rect)) if a != Action::Cancel => match model.take_image(i) {
             Some(image) => Outcome::Act {
                 action: a,
                 image,

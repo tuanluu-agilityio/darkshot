@@ -47,6 +47,17 @@ impl Clipboard for PasteboardClipboard {
     }
 }
 
+/// Chữ thuần trên clipboard chung (cho ô chữ của lớp phủ đánh dấu); `None` khi không có chữ.
+/// Chỉ đọc, không đổi clipboard.
+pub fn paste_text() -> Option<String> {
+    autoreleasepool(|_| {
+        let pb = NSPasteboard::generalPasteboard();
+        // SAFETY: như `NSPasteboardTypeString` ở trên.
+        let ty = unsafe { NSPasteboardTypeString };
+        pb.stringForType(ty).map(|s| s.to_string())
+    })
+}
+
 /// Xóa clipboard chung rồi ghi một định dạng bằng `write`.
 fn replace_with(
     ty: &NSPasteboardType,
