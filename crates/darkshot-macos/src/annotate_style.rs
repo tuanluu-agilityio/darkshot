@@ -7,7 +7,8 @@
 //! Windows). Bảng dùng lại 48 màu của `PALETTE` cho ô màu.
 
 use darkshot_core::annotate::{
-    dip_to_px, Align, HighlightMode, Style, DEFAULT_COLOR, PALETTE, STROKE_DIP,
+    dip_to_px, Align, HighlightMode, Style, DEFAULT_COLOR, FONT_PX_MAX, FONT_PX_MIN, FONT_PX_STEP,
+    PALETTE, STROKE_DIP,
 };
 use darkshot_core::geometry::{Point, Rect};
 use darkshot_core::overlay_layout::{clamp_into, intersect, scaled, side_on_right, GAP};
@@ -38,6 +39,11 @@ impl StyleKind {
     /// Có ô tích Không viền (Hình và Chữ).
     pub fn has_border(self) -> bool {
         !self.is_highlight()
+    }
+
+    /// Có hàng Cỡ chữ (chỉ Chữ; Task 116).
+    pub fn has_font_size(self) -> bool {
+        self == StyleKind::Label
     }
 
     /// Bảng Highlight (có hàng chọn chế độ thay hàng Nền/Viền).
@@ -83,6 +89,8 @@ pub enum StyleCell {
     NoBorder,
     /// Bo góc: -1 giảm, +1 tăng (px ảnh).
     Radius(i32),
+    /// Cỡ chữ: -1 giảm, +1 tăng, mỗi bước [`FONT_PX_STEP`] px ảnh (chỉ Chữ).
+    FontSize(i32),
     /// Nút thu gọn/mở bảng ở thanh tiêu đề.
     Collapse,
     /// Thanh tiêu đề: nhấn giữ để kéo bảng.
@@ -101,6 +109,8 @@ pub enum StyleEdit {
     NoBorder(bool),
     /// Bo góc (px ảnh).
     RadiusPx(f32),
+    /// Cỡ chữ (px ảnh; chỉ Chữ). Không nằm trong `StylePrefs`: `Annot` giữ riêng.
+    FontPx(f32),
 }
 
 /// Bo góc lớn nhất bảng cho chọn (px ảnh); bước 2 px. Khi vẽ còn kẹp theo nửa cạnh ngắn của hộp.
@@ -174,6 +184,7 @@ impl StylePrefs {
             StyleEdit::Align(_) => {}
             StyleEdit::NoBorder(b) => self.no_border = b,
             StyleEdit::RadiusPx(r) => self.radius_px = clamp_radius_px(r),
+            StyleEdit::FontPx(_) => {}
         }
     }
 }
@@ -190,6 +201,20 @@ pub fn clamp_radius_px(r: f32) -> f32 {
 /// Bước bo góc: `dir` = -1 hoặc +1, mỗi bước [`RADIUS_STEP_PX`] px, kẹp.
 pub fn step_radius(px: f32, dir: i32) -> f32 {
     clamp_radius_px(px.round() + RADIUS_STEP_PX * dir as f32)
+}
+
+/// Cỡ chữ (px ảnh) kẹp vào [`FONT_PX_MIN`, `FONT_PX_MAX`]; không phải số thì mức nhỏ nhất.
+pub fn clamp_font_px(px: f32) -> f32 {
+    if px.is_nan() {
+        FONT_PX_MIN
+    } else {
+        px.clamp(FONT_PX_MIN, FONT_PX_MAX)
+    }
+}
+
+/// Bước cỡ chữ: `dir` = -1 hoặc +1, mỗi bước [`FONT_PX_STEP`] px, kẹp.
+pub fn step_font_px(px: f32, dir: i32) -> f32 {
+    clamp_font_px(px.round() + FONT_PX_STEP * dir as f32)
 }
 
 /// Trạng thái các ô đích màu của bảng (Task 114, mở rộng Task 115): đúng MỘT ô sáng tại một thời
@@ -278,6 +303,8 @@ pub struct StyleView {
     pub no_border: bool,
     /// Bo góc (px ảnh).
     pub radius_px: f32,
+    /// Cỡ chữ (px ảnh; chỉ có nghĩa với bảng Chữ).
+    pub font_px: f32,
 }
 
 // ---------------------------------------------------------------- bố cục (đơn vị 96 DPI)
@@ -338,6 +365,11 @@ pub struct StyleLayout {
     pub opacity_minus: Rect,
     pub opacity_value: Rect,
     pub opacity_plus: Rect,
+    /// Hàng Cỡ chữ (chỉ Chữ).
+    pub font_label: Rect,
+    pub font_minus: Rect,
+    pub font_value: Rect,
+    pub font_plus: Rect,
     /// Ba ô căn lề (chỉ khi `StyleKind::Label`).
     pub aligns: Option<[Rect; 3]>,
 }
@@ -359,7 +391,8 @@ fn panel_h(kind: StyleKind, collapsed: bool) -> i32 {
         h += ROW_GAP + ROW_H;
     }
     if kind == StyleKind::Label {
-        h += ROW_GAP + ROW_H;
+        // Hàng Cỡ chữ rồi hàng căn lề.
+        h += 2 * (ROW_GAP + ROW_H);
     }
     h + PAD
 }
@@ -455,6 +488,10 @@ pub fn layout_ex(panel: Rect, kind: StyleKind, collapsed: bool, dpi: u32) -> Sty
         opacity_minus: NONE,
         opacity_value: NONE,
         opacity_plus: NONE,
+        font_label: NONE,
+        font_minus: NONE,
+        font_value: NONE,
+        font_plus: NONE,
         aligns: None,
     };
     if collapsed {
@@ -527,6 +564,10 @@ pub fn layout_ex(panel: Rect, kind: StyleKind, collapsed: bool, dpi: u32) -> Sty
         l.opacity_plus,
     ) = stepper(y);
     y += ROW_H + ROW_GAP;
+    if kind.has_font_size() {
+        (l.font_label, l.font_minus, l.font_value, l.font_plus) = stepper(y);
+        y += ROW_H + ROW_GAP;
+    }
     if kind == StyleKind::Label {
         let w = (inner - 2 * 4) / 3;
         l.aligns = Some([0, 1, 2].map(|i| at(rect(PAD + i * (w + 4), y, w, ROW_H, dpi))));
@@ -584,6 +625,12 @@ pub fn cell_at(l: &StyleLayout, p: Point) -> Option<StyleCell> {
     }
     if l.radius_plus.contains(p) {
         return Some(StyleCell::Radius(1));
+    }
+    if l.font_minus.contains(p) {
+        return Some(StyleCell::FontSize(-1));
+    }
+    if l.font_plus.contains(p) {
+        return Some(StyleCell::FontSize(1));
     }
     if l.opacity_minus.contains(p) {
         return Some(StyleCell::Opacity(-1));
@@ -816,6 +863,9 @@ mod tests {
                     l.opacity_minus,
                     l.opacity_value,
                     l.opacity_plus,
+                    l.font_minus,
+                    l.font_value,
+                    l.font_plus,
                 ];
                 rs.extend(l.cells.iter().copied());
                 if let Some(a) = l.aligns {
@@ -1089,6 +1139,9 @@ mod tests {
                     l.opacity_minus,
                     l.opacity_value,
                     l.opacity_plus,
+                    l.font_minus,
+                    l.font_value,
+                    l.font_plus,
                 ];
                 if kind != StyleKind::Oval {
                     rs.extend([l.radius_minus, l.radius_value, l.radius_plus]);
@@ -1121,6 +1174,57 @@ mod tests {
             }
         }
         assert!(!StyleKind::MarkerFree.has_border() && !StyleKind::MarkerRect.has_border());
+    }
+
+    // ---- Task 116: hàng Cỡ chữ
+
+    #[test]
+    fn font_px_steps_by_two_and_is_clamped() {
+        assert_eq!(step_font_px(18.0, 1), 20.0);
+        assert_eq!(step_font_px(18.0, -1), 16.0);
+        assert_eq!(step_font_px(FONT_PX_MIN, -1), FONT_PX_MIN);
+        assert_eq!(step_font_px(FONT_PX_MAX, 1), FONT_PX_MAX);
+        assert_eq!(step_font_px(19.6, 1), 22.0);
+        assert_eq!(clamp_font_px(f32::NAN), FONT_PX_MIN);
+        assert_eq!(clamp_font_px(-4.0), FONT_PX_MIN);
+        assert_eq!(clamp_font_px(9999.0), FONT_PX_MAX);
+        assert_eq!((FONT_PX_MIN, FONT_PX_MAX, FONT_PX_STEP), (8.0, 200.0, 2.0));
+    }
+
+    #[test]
+    fn only_the_text_panel_has_the_font_size_row_and_it_hits_back_at_every_dpi() {
+        for dpi in [96, 144, 192] {
+            let l = at(StyleKind::Label, dpi);
+            assert_eq!(
+                cell_at(&l, centre(l.font_minus)),
+                Some(StyleCell::FontSize(-1))
+            );
+            assert_eq!(
+                cell_at(&l, centre(l.font_plus)),
+                Some(StyleCell::FontSize(1))
+            );
+            assert_eq!(cell_at(&l, centre(l.font_label)), None);
+            assert_eq!(cell_at(&l, centre(l.font_value)), None);
+            // Nằm trong bảng, không chồng hàng Độ trong suốt và hàng căn lề.
+            for r in [l.font_label, l.font_minus, l.font_value, l.font_plus] {
+                assert!(r.w > 0 && r.right() <= l.panel.right() && r.bottom() <= l.panel.bottom());
+                assert!(r.y >= l.opacity_label.bottom());
+                assert!(r.bottom() <= l.aligns.unwrap()[0].y);
+            }
+            for kind in [StyleKind::Box, StyleKind::Oval, StyleKind::MarkerFree] {
+                let o = at(kind, dpi);
+                assert_eq!((o.font_minus.w, o.font_plus.w, o.font_label.w), (0, 0, 0));
+            }
+        }
+        assert!(StyleKind::Label.has_font_size());
+        assert!(!StyleKind::Box.has_font_size());
+    }
+
+    #[test]
+    fn font_edit_does_not_touch_the_prefs_style() {
+        let mut p = LABEL_DEFAULT;
+        p.apply(StyleEdit::FontPx(40.0));
+        assert_eq!(p, LABEL_DEFAULT);
     }
 
     #[test]

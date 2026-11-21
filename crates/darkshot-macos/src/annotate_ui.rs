@@ -12,10 +12,10 @@
 
 use crate::annotate_draw::{label_caret_rect, shape_bounds};
 use crate::annotate_style::{
-    auto_collapse, cell_at as style_cell_at, clamp_marker_width, clamp_opacity, clamp_radius_px,
-    clamp_width, layout_ex as style_layout_ex, panel_size_ex, step_marker_width, step_opacity,
-    step_radius, step_width, style_panel_rect, StyleCell, StyleEdit, StyleKind, StylePrefs,
-    StyleTarget, StyleView, BOX_DEFAULT, LABEL_DEFAULT,
+    auto_collapse, cell_at as style_cell_at, clamp_font_px, clamp_marker_width, clamp_opacity,
+    clamp_radius_px, clamp_width, layout_ex as style_layout_ex, panel_size_ex, step_font_px,
+    step_marker_width, step_opacity, step_radius, step_width, style_panel_rect, StyleCell,
+    StyleEdit, StyleKind, StylePrefs, StyleTarget, StyleView, BOX_DEFAULT, LABEL_DEFAULT,
 };
 use crate::overlay_input::bar_item_at;
 use darkshot_core::annotate::{
@@ -138,6 +138,8 @@ pub struct Prefs {
     pub highlight_opacity: f32,
     /// Độ trong suốt của nét Highlight tự do (0..=1; Task 114).
     pub marker_opacity: f32,
+    /// Cỡ chữ riêng (px ảnh) đặt từ hàng Cỡ chữ của bảng Chữ (Task 116); `None`: theo mức cỡ.
+    pub font_px: Option<f32>,
 }
 
 impl Prefs {
@@ -152,6 +154,7 @@ impl Prefs {
         marker_width_dip: MARKER_DIP,
         highlight_opacity: HIGHLIGHT_OPACITY,
         marker_opacity: HIGHLIGHT_OPACITY,
+        font_px: None,
     };
 }
 
@@ -222,12 +225,11 @@ impl TextBox {
     fn new(
         (a, b): (Pt, Pt),
         dpi: u32,
-        level: SizeLevel,
+        size: f32,
         color: Rgb,
         style: Style,
         align: Align,
     ) -> TextBox {
-        let size = dip_to_px(level.text_dip(), dpi);
         let (a, b) = normalize_frame(a, b);
         let mut t = TextBox {
             edit: TextEdit::new(a, size, color),
@@ -246,8 +248,8 @@ impl TextBox {
     }
 
     /// Khung mặc định của một cú nhấp đơn tại `at`.
-    fn default_frame(at: Point, dpi: u32, level: SizeLevel) -> (Pt, Pt) {
-        label_default_frame(to_pt(at), dip_to_px(level.text_dip(), dpi))
+    fn default_frame(at: Point, size: f32) -> (Pt, Pt) {
+        label_default_frame(to_pt(at), size)
     }
 
     /// Đặt lại khung (hai góc bất kỳ) rồi đo lại.
@@ -273,9 +275,9 @@ impl TextBox {
         self.frame = inflate(shape_bounds(&label), 1);
     }
 
-    /// Đổi cỡ chữ theo mức `level` (giữ chữ, màu `color`, vị trí con trỏ) rồi đo lại.
-    fn resize(&mut self, level: SizeLevel, color: Rgb) {
-        self.size = dip_to_px(level.text_dip(), self.dpi);
+    /// Đổi cỡ chữ thành `size` px (giữ chữ, màu `color`, vị trí con trỏ, khung) rồi đo lại.
+    fn resize(&mut self, size: f32, color: Rgb) {
+        self.size = size;
         let text = self.edit.text();
         let caret = self.edit.caret();
         let mut edit = TextEdit::new(self.a, self.size, color);
@@ -476,6 +478,14 @@ pub fn flyout_tip_rect(cell: Rect, fly: Rect, mon: Rect, dpi: u32, text: (i32, i
 
 /// Hình `shape` (Hình hoặc Chữ có kiểu) sau khi áp một thay đổi kiểu của bảng.
 fn restyle_shape(shape: &Shape, edit: StyleEdit, dpi: u32) -> Shape {
+    // Cỡ chữ chỉ đổi `size` của Chữ; khung và kiểu giữ nguyên.
+    if let StyleEdit::FontPx(px) = edit {
+        let mut out = shape.clone();
+        if let Shape::Label { size, .. } = &mut out {
+            *size = clamp_font_px(px);
+        }
+        return out;
+    }
     let Some(st) = shape.style() else {
         return shape.clone();
     };
@@ -495,7 +505,7 @@ fn restyle_shape(shape: &Shape, edit: StyleEdit, dpi: u32) -> Shape {
             radius: clamp_radius_px(r),
             ..st
         },
-        StyleEdit::Align(_) => st,
+        StyleEdit::Align(_) | StyleEdit::FontPx(_) => st,
     };
     let out = shape.with_style(new);
     match edit {
@@ -548,6 +558,8 @@ pub struct Annot {
     marker_width_dip: f32,
     highlight_opacity: f32,
     marker_opacity: f32,
+    /// Cỡ chữ riêng (px ảnh) của hàng Cỡ chữ; `None`: theo mức cỡ `size`.
+    font_px: Option<f32>,
     /// Người dùng đã thu gọn (Some(true)) hoặc mở (Some(false)) bảng thuộc tính; `None`: tự động.
     style_collapsed: Option<bool>,
     /// Góc trên trái bảng thuộc tính do người dùng kéo tới (thay vị trí tự động).
@@ -608,6 +620,7 @@ impl Annot {
             marker_width_dip: clamp_marker_width(p.marker_width_dip),
             highlight_opacity: clamp_opacity(p.highlight_opacity),
             marker_opacity: clamp_opacity(p.marker_opacity),
+            font_px: p.font_px.map(clamp_font_px),
             style_collapsed: None,
             style_pos: None,
             style_drag: None,
@@ -645,6 +658,7 @@ impl Annot {
             marker_width_dip: self.marker_width_dip,
             highlight_opacity: self.highlight_opacity,
             marker_opacity: self.marker_opacity,
+            font_px: self.font_px,
         }
     }
 
@@ -850,6 +864,10 @@ impl Annot {
                     mode: None,
                     no_border: st.no_border,
                     radius_px: st.radius,
+                    font_px: match shape {
+                        Shape::Label { size, .. } => *size,
+                        _ => self.default_font_px(dpi),
+                    },
                 });
             }
         }
@@ -865,6 +883,7 @@ impl Annot {
                 mode: None,
                 no_border: b.style.no_border,
                 radius_px: b.style.radius,
+                font_px: b.size,
             });
         }
         Some(match kind {
@@ -879,6 +898,7 @@ impl Annot {
                 mode: None,
                 no_border: self.box_style.no_border,
                 radius_px: self.box_style.radius_px,
+                font_px: self.default_font_px(dpi),
             },
             StyleKind::Label => StyleView {
                 kind,
@@ -891,9 +911,31 @@ impl Annot {
                 mode: None,
                 no_border: self.label_style.no_border,
                 radius_px: self.label_style.radius_px,
+                font_px: self.default_font_px(dpi),
             },
             StyleKind::MarkerFree | StyleKind::MarkerRect => return None,
         })
+    }
+
+    /// Cỡ chữ (px ảnh) cho chữ tạo sau: số riêng của hàng Cỡ chữ nếu có, không thì theo mức cỡ.
+    fn default_font_px(&self, dpi: u32) -> f32 {
+        self.font_px
+            .unwrap_or_else(|| dip_to_px(self.size.text_dip(), dpi))
+    }
+
+    /// Mức `level` của bảng Cỡ có sáng không: là mức hiện tại, và khi đang dùng Chữ (công cụ, chữ
+    /// đang gõ hoặc Chữ đang chọn) cỡ chữ đang hiện phải đúng cỡ của mức đó (đổi số ở hàng Cỡ chữ
+    /// không khớp mức nào thì không mức nào sáng).
+    pub fn size_level_lit(&self, level: SizeLevel, dpi: u32) -> bool {
+        if level != self.size {
+            return false;
+        }
+        match self.style_view(dpi) {
+            Some(v) if v.kind == StyleKind::Label => {
+                (v.font_px - dip_to_px(level.text_dip(), dpi)).abs() < 0.5
+            }
+            _ => true,
+        }
     }
 
     /// Giá trị bảng Highlight: của nét hoặc hình đang chọn nếu có, không thì mặc định cho lần vẽ
@@ -914,6 +956,7 @@ impl Annot {
             mode: Some(self.highlight_mode),
             no_border: false,
             radius_px: 0.0,
+            font_px: self.default_font_px(dpi),
         };
         match self.selected.and_then(|i| self.marks.shapes().get(i)) {
             Some(Shape::Marker {
@@ -1005,6 +1048,9 @@ impl Annot {
         if let StyleEdit::Align(a) = edit {
             self.align = a;
         }
+        if let StyleEdit::FontPx(px) = edit {
+            self.font_px = Some(clamp_font_px(px));
+        }
         // Viền của Hình là màu của nút Màu: đổi nó như chọn màu (hình đang chọn đổi theo).
         if let (StyleKind::Box | StyleKind::Oval, StyleEdit::Stroke(c)) = (kind, edit) {
             self.choose_color(c, dpi);
@@ -1039,6 +1085,10 @@ impl Annot {
                 b.style = st.style(st.stroke, b.dpi);
                 if let StyleEdit::Align(a) = edit {
                     b.align = a;
+                }
+                if let StyleEdit::FontPx(px) = edit {
+                    let color = b.edit.color();
+                    b.resize(clamp_font_px(px), color);
                 }
             });
         }
@@ -1128,6 +1178,10 @@ impl Annot {
             StyleCell::Radius(d) => {
                 self.apply_style(StyleEdit::RadiusPx(step_radius(view.radius_px, d)), dpi)
             }
+            StyleCell::FontSize(d) if view.kind.has_font_size() => {
+                self.apply_style(StyleEdit::FontPx(step_font_px(view.font_px, d)), dpi)
+            }
+            StyleCell::FontSize(_) => {}
             // Màu chữ chỉ có ở bảng Chữ.
             StyleCell::Target(t) => self.style_target = t.for_kind(view.kind),
             // Không nền: chọn lại một màu sau đó sẽ áp cho nền (Nền bật, Không nền tắt).
@@ -1588,16 +1642,19 @@ impl Annot {
         // Độ dày viền mặc định của Hình theo mức cỡ (bảng thuộc tính có thể chỉnh riêng sau đó).
         self.box_style.width_dip = clamp_width(level.stroke_dip());
         self.marker_width_dip = clamp_marker_width(level.marker_dip());
+        // Chọn mức thì bỏ số riêng của hàng Cỡ chữ: chữ theo đúng mức.
+        self.font_px = None;
         self.restyle_selected(dpi, Some(level), None);
         let color = self.color;
         let Some(b) = self.text.as_mut() else {
             return;
         };
-        if b.size == dip_to_px(level.text_dip(), b.dpi) {
+        let px = dip_to_px(level.text_dip(), b.dpi);
+        if b.size == px {
             return;
         }
         let before = b.dirty();
-        b.resize(level, color);
+        b.resize(px, color);
         let after = b.dirty();
         self.caret_on = true;
         self.mark(before);
@@ -1639,8 +1696,9 @@ impl Annot {
     /// Mở ô chữ tại `p` (đã chốt ô cũ).
     pub fn open_text(&mut self, env: &Env, p: Point) {
         let style = self.label_style.style(self.label_style.stroke, env.dpi);
-        let frame = TextBox::default_frame(p, env.dpi, self.size);
-        let b = TextBox::new(frame, env.dpi, self.size, self.color, style, self.align);
+        let size = self.default_font_px(env.dpi);
+        let frame = TextBox::default_frame(p, size);
+        let b = TextBox::new(frame, env.dpi, size, self.color, style, self.align);
         self.mark(b.dirty());
         self.text = Some(b);
         self.caret_on = true;
@@ -1880,8 +1938,7 @@ impl Annot {
         if !matches!(self.marks.shapes().get(index), Some(Shape::Label { .. })) {
             return;
         }
-        let mut b = TextBox::new((a, fb), env.dpi, self.size, color, style, align);
-        b.size = size;
+        let mut b = TextBox::new((a, fb), env.dpi, size, color, style, align);
         let mut edit = TextEdit::new(a, size, color);
         edit.insert(&text);
         b.edit = edit;
@@ -3580,6 +3637,8 @@ mod tests {
             StyleCell::NoBorder => l.no_border,
             StyleCell::Radius(d) if d < 0 => l.radius_minus,
             StyleCell::Radius(_) => l.radius_plus,
+            StyleCell::FontSize(d) if d < 0 => l.font_minus,
+            StyleCell::FontSize(_) => l.font_plus,
             StyleCell::Collapse => l.collapse,
             StyleCell::Header => l.header,
             StyleCell::Align(a) => {
@@ -4842,5 +4901,166 @@ mod tests {
                 "{t:?}"
             );
         }
+    }
+
+    // ---- Task 116: hàng Cỡ chữ
+
+    fn label_size(a: &Annot, i: usize) -> f32 {
+        match &a.shapes()[i] {
+            Shape::Label { size, .. } => *size,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn font_row_shows_the_level_size_and_steps_by_two_into_the_prefs() {
+        let mut h = H::new();
+        h.a.use_tool(Tool::Text, 96);
+        assert_eq!(h.a.style_view(96).unwrap().font_px, 18.0);
+        click_style(&mut h, StyleCell::FontSize(1));
+        assert_eq!(h.a.style_view(96).unwrap().font_px, 20.0);
+        click_style(&mut h, StyleCell::FontSize(-1));
+        click_style(&mut h, StyleCell::FontSize(-1));
+        assert_eq!(h.a.style_view(96).unwrap().font_px, 16.0);
+        assert_eq!(h.a.prefs().font_px, Some(16.0));
+        // Kẹp hai đầu, không lỗi.
+        for _ in 0..200 {
+            click_style(&mut h, StyleCell::FontSize(-1));
+        }
+        assert_eq!(
+            h.a.style_view(96).unwrap().font_px,
+            darkshot_core::annotate::FONT_PX_MIN
+        );
+        for _ in 0..200 {
+            click_style(&mut h, StyleCell::FontSize(1));
+        }
+        assert_eq!(
+            h.a.style_view(96).unwrap().font_px,
+            darkshot_core::annotate::FONT_PX_MAX
+        );
+    }
+
+    #[test]
+    fn font_row_syncs_both_ways_with_the_size_levels_and_brackets() {
+        let mut h = H::new();
+        h.a.use_tool(Tool::Text, 96);
+        assert!(h.a.size_level_lit(SizeLevel::Medium, 96));
+        click_style(&mut h, StyleCell::FontSize(1));
+        // 20 px không khớp mức nào: bảng Cỡ không mức nào sáng.
+        for l in SizeLevel::ALL {
+            assert!(!h.a.size_level_lit(l, 96), "{l:?}");
+        }
+        // Phím ] chọn mức lớn hơn: số trong hàng đổi theo, bảng Cỡ sáng mức đó.
+        assert!(h.a.tool_key(Some("]"), 96));
+        assert_eq!(h.a.size(), SizeLevel::Large);
+        assert_eq!(
+            h.a.style_view(96).unwrap().font_px,
+            SizeLevel::Large.text_dip()
+        );
+        assert_eq!(h.a.prefs().font_px, None);
+        assert!(h.a.size_level_lit(SizeLevel::Large, 96));
+        assert!(!h.a.size_level_lit(SizeLevel::Medium, 96));
+        // Đặt số trùng đúng một mức (26 là Lớn) thì mức đó sáng lại.
+        click_style(&mut h, StyleCell::FontSize(1));
+        assert!(!h.a.size_level_lit(SizeLevel::Large, 96));
+        click_style(&mut h, StyleCell::FontSize(-1));
+        assert!(h.a.size_level_lit(SizeLevel::Large, 96));
+        // Công cụ khác (Hình chữ nhật) không bị ảnh hưởng.
+        click_style(&mut h, StyleCell::FontSize(1));
+        h.a.use_tool(Tool::Rect, 96);
+        assert!(h.a.size_level_lit(SizeLevel::Large, 96));
+    }
+
+    #[test]
+    fn new_text_uses_the_remembered_font_size_and_it_survives_prefs() {
+        let mut h = H::new();
+        h.a.use_tool(Tool::Text, 96);
+        click_style(&mut h, StyleCell::FontSize(1));
+        click_style(&mut h, StyleCell::FontSize(1));
+        h.down(pt(100, 100));
+        h.up(pt(100, 100), false);
+        assert_eq!(h.a.text().unwrap().size, 22.0);
+        h.a.text_insert("ab");
+        h.a.close_text(true);
+        assert_eq!(label_size(&h.a, 0), 22.0);
+        let p = h.a.prefs();
+        assert_eq!(p.font_px, Some(22.0));
+        let mut again = Annot::with_prefs(p);
+        again.use_tool(Tool::Text, 96);
+        let lay = h.layout();
+        again.open_text(&lay.env(&h.img), pt(300, 300));
+        assert_eq!(again.text().unwrap().size, 22.0);
+    }
+
+    #[test]
+    fn font_row_resizes_the_open_text_box_keeping_text_caret_and_frame() {
+        let mut h = H::new();
+        h.a.use_tool(Tool::Text, 96);
+        h.down(pt(100, 100));
+        h.up(pt(100, 100), false);
+        h.a.text_insert("abc");
+        let (a, b) = {
+            let t = h.a.text().unwrap();
+            (t.a, t.b)
+        };
+        click_style(&mut h, StyleCell::FontSize(1));
+        click_style(&mut h, StyleCell::FontSize(1));
+        let t = h.a.text().unwrap();
+        assert_eq!(t.size, 22.0);
+        assert_eq!(t.edit.text(), "abc");
+        assert_eq!(t.edit.caret(), 3);
+        assert_eq!((t.a, t.b), (a, b), "đổi cỡ không đổi khung");
+        assert_eq!(h.a.style_view(96).unwrap().font_px, 22.0);
+        h.a.close_text(true);
+        assert_eq!(label_size(&h.a, 0), 22.0);
+    }
+
+    #[test]
+    fn font_row_on_a_selected_label_is_one_undo_step_and_keeps_the_frame() {
+        let mut h = H::new();
+        make_label(&mut h, pt(100, 100), "abc");
+        let before = h.a.shapes()[0].clone();
+        let Shape::Label { a, b, size, .. } = before.clone() else {
+            panic!()
+        };
+        h.a.use_tool(Tool::Select, 96);
+        select_at(&mut h, pt(110, 110));
+        assert_eq!(h.a.style_view(96).unwrap().font_px, size);
+        click_style(&mut h, StyleCell::FontSize(1));
+        match &h.a.shapes()[0] {
+            Shape::Label {
+                a: a1,
+                b: b1,
+                size: s1,
+                text,
+                ..
+            } => {
+                assert_eq!((*a1, *b1), (a, b));
+                assert_eq!(*s1, size + 2.0);
+                assert_eq!(text, "abc");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(h.a.style_view(96).unwrap().font_px, size + 2.0);
+        h.a.undo(96);
+        assert_eq!(h.a.shapes()[0], before, "một bước hoàn tác");
+        assert_eq!(h.a.shapes().len(), 1);
+    }
+
+    #[test]
+    fn font_row_is_independent_of_the_frame_and_the_level_still_resizes_text() {
+        let mut h = H::new();
+        make_label(&mut h, pt(100, 100), "abc");
+        h.a.use_tool(Tool::Select, 96);
+        select_at(&mut h, pt(110, 110));
+        click_style(&mut h, StyleCell::FontSize(1));
+        let (_, b0) = frame_of(&h.a, 0);
+        let grip = pt(b0.x as i32, b0.y as i32);
+        h.gesture(grip, pt(grip.x + 50, grip.y + 30));
+        assert_eq!(label_size(&h.a, 0), 20.0, "kéo khung không đổi cỡ chữ");
+        // Chọn mức Cỡ vẫn đổi cỡ chữ của hình đang chọn và xóa số riêng.
+        h.a.set_size(SizeLevel::Huge, 96);
+        assert_eq!(label_size(&h.a, 0), SizeLevel::Huge.text_dip());
+        assert_eq!(h.a.prefs().font_px, None);
     }
 }

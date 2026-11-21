@@ -294,6 +294,7 @@ messages! {
     StyleOpacity => ("Độ trong suốt", "Opacity"),
     StyleNoBorder => ("Không viền", "No border"),
     StyleRadius => ("Bo góc (px)", "Corner radius (px)"),
+    StyleFontSize => ("Cỡ chữ (px)", "Font size (px)"),
     StylePanelToggle => ("Thu gọn hoặc mở bảng", "Collapse or expand the panel"),
     HighlightFreehand => ("Tự do", "Freehand"),
     HighlightRect => ("Hình chữ nhật", "Rectangle"),
@@ -1095,6 +1096,7 @@ mod tests {
             (Msg::StyleOpacity, "Độ trong suốt", "Opacity"),
             (Msg::StyleNoBorder, "Không viền", "No border"),
             (Msg::StyleRadius, "Bo góc (px)", "Corner radius (px)"),
+            (Msg::StyleFontSize, "Cỡ chữ (px)", "Font size (px)"),
             (
                 Msg::StylePanelToggle,
                 "Thu gọn hoặc mở bảng",
